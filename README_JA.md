@@ -16,7 +16,7 @@
 erak-engine は、ごくありふれた願いから始まりました：エミュレータを介さず、Android で
 EraTW をネイティブに遊びたい。[eratw-pocket](https://github.com/Poboking/eratw-pocket)
 はその答えで、本エンジンを使って作った最初の Android ネイティブ版 EraTW
-（上流：画蛇添足版 4.980）です。一部のローエンド端末ではエミュレータより快適に
+（上流：画蛇添足版 4.981）です。一部のローエンド端末ではエミュレータより快適に
 動きます。エンジン自体はゲームデータを一切含まず、デスクトップ・サーバー・CI の
 いずれでも独立してビルド・実行できます。
 
@@ -50,8 +50,13 @@ EraTW をネイティブに遊びたい。[eratw-pocket](https://github.com/Pobo
 |---|---|
 | `core-vm` | ERA セマンティック VM：ERB バイトコード実行、変数・キャラクター、セーブ I/O、組み込み関数、SFMT 乱数、パッチ / Mod ランタイム |
 | `render` | 純 JVM レンダリング：グリフキャッシュ、テキストグリッド、ボタン当たり判定、ディスプレイリスト、グラフィックレイヤー |
+| `sqlite-adapter` | `SqlDriver` ポートの AndroidX SQLite アダプタ：同梱 seed DB を書き込み可能なコピーに落とし、原子リフレッシュ（SQLite 実エンジンのプラットフォーム接続） |
+| `mod-api` | RT2 Mod SDK の API 面：エンティティ / イベント / 関数 / Hook などの宣言とホストコンテキスト |
+| `mod-family` / `mod-memory` / `mod-livingworld` | 内蔵公式 Mod：家族系譜・記憶・生界（同梱 manifest の真のソース） |
 | `tools/erbcc` | ERB / ERH → `erbc.v1` バイトコードコンテナコンパイラ。コーパスコンパイル・シンボル監査・Rust 対拍接続を含む |
 | `tools/erbcc-rs` | erbcc の Rust 側実装（Cargo プロジェクト）。Kotlin コンパイラとのバイト単位対拍用 |
+| `tools/modgen` | RT2 モジュール / manifest ジェネレータ（内蔵 Mod とデモモジュールのビルド入口） |
+| `tools/modgen-accessors` | modgen 宣言 → 型安全アクセサのコード生成 |
 | `tools/vmdbg` | エージェント向け非対話デバッグ CLI：call / trace / where / var / disasm / sweep / ledger |
 | `tools/uipreview` | デスクトップ描画プレビュー：実物の core-vm + render を駆動し、ブラウザで画面を確認 |
 | `tools/fontsubset` | フォントサブセット再生成スクリプト（Python）。`render/src/main/resources/fonts` の保守用 |
@@ -72,11 +77,13 @@ JDK 17 以上が必要です。コマンドはすべてリポジトリのルー�
 ./gradlew :tools:vmdbg:installDist  # デバッグ CLI
 ```
 
-CI と同等のコマンド（5 モジュールをまとめて実行）：
+CI と同等のコマンド（12 モジュールをまとめて実行）：
 
 ```bash
 ./gradlew --no-daemon \
-  :core-vm:test :render:test :tools:erbcc:test \
+  :core-vm:test :render:test :sqlite-adapter:test \
+  :mod-api:test :mod-family:test :mod-memory:test :mod-livingworld:test \
+  :tools:erbcc:test :tools:modgen:test :tools:modgen-accessors:test \
   :tools:vmdbg:test :tools:uipreview:test
 ```
 
@@ -115,7 +122,8 @@ cargo build --release --manifest-path tools/erbcc-rs/Cargo.toml
 erak-engine（本リポジトリ、MIT）  eratw-pocket（GPL-3.0）
 ├── core-vm   ←─────────────     ├── render-canvas
 ├── render    ←─────────────     ├── platform
-└── tools/erbcc                  └── app（Compose シェル）
+├── sqlite-adapter / mod-*       └── app（Compose シェル）
+└── tools/erbcc
 ```
 
 eratw-pocket がゲームの意味論を一切知らないのは、意図的な設計です。スクリプトの

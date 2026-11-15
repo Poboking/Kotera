@@ -16,7 +16,7 @@
 erak-engine started from a plain wish: to play EraTW natively on Android instead of
 wrapping an emulator. [eratw-pocket](https://github.com/Poboking/eratw-pocket) is
 the answer to that wish — the first native-Android EraTW client built on this
-engine (upstream: the EraTW fork 画蛇添足版 4.980), and it runs more smoothly than
+engine (upstream: the EraTW fork 画蛇添足版 4.981), and it runs more smoothly than
 the emulator on some low-end devices. The engine itself ships no game data and
 builds and runs standalone on desktop, server, and CI.
 
@@ -50,8 +50,13 @@ variables, loading, save format, RNG, patch container, and error texts. See
 |---|---|
 | `core-vm` | ERA semantic VM: ERB bytecode execution, variables & characters, save I/O, built-ins, SFMT RNG, patch / Mod runtime |
 | `render` | Pure-JVM rendering: glyph cache, text grid, button hit regions, display list, graphics layers |
+| `sqlite-adapter` | AndroidX SQLite adapter for the `SqlDriver` port: seeds bundled databases into writable copies with atomic refresh (platform wiring of the real SQLite engine) |
+| `mod-api` | RT2 Mod SDK API surface: entity / event / function / hook declarations and the host context |
+| `mod-family` / `mod-memory` / `mod-livingworld` | Built-in official Mods: family lineage, memory, living world (source of truth for the bundled manifests) |
 | `tools/erbcc` | ERB / ERH → `erbc.v1` bytecode container compiler; corpus compilation, symbol audit, Rust parity wiring |
 | `tools/erbcc-rs` | Rust-side erbcc implementation (Cargo project) used for byte-for-byte parity against the Kotlin compiler |
+| `tools/modgen` | RT2 module / manifest generator (build entry for the built-in and demo Mods) |
+| `tools/modgen-accessors` | Codegen from modgen declarations to type-safe accessors |
 | `tools/vmdbg` | Non-interactive, agent-oriented debug CLI: call / trace / where / var / disasm / sweep / ledger |
 | `tools/uipreview` | Desktop render preview: drives the real core-vm + render, viewable in a browser |
 | `tools/fontsubset` | Font subsetting scripts (Python) that maintain `render/src/main/resources/fonts` |
@@ -72,11 +77,13 @@ Requires JDK 17+. Run all commands from the repository root.
 ./gradlew :tools:vmdbg:installDist  # debug CLI
 ```
 
-The CI-equivalent command runs all five modules:
+The CI-equivalent command runs all twelve modules:
 
 ```bash
 ./gradlew --no-daemon \
-  :core-vm:test :render:test :tools:erbcc:test \
+  :core-vm:test :render:test :sqlite-adapter:test \
+  :mod-api:test :mod-family:test :mod-memory:test :mod-livingworld:test \
+  :tools:erbcc:test :tools:modgen:test :tools:modgen-accessors:test \
   :tools:vmdbg:test :tools:uipreview:test
 ```
 
@@ -116,7 +123,8 @@ See [tools/erbcc-rs/README.md](tools/erbcc-rs/README.md) for details.
 erak-engine (this repo, MIT)   eratw-pocket (GPL-3.0)
 ├── core-vm   ←────────────    ├── render-canvas
 ├── render    ←────────────    ├── platform
-└── tools/erbcc                └── app (Compose shell)
+├── sqlite-adapter / mod-*     └── app (Compose shell)
+└── tools/erbcc
 ```
 
 eratw-pocket knows nothing about game semantics — on purpose. The authoritative

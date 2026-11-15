@@ -16,7 +16,7 @@
 erak-engine 起源于一个朴素的需求：想在 Android 上原生地玩 EraTW，而不是套一层
 模拟器。[eratw-pocket](https://github.com/Poboking/eratw-pocket) 就是这个需求的
 答案——它是用本引擎做出来的第一个 Android 原生版 EraTW（上游：画蛇添足版
-4.980），在部分低端设备上比模拟器跑得更顺畅。引擎本身不包含任何游戏数据，在
+4.981），在部分低端设备上比模拟器跑得更顺畅。引擎本身不包含任何游戏数据，在
 桌面、服务端和 CI 上都能独立构建与测试。
 
 </div>
@@ -44,8 +44,13 @@ erak-engine 起源于一个朴素的需求：想在 Android 上原生地玩 EraT
 |---|---|
 | `core-vm` | ERA 语义虚拟机：ERB 字节码执行、变量与角色系统、存档读写、内建函数、SFMT 随机数、补丁 / Mod 运行时 |
 | `render` | 纯 JVM 渲染层：字形缓存、文本网格、按钮命中区、显示列表、图形层 |
+| `sqlite-adapter` | `SqlDriver` 端口的 AndroidX SQLite 适配器：随包 seed 库落成可写副本、原子刷新（SQLite 真实引擎的平台接线） |
+| `mod-api` | RT2 Mod SDK 的 API 面：实体 / 事件 / 函数 / Hook 等声明与宿主上下文 |
+| `mod-family` / `mod-memory` / `mod-livingworld` | 内置官方 Mod：家族谱系、记忆、生界（随包 manifest 的真源） |
 | `tools/erbcc` | ERB / ERH → `erbc.v1` 字节码容器编译器；含语料编译、符号审计与 Rust 对拍接线 |
 | `tools/erbcc-rs` | erbcc 的 Rust 侧实现（Cargo 工程），用于与 Kotlin 编译器做逐字节对拍 |
+| `tools/modgen` | RT2 模块 / manifest 生成器（内置 mod 与 demo 模块的构建入口） |
+| `tools/modgen-accessors` | modgen 声明 → 类型安全访问器的代码生成 |
 | `tools/vmdbg` | 面向 agent 的无交互调试 CLI：call / trace / where / var / disasm / sweep / ledger |
 | `tools/uipreview` | 桌面渲染预览：驱动真实的 core-vm + render，浏览器查看画面 |
 | `tools/fontsubset` | 字体子集再生成脚本（Python），维护 `render/src/main/resources/fonts` |
@@ -66,11 +71,13 @@ erak-engine 起源于一个朴素的需求：想在 Android 上原生地玩 EraT
 ./gradlew :tools:vmdbg:installDist  # 调试 CLI
 ```
 
-CI 等价命令（五个模块一起跑）：
+CI 等价命令（十二个模块一起跑）：
 
 ```bash
 ./gradlew --no-daemon \
-  :core-vm:test :render:test :tools:erbcc:test \
+  :core-vm:test :render:test :sqlite-adapter:test \
+  :mod-api:test :mod-family:test :mod-memory:test :mod-livingworld:test \
+  :tools:erbcc:test :tools:modgen:test :tools:modgen-accessors:test \
   :tools:vmdbg:test :tools:uipreview:test
 ```
 
@@ -109,7 +116,8 @@ cargo build --release --manifest-path tools/erbcc-rs/Cargo.toml
 erak-engine（本仓库，MIT）     eratw-pocket（GPL-3.0）
 ├── core-vm   ←────────────  ├── render-canvas
 ├── render    ←────────────  ├── platform
-└── tools/erbcc              └── app（Compose 壳层）
+├── sqlite-adapter / mod-*   └── app（Compose 壳层）
+└── tools/erbcc
 ```
 
 eratw-pocket 对游戏语义一无所知——这是有意为之。脚本行为、内建函数、存档格式
