@@ -20,6 +20,9 @@ pluginManagement {
 
 dependencyResolutionManagement {
     repositories {
+        // androidx.sqlite（:sqlite-adapter）在 Google Maven；阿里云 google 镜像作兜底/加速。
+        maven("https://maven.aliyun.com/repository/google")
+        google()
         // 阿里云 public 镜像（聚合 central+jcenter），主源不可达时兜底。
         maven("https://maven.aliyun.com/repository/public")
         mavenCentral()
@@ -29,8 +32,17 @@ dependencyResolutionManagement {
 rootProject.name = "erak-engine"
 
 include(":core-vm")
+// SQLite 迁移：纯 JVM 适配器（core 端口 ↔ AndroidX SQLite 通用 API），桌面走 bundled-jvm 驱动。
+include(":sqlite-adapter")
+// RT2 Kotlin Mod SDK：契约层 + 三个参考实现（mod 作者只依赖 :mod-api）。
+include(":mod-api")
+include(":mod-family")
+include(":mod-memory")
+include(":mod-livingworld")
 include(":render")
 include(":tools:erbcc")
+include(":tools:modgen")
+include(":tools:modgen-accessors")
 include(":tools:vmdbg")
 include(":tools:uipreview")
 // :tools:fontsubset 是纯 Python 工具目录（字体内子集再生成），不是 Gradle 模块。

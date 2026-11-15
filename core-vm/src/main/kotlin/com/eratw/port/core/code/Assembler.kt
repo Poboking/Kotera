@@ -414,6 +414,13 @@ private class Parser(
                 b.emit(op, e, 0, 0, currentLine)
             }
 
+            // 循环条件融合（247/248）：左槽、右槽、跳转目标（标签或原始偏移，写 c）。
+            Opcode._LT_JZ, Opcode._GT_JZ -> {
+                expectOps(ops, 3, Opcode.nameOf(op))
+                val pc = b.emit(op, slot(ops[0]), slot(ops[1]), 0, currentLine)
+                jumpOperand(pc, 3, ops[2])
+            }
+
             else -> fail("未支持的扩展指令: ${Opcode.nameOf(op)}")
         }
     }

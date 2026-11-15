@@ -318,24 +318,51 @@ class VmExecutionTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `除零抛 CodeEE 并带源码行号`() {
+    fun `VM 自抛错误带源码行号`() {
+        // 探针从「整数零除」换成「MinValue / -1 溢出」：4.981 SafeArithmetic 把整数零除
+        // 改成钳制后已不抛错，但「VM 自抛错误补函数/行现场」这条验收面必须继续钉住。
+        // 溢出是 .NET 唯一会抛的整除（OperatorMethodManager.cs:136），本轮未改。
         val vm = vmOf(
             """
-            _SET_INT R0, 1
-            _SET_INT R1, 0
+            _SET_INT R0, -9223372036854775808
+            _SET_INT R1, -1
             _DIV R2, R0, R1
             """,
         )
         val e = assertFailsWith<CodeEE> { vm.run() }
         assertEquals(3, e.line)
         assertEquals("main", e.funcName)
-        assertEquals("除数为0的除法运算", e.message, "Error.DivideByZero 逐字（Lang.cs:1326 / zhs 两表同文）")
+        assertEquals("除算溢出：-9223372036854775808 / -1", e.message)
     }
 
     @Test
-    fun `取余零同样抛 CodeEE`() {
-        val vm = vmOf("_MOD R2, R1, R0")
-        assertFailsWith<CodeEE> { vm.run() }
+    fun `除零与取余零都钳制为零并打警告`() {
+        // 4.981 SafeArithmetic.cs:67-84：b == 0 → PrintWarning + return 0，不再抛 CodeEE。
+        val divHost = StringHost()
+        val div = vmOf(
+            """
+            _SET_INT R0, 1
+            _SET_INT R1, 0
+            _DIV R2, R0, R1
+            _RET R2
+            """,
+            host = divHost,
+        )
+        assertEquals(0L, div.run())
+        assertEquals("零除: 1 / 0\n", divHost.output.toString())
+
+        val modHost = StringHost()
+        val mod = vmOf(
+            """
+            _SET_INT R0, 1
+            _SET_INT R1, 0
+            _MOD R2, R0, R1
+            _RET R2
+            """,
+            host = modHost,
+        )
+        assertEquals(0L, mod.run())
+        assertEquals("零除: 1 \\ 0\n", modHost.output.toString())
     }
 
     /**

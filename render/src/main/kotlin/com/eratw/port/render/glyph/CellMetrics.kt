@@ -1,6 +1,7 @@
 package com.eratw.port.render.glyph
 
 import com.eratw.port.render.Grid
+import kotlin.math.roundToInt
 
 /**
  * 像素 ↔ 半角格 换算 —— **真机折行的唯一宽度来源**。
@@ -174,6 +175,33 @@ class CellMetrics(
         return scaled
     }
 
+
+    /**
+     * **设备像素 → 脚本像素**（[scriptPixels] 的同尺逆算，度量单源化的反折入口，2026-11-13）。
+     *
+     * 折算比与 [scriptPixels] 同源：`k = 真机字号 / 脚本字号`；本函数做逆方向
+     * `脚本px = 设备px / k`，**四舍五入**（`roundToInt`）—— 与消费方
+     * `CanvasConsoleView.windowWidthScriptPx()` 的既有语义逐值一致（回填层要的是最接近的
+     * 脚本 px 读数；与正向的「先乘后除向零截断」不同向是两边的固有行为，不许互相"修正"）。
+     *
+     * ## 为什么必须有这个入口（R5.2 的最后一块）
+     *
+     * 正向（[scriptPixels]）一直是唯一入口；反向此前只在 `windowWidthScriptPx()` 手写
+     * 一份 `layoutWidth / ratio` —— 「×k 与 ÷k 是同一把尺」只活在注释里。谁改了尺的
+     * 定义（比如字号链换算改成行高比例），正向跟着走、反向就分叉成第二把尺：0.2.43 的
+     * `WindowX` 回填分叉正是这个形状。现在两个方向都钉在本类，尺的定义改动两处同批。
+     *
+     * @param devicePx 设备像素读数（负数原样除 —— 调用方负数语义自行保证）
+     * @param scriptFontPixelSize 脚本坐标系的基准字号（= 引擎生效 `Config.FontSize`）；
+     *   0/负数或与 [fontPixelSize] 相等 = 不折算（恒等）
+     */
+    fun scriptPixelsInverse(devicePx: Int, scriptFontPixelSize: Int): Int {
+        if (scriptFontPixelSize <= 0 || scriptFontPixelSize == fontPixelSize) {
+            return devicePx
+        }
+        val ratio = fontPixelSize.toFloat() / scriptFontPixelSize
+        return (devicePx / ratio).roundToInt()
+    }
     /**
      * 单个**码位**的半角格宽（宽度模型的唯一入口，委托 [Grid.cellWidth]）。
      *

@@ -129,7 +129,13 @@ object ConfigSpecTable {
         intSpec(ConfigKey.FPS, "フレーム毎秒", "FPS", 5, 1..240), // :72
         intSpec(ConfigKey.SkipFrame, "最大スキップフレーム数", "Skip frames", 3), // :73
         intSpec(ConfigKey.ScrollHeight, "スクロール行数", "Lines per scroll", 1, 1..10), // :74
-        intSpec(ConfigKey.InfiniteLoopAlertTime, "無限ループ警告までのミリ秒数", "Milliseconds for infinite loop warning", 5000, 0..100000), // :75
+        // :75 —— GUI 值域上限本仓放宽到 600000（10 分钟）：官方 `numericUpDown10` 的
+        // 0..100000 是桌面标定（5 s 阈值够用），安卓一条合法长链就要 130 s，玩家得能往
+        // 上调到有余量的档位。**只放宽这一项**，其余条目的值域一字不动；缺省仍是官方 5000
+        // （不贴上限：贴上限会让玩家再想调高时无处可去，设置页还会显示一个被夹的数）。
+        // 解析期仍无范围夹取（`ConfigItem.TryParse` 不做范围检查，见 `ConfigSpec.guiIntRange`
+        // 的 KDoc），所以这个区间只影响设置页的输入建议与显示。
+        intSpec(ConfigKey.InfiniteLoopAlertTime, "無限ループ警告までのミリ秒数", "Milliseconds for infinite loop warning", 5000, 0..600000), // :75
         intSpec(ConfigKey.DisplayWarningLevel, "表示する最低警告レベル", "Minimum warning level", 1), // :76 —— 对话框侧是下拉框（读 ConfigDialog.cs:817、写自 comboBox5.SelectedIndex 的 :1020），无 NumericUpDown 区间
         bool(ConfigKey.DisplayReport, "ロード時にレポートを表示する", "Display loading report", false), // :77
         enumSpec(ConfigKey.ReduceArgumentOnLoad, "ロード時に引数を解析する", "Reduce argument on load", ConfigEnumKind.REDUCE_ARGUMENT_ON_LOAD, "NO"), // :78

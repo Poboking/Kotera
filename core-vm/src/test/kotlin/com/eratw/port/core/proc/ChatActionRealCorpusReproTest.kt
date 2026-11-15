@@ -6,9 +6,7 @@ import com.eratw.port.core.code.VmConfig
 import com.eratw.port.core.compile.ErbProgramCompiler
 import com.eratw.port.core.compile.ExprCallTable
 import com.eratw.port.core.compile.FuncSig
-import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.OperandType
-import com.eratw.port.core.fn.NativeParam
 import com.eratw.port.core.fn.nativeMethods
 import com.eratw.port.core.host.LineBufferConsoleSink
 import com.eratw.port.core.lexer.LineKind
@@ -22,7 +20,6 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions
 
@@ -38,25 +35,22 @@ import org.junit.jupiter.api.Assumptions
  * - 本钉：把真文件的 `@CHAT_ACTION` 事件本体逐行喂进真装载链（[LogicalLineReader] →
  *   [LineParser] → [ErbProgramCompiler] → [ProcessRuntime]）跑到底，变量声明也吃**真语料的
  *   `#DIM` 原文**（`AI返回参数.ERH` 12 行 + 事件头 5 行 `#DIMS DYNAMIC` + `DIM.ERH:701`
- *   的 `#DIM CONST C_RED`）。上报的三要素——文案、事件名、行号——全部由真语料本身产出，
- *   不是抄本：
- *   * 无桩一侧 = 收口前（0.2.39 / 构建 4899130）真机形态：`CodeEE.message`
- *     逐字 = `No native method ModelSet found`，`funcName` = `CHAT_ACTION`，`line` = 34
- *     （0 基逻辑行号，= 物理 `对话调用.erb:35`，与上报「行34」同口径）。
- *   * 有桩一侧 = 收口后（d06d55b2 的宿主桩语义）：整段事件跑完不抛，降级提示经
- *     `CALLSHARP Chat` 的变量实参回写（spec: FunctionIdentifier.cs:1219-1231）落到
- *     `返回对话`，并由真语料的 `PRINTFORML %返回对话%`（物理 :38）打在屏上。
- *     **这一侧同时是本钉抓出的第二发缺陷面**：d06d55b2 装上桩后真语料仍然炸在同一句 ——
- *     `ModelSet` 的三个实参在 `AI返回参数.ERH:6-8` 是 `#DIMS CONST`，官方回写环对常量
- *     不豁免（FunctionIdentifier.cs:1219-1231 → VariableTerm.cs:108-152 → VariableData.cs:1617-1621
- *     无常量闸），而移植侧存储层有闸（UserVariables.kt:1925/:1957）⇒ 报错只从
- *     「No native method ModelSet found」换成「变量 模型API 是常量，不能赋值」。
- *     手抄夹具的 [AiChatSharpStubTest] 把这三个量建成了**非 const** 用户变量，因此照不到；
- *     修点 = 存储层常量闸的相位（B5 已删，见 `StatementExecutor.writeBackNativeArg` 的 KDoc：
- *     官方存储层无常量闸、拦截在解析期）。
- *     上报的抛点行号在上报构建（0.2.39 = 4899130-dirty，早于 d06d55b2）里就是「No native method」
- *     那一发；本钉按 **0 基逻辑行号** 断言 `CodeEE.line == 34`（= 物理 :35），若后续波次把
- *     上报行号换成 1 基口径，`REPORTED_LINE` 要跟着挪。
+ *   的 `#DIM CONST C_RED`）。上报原文与落点行号全部由真语料本身产出，不是抄本：
+ *   * 无桩一侧 = 上报簇 9bcc9efd 的**修复后形态**（通用策略，2026-11-09；有意偏离 ADR-005，
+ *     登记见 `specs/verify-notes.md` §35）：官方在此抛 `CodeEE` 中断脚本，本移植版改为把
+ *     同一句 `No native method ModelSet found` 打一行错误行后跳过；事件继续跑到物理 :36
+ *     的第二条 `CALLSHARP Chat`（同样提示）—— 两条顺序都在 ⇒ 脚本没被打断。
+ *   * 策略缺席一侧 = PLUGIN-POLICY（2026-11-07）后的生产形态：目录内名字（宿主
+ *     `PluginPolicyCatalog` 打 `markPolicyAbsent`）装载不警告、执行整句空转 ⇒ 整段事件
+ *     跑完不抛、屏面零噪声，`返回对话` 保持原值；宿主桩时代私加的降级提示已随桩链拆除
+ *     （46dd382e），本波钉死它不再回屏。
+ *     历史注记：桩时代这一侧曾抓出第二发缺陷面 —— `ModelSet` 三实参是真语料
+ *     `#DIMS CONST`（AI返回参数.ERH:6-8），移植侧存储层曾有常量闸（B5 已删），桩装上后
+ *     报错换成「变量 模型API 是常量，不能赋值」；策略缺席语义下该行整体不执行，常量位
+ *     自然原值，常量闸相位仍由 `CallSharpConstWriteBackTest` 独立钉住。
+ *     上报的抛点行号在上报构建（0.2.39 = 4899130-dirty）里就是「No native method」
+ *     那一发；本钉按 **0 基逻辑行号** 定位 `REPORTED_LINE == 34`（= 物理 `对话调用.erb:35`），
+ *     若后续波次挪动语料行号口径，这个常量要跟着改。
  *
  * ## 两处有意简化（越界处不假装）
  *
@@ -92,10 +86,6 @@ class ChatActionRealCorpusReproTest {
         const val REPORTED_MESSAGE = "No native method ModelSet found"
         const val REPORTED_EVENT = "CHAT_ACTION"
         const val REPORTED_LINE = 34
-
-        /** 宿主桩的降级文案 = app `ShellFailureCopy.kt:263` 与 [AiChatSharpStubTest] 同源。 */
-        const val AI_REPLY_UNAVAILABLE =
-            "（AI对话功能在本版不可用：移植版未内置AI插件，无法调用模型接口）"
     }
 
     // ------------------------------------------------------------------
@@ -235,16 +225,13 @@ class ChatActionRealCorpusReproTest {
         assertTrue(result.declared >= 12, "登记条数异常（实得 ${result.declared}）")
     }
 
-    /** app `GameHost.wireCorpusNativeMethods`（:2197-2209）的逐字复刻。 */
-    private fun registerHostStubs(store: VariableStore) {
-        val registry = nativeMethods(store.aux)
-        registry.register("ModelSet") { _: Array<NativeParam> -> }
-        registry.register("Chat") { params: Array<NativeParam> ->
-            for (p in params) {
-                p.intValue = 0
-                p.strValue = AI_REPLY_UNAVAILABLE
-            }
-        }
+    /**
+     * app `GameHost.wireCorpusNativeMethods` 打策略缺席位的逐字复刻（PLUGIN-POLICY，
+     * 2026-11-07）：目录内容 = app `PluginPolicyCatalog` 的 4.981 档（AI对话补丁 ⇒
+     * `ModelSet` + `Chat`）。
+     */
+    private fun markPolicyAbsent(store: VariableStore) {
+        nativeMethods(store.aux).markPolicyAbsent(listOf("ModelSet", "Chat"))
     }
 
     private fun runtime(store: VariableStore, program: Program, console: LineBufferConsoleSink) =
@@ -268,14 +255,14 @@ class ChatActionRealCorpusReproTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `真语料 CHAT_ACTION 跑到行34 撞上报原文（收口前形态）`() {
+    fun `真语料 CHAT_ACTION 未提供本机方法 打上报原文且不中断`() {
         val root = GameRoot981.erb()
         Assumptions.assumeTrue(root != null, "缺 4.981 语料根（ERATW_GAMEDIR / ERATW_CORPUS 都没指到 4.981）：跳过")
         val eventLines = chatActionEventLines(realLogicalLines(root!!, ERB_REL))
-        // 抛点自证：事件里第 34 号逻辑行就是上报的那一句（0 基，= 物理 :35）。
-        val throwLine = eventLines.firstOrNull { it.lineNo == REPORTED_LINE }
+        // 提示落点自证：事件里第 34 号逻辑行就是上报的那一句（0 基，= 物理 :35）。
+        val callLine = eventLines.firstOrNull { it.lineNo == REPORTED_LINE }
         assertTrue(
-            throwLine != null && throwLine.content.startsWith("CALLSHARP ModelSet("),
+            callLine != null && callLine.content.startsWith("CALLSHARP ModelSet("),
             "行号口径漂移：${eventLines.map { "${it.lineNo}:${it.content}" }}",
         )
 
@@ -285,41 +272,46 @@ class ChatActionRealCorpusReproTest {
         // （`#DIMS` 在本池是「1 维字符串数组」，按名读必须显式给 0 号下标 —— 脚本侧的
         // `模型API` 由表达式层补隐式 0，见 core/expr/Parser.kt 的 int1D/str1D 口径。）
         assertTrue(store.readStr("模型API", longArrayOf(0)).isNotEmpty(), "CONST 初值没吃到：语料口径变了")
-        val rt = runtime(store, compile(eventLines), LineBufferConsoleSink(136, 25, 900))
-        val e = assertFailsWith<CodeEE> { rt.execute() }
-        assertEquals(REPORTED_MESSAGE, e.message, "上报文案必须由真语料 + 真链原样产出")
-        assertEquals(REPORTED_EVENT, e.funcName, "事件名")
-        assertEquals(REPORTED_LINE, e.line, "行号（0 基逻辑行，与上报「行34」同口径）")
+        val console = LineBufferConsoleSink(136, 25, 900)
+        // 通用策略（2026-11-09）：不抛 —— 上报那一发在这里变成「一行错误行 + 跳过」。
+        runtime(store, compile(eventLines), console).execute()
+        val errors = console.snapshot().flatMap { it.segments }
+            .filter { it.kind == LineBufferConsoleSink.Kind.ERROR }
+            .map { it.text }
+        // 两句按语料顺序都在 ⇒ **脚本没在第一条 CALLSHARP 就被打断**（第二句在物理 :36，
+        // 走得到就证明第一条只被跳过、没中断整个事件）。
+        assertEquals(
+            listOf(REPORTED_MESSAGE, "No native method Chat found"),
+            errors,
+            "上报文案必须由真语料 + 真链原样产出",
+        )
     }
 
     @Test
-    fun `宿主桩语义下真语料 CHAT_ACTION 整段跑完且提示上屏`() {
+    fun `策略缺席语义下真语料 CHAT_ACTION 整段跑完且屏面零噪声`() {
         val root = GameRoot981.erb()
         Assumptions.assumeTrue(root != null, "缺 4.981 语料根（ERATW_GAMEDIR / ERATW_CORPUS 都没指到 4.981）：跳过")
         val eventLines = chatActionEventLines(realLogicalLines(root!!, ERB_REL))
         val store = freshStore(root, eventLines)
-        registerHostStubs(store)
-        // 本钉的第二发缺陷面（d06d55b2 只修了一半）：`CALLSHARP ModelSet(模型API, 模型Key, 模型名称)`
-        // 的三个实参在真语料里是 `#DIMS CONST`（AI返回参数.ERH:6-8），而官方回写环对常量不豁免
-        // （spec: FunctionIdentifier.cs:1219-1231 → VariableTerm.cs:108-152 → VariableData.cs:1617-1621
-        // 移植侧存储层曾有常量闸（UserVariables.kt 的 StaticInt/StaticStrUserVar 写口），照抄回写会
-        // 当场抛「变量 模型API 是常量，不能赋值」⇒ 宿主桩装上后补丁页照样在每次行动结束炸。
-        // B5（2026-11-07）删掉了那道闸（官方存储层本就无常量闸，拦截在解析期）：现在回写照官方逐字执行，
-        // 本用例的三槽因此由「跳过的常量位」改为「宿主方法本体不改常量槽」保持原值 ——
-        // 常量位可写这件事本身由 `CallSharpConstWriteBackTest` 用故意改写的本地方法钉住。
+        markPolicyAbsent(store)
+        // 策略缺席（PLUGIN-POLICY，2026-11-07）= 生产形态：目录内名字整句空转 ——
+        // 不抛（用例 1 是通用策略：错误行 + 跳过；本用例连错误行都不出）、不求实参、不回写。`模型API` 三槽是真语料
+        // `#DIMS CONST`（AI返回参数.ERH:6-8），空转不碰它们 ⇒ 原值；常量闸相位本身由
+        // `CallSharpConstWriteBackTest` 独立钉住，与本用例无关。
         val modelApiBefore = store.readStr("模型API", longArrayOf(0))
         assertTrue(modelApiBefore.isNotEmpty(), "CONST 初值没吃到：语料口径变了")
+        val returnedBefore = store.readStr("返回对话", longArrayOf(0))
         val console = LineBufferConsoleSink(136, 25, 900)
         runtime(store, compile(eventLines), console).execute()
 
-        // 回写通道：Chat 的出参落进 返回对话（真事件头 #DIMS DYNAMIC 登记的那一条）。
-        assertEquals(AI_REPLY_UNAVAILABLE, store.readStr("返回对话", longArrayOf(0)))
-        assertEquals(modelApiBefore, store.readStr("模型API", longArrayOf(0)), "ModelSet 本体不改这三个常量槽 ⇒ 回写后原值")
-        // 屏面：真语料的 PRINTFORML %返回对话%（物理 :38）把提示打出来 —— 玩家看得见的收口。
+        // 出参保持原值：CALLSHARP Chat 整句没发生过。
+        assertEquals(returnedBefore, store.readStr("返回对话", longArrayOf(0)), "空转不回写出参")
+        assertEquals(modelApiBefore, store.readStr("模型API", longArrayOf(0)), "空转不碰常量槽")
+        // 屏面零噪声：PRINTFORML %返回对话%（物理 :38）打出的是原值（空串 ⇒ 空行），
+        // 全屏不得出现官方报错或任何降级文案残留。
         val printed = console.lines().map { console.textOf(it) }
-        assertTrue(
-            printed.any { AI_REPLY_UNAVAILABLE in it },
-            "降级提示没上屏，屏面：$printed",
-        )
+        assertTrue(printed.none { "No native method" in it }, "官方报错不得上屏（策略位只在执行期拦截），屏面：$printed")
+        assertTrue(printed.none { "不可用" in it || "AI对话功能" in it }, "降级文案不得回屏，屏面：$printed")
+        assertTrue(printed.all { it.isBlank() }, "空转语义下屏面只剩语料自己的空行，实得：$printed")
     }
 }

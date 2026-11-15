@@ -2,162 +2,276 @@ package com.eratw.port.core.sql
 
 import com.eratw.port.core.err.CodeEE
 
+/** `RuntimeAux` 里 SQL 会话的槽名（原版 `GlobalStatic.SqlManager` 的对应物）。 */
+internal const val SQL_AUX_SLOT = "sql"
+
+/** `SQL_EXECUTE_NONQUERY` 对结果集（`columnCount > 0`）的返回值：Microsoft.Data.Sqlite 口径。 */
+private const val SELECT_NONQUERY_RESULT = -1L
+
 /**
- * 窄子集 SQL 引擎的**会话侧状态**（连接表 / 内存库 / reader 句柄表）。
+ * SQL 单元格的四态值。真实 SQLite 的存储类经 [SqlConnection] 端口折成这四档：
+ * `INTEGER` 进 [VInt]，`FLOAT` 进 [VFloat]，`TEXT` 进 [VText]，`NULL` 进 [VNull]。
  *
- * 上游自加的 SQL 内建（`画蛇又添足版自改emuera相关说明.txt:22-30`、`:249-256`）在 .NET 侧
- * 由 `SqlManager` 持有 `SQLiteConnection` 与 `SQLiteDataReader`；移植侧**不解析 SQLite 文件格式**
- * （契约硬约束：plugins 目录下的 db 文件只是缓存），改用内存库，状态全部挂在
- * `store.aux` 的 `"sql"` 槽（铁律 4：禁静态可变全局；`RuntimeAux.clear()` 即原版
- * `GlobalStatic.Reset()` 里的 `SqlManager.CloseAll()`，见自改说明 :258-259）。
- *
- * 连接名 → 库的映射按语料实际写法：
- * - `SQL_CONNECT "QOL_DISH_DB", "Data Source=plugins/qol_data.db"`（qol_item.ERB:64 等）
- * - `SQL_CONNECT GRAPH_DB_NAME, "Data Source=plugins/qol_data.db"`（qol_graph_init.ERB:37，
- *   而 `#DIMS CONST GRAPH_DB_NAME = "QOL_DISH_DB"`，qol_graph.ERH:21）
- * - `SQL_CONNECT "IMG_INDEX_DB", "Data Source=plugins/img_index.db"`（qol_tachie.ERB:35）
- * - `SQL_CONNECT "PORTRAIT_MAP_DB", "Data Source=plugins/portrait_map.db"`（qol_portrait_map.ERB:41）
- * - `SQL_CONNECT "TR_DB"`（qol_db.ERB:60，无 Data Source，随后的表由 SQL_IMPORT_MAP_XML 灌入）
- * 同一个 Data Source 的多个连接名指向**同一份内存库**（真实 SQLite 下是同一个文件），
- * 所以 `QOL_DISH_DB` 与 `GRAPH_DB_NAME` 看到的是同一组表。
+ * `BLOB` 本波仍按驱动文本折进 [VText]（`CONTRACT-SQLITE-MIGRATION` §2；blob 波再扩类型）。
+ * 四态是**不可变**的，reader 每次读列都新建一个实例。
  */
 internal sealed class SqlValue {
     data class VInt(val v: Long) : SqlValue()
+    data class VFloat(val v: Double) : SqlValue()
     data class VText(val v: String) : SqlValue()
     object VNull : SqlValue()
 
     /** 文本形态（`GET_STRING` / `SCALAR_STRING` 用；null 折成空串）。 */
     fun asText(): String = when (this) {
         is VInt -> v.toString()
+        is VFloat -> v.toString()
         is VText -> v
         VNull -> ""
     }
 }
 
-/** 列类型亲和性（SQLite 的 affinity 规则，只保留语料用到的三档）。 */
-internal enum class SqlAffinity { INTEGER, TEXT, NONE }
-
-internal class SqlColumn(
-    val name: String,
-    val affinity: SqlAffinity,
-    val notNull: Boolean = false,
-    val default: SqlValue? = null,
-)
-
 /**
- * 一张内存表。`rows` 每行长度恒等于 `columns.size`；单元格三态 [SqlValue]。
+ * 每 VM 一份的 SQL 会话：连接名表 + reader 句柄表，执行面全部走 [SqlDriver] 端口。
  *
- * 主键 [keyColumns] 决定 `INSERT OR REPLACE` 与 `ON CONFLICT` 的冲突判定
- * （单列 `PRIMARY KEY` 或表级 `PRIMARY KEY (a, b, ...)`）。
+ * 本类**不解析 SQL、不读 SQLite 文件**：`prepare` / `step` / `totalChanges` 等语义由注入的
+ * 平台驱动（Android bundled SQLite / 桌面 JVM SQLite）兑现。旧自研引擎状态一律不经本类。
+ *
+ * 状态由 `BuiltinContext.store.aux` 的 [SQL_AUX_SLOT] 槽持有（铁律 4：禁静态可变全局）；
+ * `RuntimeAux.clear()` 即原版 `GlobalStatic.Reset()` 里的 `SqlManager.CloseAll()`。
+ *
+ * ## 硬语义（契约 §2）
+ * - 连接名**大小写不敏感**；同名已存在时幂等返回，不重开、不改绑（上游 `SqlManager` 口径）。
+ * - 新连接 [connectionString] 为 null 时开 `:memory:`，否则把原串透传给驱动。
+ * - reader 句柄从 1 单调递增、关闭后**不复用**。
+ * - [executeNonQuery] 按 `totalChanges` 前后差取受影响行数，DDL 不得串用上一次 DML 的
+ *   `lastChanges`。
+ * - [close] 先关 reader 再关 connection，幂等；首个失败在所有关闭尝试后抛出。
  */
-internal class SqlTable(val name: String, val columns: MutableList<SqlColumn>) {
-    val rows: MutableList<MutableList<SqlValue>> = ArrayList()
-    var keyColumns: List<Int> = emptyList()
+@Suppress("TooManyFunctions")
+internal class SqlSession(private val driver: SqlDriver) : AutoCloseable {
+    /** 连接名（小写）→ 连接。同名连接只开一次，见 [connect]。 */
+    private val connections = HashMap<String, SqlConnection>()
 
-    /** 列名查找：SQLite 标识符不区分大小写（`CHARA_NO` 与 `chara_no` 同列）。 */
-    fun indexOf(columnName: String): Int? {
-        for (i in columns.indices) {
-            if (columns[i].name.equals(columnName, ignoreCase = true)) return i
-        }
-        return null
+    /** 句柄 → reader。句柄单调递增，关闭即删除。 */
+    private val readers = LinkedHashMap<Long, Reader>()
+
+    private var nextHandle = 1L
+    private var closed = false
+
+    /** 一条已 prepare 的 reader 语句；[hasRow] 记录最近一次 [readerRead] 是否落在有效行。 */
+    private class Reader(val statement: SqlStatement) {
+        var hasRow = false
     }
-}
-
-internal class SqlDatabase {
-    /** 表名小写 → 表。语料里建表用大写、查询可能小写，故一律折叠。 */
-    val tables = LinkedHashMap<String, SqlTable>()
-
-    fun table(name: String): SqlTable? = tables[name.lowercase()]
-
-    /** BEGIN/COMMIT 配对计数。内存实现里事务是空操作（见 [executeSql] 的 BEGIN/COMMIT 分支）。 */
-    var transactionDepth: Int = 0
-}
-
-/** 一次查询的快照游标。行在 [SQL_EXECUTE_READER] 执行时就拷好，后续写库不影响它。 */
-internal class SqlReader(val columns: List<String>, val rows: List<List<SqlValue>>) {
-    private var pos = -1
-
-    fun read(): Boolean {
-        pos += 1
-        return pos < rows.size
-    }
-
-    val current: List<SqlValue>? get() = if (pos in rows.indices) rows[pos] else null
-}
-
-/**
- * 每 VM 一份的 SQL 会话。**不是** object 单例（铁律 4）：由 `BuiltinContext.store.aux` 的
- * `"sql"` 槽创建，随运行时重置一起丢弃。
- */
-internal class SqlSession {
-    private val connections = HashMap<String, SqlDatabase>()
-    private val dataSources = HashMap<String, SqlDatabase>()
-    private val readers = HashMap<Int, SqlReader>()
-    private var nextHandle = 1
 
     /**
      * `SQL_CONNECT name[, "Data Source=path"]`。
      *
-     * 同名连接已存在且未给新连接串 → 复用（语料里每个 `@..._INIT` 都会重连一次，
-     * 重复 SQL_CONNECT 必须幂等）。带 Data Source 时按 **数据源路径**共享库。
+     * 同名（忽略大小写）已存在时直接返回，**不**重开、**不**改绑 —— 语料里每个
+     * `@..._INIT` 都会重连一次，重复 SQL_CONNECT 必须幂等；带不同 Data Source 的重连
+     * 也按上游 `SqlManager` 的先到先得口径处理。
+     *
+     * 驱动打开失败（[SqlNativeException]）不吞、不登记：S0 让它上抛，M1 负责包成 CodeEE。
      */
-    fun connect(name: String, connectionString: String?): SqlDatabase {
+    fun connect(name: String, connectionString: String?) {
         val key = name.lowercase()
-        val existing = connections[key]
-        if (connectionString == null && existing != null) return existing
-        val source = dataSourceOf(connectionString)
-        val db = when {
-            source != null -> dataSources.getOrPut(source.lowercase()) { SqlDatabase() }
-            existing != null -> existing
-            else -> SqlDatabase()
-        }
-        connections[key] = db
-        return db
+        if (connections.containsKey(key)) return
+        connections[key] = driver.open(connectionString ?: MEMORY_DATABASE)
     }
 
-    fun require(name: String, fn: String): SqlDatabase =
+    /**
+     * `SQL_CONNECTION_OPEN name`：在宿主 SQL 写根下重开 `<name>.db`。
+     *
+     * 与 [connect] 的幂等口径相反：同名连接已存在时**先关再开**（上游
+     * `SqlManager.ConnectionOpen` 的 `existingConn.Close()` 分支，`SqlManager.cs:26-31`）。
+     * `PRAGMA journal_mode = WAL` / `PRAGMA synchronous = NORMAL` 在登记前执行；任一步失败
+     * 都关闭新连接并把它从表里摘掉，避免留下半开连接（`SqlManager.cs:38-55`）。
+     *
+     * @param connectionString 已由函数层按宿主写根拼好的连接串（相对文件名）。
+     */
+    @Suppress("TooGenericExceptionCaught")
+    fun connectionOpen(name: String, connectionString: String) {
+        val key = name.lowercase()
+        connections.remove(key)?.close()
+        val database = driver.open(connectionString)
+        try {
+            executeNonQuery(database, "PRAGMA journal_mode = WAL")
+            executeNonQuery(database, "PRAGMA synchronous = NORMAL")
+        } catch (e: Throwable) {
+            runCatching { database.close() }
+            throw e
+        }
+        connections[key] = database
+    }
+
+    /**
+     * `SQL_DISCONNECT name`：关闭并移除命名连接；不存在时 no-op（`SqlManager.cs:86-94`）。
+     *
+     * reader 表不动：上游 `Disconnect` 只关连接，reader 的 Command/Reader 仍留在全局表里，
+     * 直到脚本显式 CLOSE 或 `CloseAll`（[close]）。
+     */
+    fun disconnect(name: String) {
+        connections.remove(name.lowercase())?.close()
+    }
+
+    /** 按名取连接；不存在抛 CodeEE（`SQL_EXECUTE_*` 族的「未连接」口径）。 */
+    fun require(name: String, fn: String): SqlConnection =
         connections[name.lowercase()]
             ?: throw CodeEE("函数 $fn：数据库连接 \"$name\" 不存在（先执行 SQL_CONNECT \"$name\"）")
 
     /**
      * 按名取连接；不存在返回 null（不抛错）。
      *
-     * 唯一消费者是 `SQL_IMPORT_MAP_XML`：spec 明文「dbName 未连接返回 0（不抛错）」
-     * （specs/builtin-functions.yaml 的 SQL_IMPORT_MAP_XML 段，source fork-src
-     * SqlManager.cs:285-339），与 `SQL_EXECUTE_*` 族的「未连接抛 CodeEE」不同轴。
+     * 唯一消费者是 `SQL_IMPORT_MAP_XML`：spec 明文「dbName 未连接返回 0（不抛错）」，
+     * 与 `SQL_EXECUTE_*` 族的「未连接抛 CodeEE」不同轴。
      */
-    fun find(name: String): SqlDatabase? = connections[name.lowercase()]
+    fun find(name: String): SqlConnection? = connections[name.lowercase()]
 
-    fun openReader(columns: List<String>, rows: List<List<SqlValue>>): Int {
+    /**
+     * 执行一条非查询语句并返回受影响行数。
+     *
+     * - `columnCount > 0`（误把 SELECT 交给 NONQUERY）：执行一步后返回 -1
+     *   （Microsoft.Data.Sqlite 的 `ExecuteNonQuery` 口径）；
+     * - 否则先读 [SqlConnection.totalChanges]，`step` 到结束再读一次：
+     *   只有读数**增长**时才取 [SqlConnection.lastChanges]。DDL 不改变 `total_changes`，
+     *   于是返回 0，不会把上一条 DML 的 `sqlite3_changes` 串进来。
+     */
+    fun executeNonQuery(
+        db: SqlConnection,
+        sql: String,
+        params: List<SqlBind> = emptyList(),
+    ): Long = db.prepare(sql).use { statement ->
+        bindAll(statement, params)
+        if (statement.columnCount > 0) {
+            statement.step()
+            SELECT_NONQUERY_RESULT
+        } else {
+            val before = db.totalChanges()
+            var hasNext = statement.step()
+            while (hasNext) {
+                hasNext = statement.step()
+            }
+            val after = db.totalChanges()
+            if (after > before) db.lastChanges() else 0L
+        }
+    }
+
+    /**
+     * 执行一条单值查询：`step` 一行，无行返回 null；首列按 [SqlColumnType] 映射成 [SqlValue]。
+     *
+     * `FLOAT` 进 [SqlValue.VFloat]；`BLOB` 本波用驱动文本折进 [SqlValue.VText]，等后续
+     * blob 波再扩类型（契约 §2 的显式口径）。
+     */
+    fun executeScalar(
+        db: SqlConnection,
+        sql: String,
+        params: List<SqlBind> = emptyList(),
+    ): SqlValue? = db.prepare(sql).use { statement ->
+        bindAll(statement, params)
+        if (statement.step()) readColumn(statement, 0) else null
+    }
+
+    /**
+     * 准备一条 reader 语句并登记句柄；句柄从 1 递增，关闭后不复用。
+     *
+     * 这里**不**推进第一行：`SQL_READER_READ` 才调 [readerRead]，与 fork 的
+     * `SQLiteDataReader.Read()` 逐次推进口径一致。
+     */
+    fun openReader(
+        db: SqlConnection,
+        sql: String,
+        params: List<SqlBind> = emptyList(),
+    ): Int {
+        val statement = db.prepare(sql)
+        val bindFailure = runCatching { bindAll(statement, params) }.exceptionOrNull()
+        if (bindFailure != null) {
+            runCatching { statement.close() }
+            throw bindFailure
+        }
         val handle = nextHandle
         nextHandle += 1
-        readers[handle] = SqlReader(columns, rows)
-        return handle
+        readers[handle] = Reader(statement)
+        return handle.toInt()
     }
 
-    /** 按句柄取 reader；不存在/已关闭返回 null（`SQL_READER_READ` 据 spec 返 0，不抛错）。 */
-    fun findReader(handle: Long): SqlReader? = readers[handle.toInt()]
-
-    /** 按句柄取 reader；不存在/已关闭抛 CodeEE（`GET_*`/`ISNULL` 据 spec 抛「无效的 Reader ID」）。 */
-    fun reader(handle: Long, fn: String): SqlReader =
-        findReader(handle) ?: throw CodeEE("函数 $fn：reader 句柄 $handle 不存在或已关闭")
-
-    fun closeReader(handle: Long) {
-        readers.remove(handle.toInt())
+    /** 推进 reader 一行；句柄不存在/已关闭返回 false（`SQL_READER_READ` 的 0 口径）。 */
+    fun readerRead(handle: Long): Boolean {
+        val reader = readers[handle] ?: return false
+        val hasRow = reader.statement.step()
+        reader.hasRow = hasRow
+        return hasRow
     }
 
-    /** `Data Source=...` 的取值；无 `=` 的连接串按纯路径处理（原版 `SQLiteConnection` 的宽容口径）。 */
-    private fun dataSourceOf(connectionString: String?): String? {
-        if (connectionString == null) return null
-        for (part in connectionString.split(';')) {
-            val eq = part.indexOf('=')
-            if (eq <= 0) continue
-            val key = part.substring(0, eq).trim().lowercase().replace(" ", "")
-            if (key == "datasource" || key == "filename") {
-                return part.substring(eq + 1).trim().ifEmpty { null }
-            }
+    /**
+     * 读当前行的第 [index] 列（0 基）。
+     *
+     * 无效句柄抛 CodeEE「无效的 Reader ID」（`GET_*` / `ISNULL` 的 spec 口径）；
+     * 有效句柄尚未 READ 到有效行时也抛 CodeEE —— 与原版 `SQLiteDataReader` 在 Read
+     * 之前取列即抛 `InvalidOperationException` 的形状一致，不静默返回 0/null。
+     */
+    fun readerValue(handle: Long, index: Int, fn: String): SqlValue {
+        val reader = readers[handle]
+            ?: throw CodeEE("函数 $fn：无效的 Reader ID：$handle")
+        if (!reader.hasRow) {
+            throw CodeEE("函数 $fn：Reader $handle 尚未 READ 到有效行")
         }
-        val whole = connectionString.trim()
-        return if (whole.isEmpty() || whole.contains('=')) null else whole
+        return readColumn(reader.statement, index)
+    }
+
+    /** 关闭并移除 reader；句柄不存在时 no-op（`SQL_READER_CLOSE` 重复关闭不中断脚本）。 */
+    fun closeReader(handle: Long) {
+        val reader = readers.remove(handle) ?: return
+        reader.statement.close()
+    }
+
+    /**
+     * 关闭全部 reader，再关闭全部连接；幂等。
+     *
+     * 单个 close 抛异常不阻断其余关闭：所有对象都尝试关完后，抛**第一个**失败
+     * （`close()` 的契约：异常按首个失败抛，但其余仍尝试关闭）。
+     */
+    override fun close() {
+        if (closed) return
+        closed = true
+
+        var firstFailure: Throwable? = null
+        val openReaders = readers.values.toList()
+        readers.clear()
+        for (reader in openReaders) {
+            val failure = runCatching { reader.statement.close() }.exceptionOrNull()
+            if (firstFailure == null) firstFailure = failure
+        }
+
+        val openConnections = connections.values.toList()
+        connections.clear()
+        for (connection in openConnections) {
+            val failure = runCatching { connection.close() }.exceptionOrNull()
+            if (firstFailure == null) firstFailure = failure
+        }
+
+        val firstThrown = firstFailure
+        if (firstThrown != null) throw firstThrown
+    }
+
+    private fun bindAll(statement: SqlStatement, params: List<SqlBind>) {
+        for (i in params.indices) {
+            statement.bind(i + 1, params[i])
+        }
+    }
+
+    /** 首列/单元格按存储类映射；NULL 优先于列类型判读（SQLite 的 NULL 无类型）。 */
+    private fun readColumn(statement: SqlStatement, index: Int): SqlValue {
+        if (statement.isNull(index)) return SqlValue.VNull
+        return when (statement.columnType(index)) {
+            SqlColumnType.INTEGER -> SqlValue.VInt(statement.getLong(index))
+            SqlColumnType.TEXT -> SqlValue.VText(statement.getText(index))
+            SqlColumnType.FLOAT -> SqlValue.VFloat(statement.getDouble(index))
+            SqlColumnType.BLOB -> SqlValue.VText(statement.getText(index))
+            SqlColumnType.NULL -> SqlValue.VNull
+        }
+    }
+
+    private companion object {
+        /** 无连接串时开的库（契约 §2：driver.open(":memory:")）。 */
+        const val MEMORY_DATABASE = ":memory:"
     }
 }

@@ -20,6 +20,7 @@ import com.eratw.port.core.expr.Unary
 import com.eratw.port.core.expr.UnaryAfter
 import com.eratw.port.core.expr.VarRef
 import com.eratw.port.core.proc.FuncMeta
+import com.eratw.port.core.patch.BaseSignatureCatalog
 import com.eratw.port.core.vars.DimParseConfig
 import com.eratw.port.core.vars.DimSpec
 import java.io.InputStreamReader
@@ -445,11 +446,18 @@ class BootMetadata(
          * 直接区分「文件缺/读不动」与「字节坏了」。两趟各开一条流，坏字节在哪趟撞上都是
          * 同一个失败口径。
          *
+         * **尾部旁路块容差（P15S）**：erbcc 写侧（M2-5 `SignatureExport.encodeSection`，
+         * 经 `BootMetaWriter` 第 5 参在生产 `cmdCompile` 落盘）会把 `signatures <N>`
+         * 签名段追加在 `end` 行之后 —— 该段是旁路数据、不进记录流，本函数两趟各包一层
+         * [BootMetaCodec.SignatureTailFilterReader] 把它剥掉（语义与 fail-closed 边界见
+         * 该类 KDoc；两趟同过滤 ⇒ `checkCount` 判界分母仍精确）。整文入口 [parse] 不认
+         * 旁路块（严格），面向手构文本与测试。
+         *
          * @throws BootMetaFormatException 文件不存在之外的任何格式问题（含非法 UTF-8）
          */
         fun read(path: Path): BootMetadata = try {
-            val total = strictReader(path).use { BootMetaCodec.countRecords(it) }
-            strictReader(path).use { reader -> BootMetaCodec.parseReader(reader, total) }
+            val total = SignatureTailFilterReader(strictReader(path)).use { BootMetaCodec.countRecords(it) }
+            SignatureTailFilterReader(strictReader(path)).use { reader -> BootMetaCodec.parseReader(reader, total) }
         } catch (e: CharacterCodingException) {
             // 严格解码失败：MalformedInputException / UnmappableCharacterException
             throw BootMetaFormatException(
@@ -551,11 +559,14 @@ private val OPERATOR_BY_NAME: Map<String, OperatorCode> = OperatorCode.entries.a
  * data-sections <S>                # 以下 datasec 行数
  * datasec <stmtIndex> <groups>     # groups = ((expr...) (expr...))
  * functions <N>
- * function <index> <defIndex> "<key>" "<name>" <flags> <argInt> <argStr> <localSize> <localsSize> [<floatLocalSize> [<returnsFloat>]] "<position>"
+ * function <index> <defIndex> "<key>" "<name>" <flags> <argInt> <argStr> <localSize> <localsSize>
+ *     [<floatLocalSize> [<returnsFloat>]] "<position>"
  * global-dims <N>
  * global-dim "<file>" <line> "<raw>"
  * private-dims <N>
- * private-dim "<funcKey>" "<name>" <isStr> <isConst> <isRef> <isGlobal> <isSavedata> <isCharaData> <isStatic> <isPrivate> <isFloat> <dimsCsv> (<defaultsIntCsv>|-|"") (<defaultsStrList>|-) [<defaultsFloat>]
+ * private-dim "<funcKey>" "<name>" <isStr> <isConst> <isRef> <isGlobal> <isSavedata> <isCharaData>
+ *     <isStatic> <isPrivate> <isFloat> <dimsCsv> (<defaultsIntCsv>|-|"") (<defaultsStrList>|-)
+ *     [<defaultsFloat>]
  * dim-config <systemSaveInBinary 0|1>
  * macros <N>
  * macro "<NAME>" "<body>"
@@ -586,9 +597,217 @@ private val OPERATOR_BY_NAME: Map<String, OperatorCode> = OperatorCode.entries.a
  * (binary <OP> <type> <line> <col> <left> <right>)
  * (tern <type> <line> <col> <cond> <ifTrue> <ifFalse>)
  * (form <line> <col> (<part>...))       part = ("t" "<text>") | ("e" <expr> <conv>)
- *                                       conv = (curly <width>|- <align>) | (percent <width>|- <align>) | (yenat <ifTrue> <ifFalse>)
+ *                                       conv = (curly <width>|- <align>) | (percent <width>|- <align>)
+ *                                       | (yenat <ifTrue> <ifFalse>)
  * ```
  */
+/**
+ * 尾部签名段剥离过滤器（P15S：M2-5 签名段的生产装载串联）。
+ *
+ * [BootMetadata.read] 两趟（计数/解析）各包一层本过滤器，把 `program.meta` 尾部的
+ * `signatures <N>` 旁路块（M2-5，写侧 = erbcc `SignatureExport.encodeSection`，经
+ * `BootMetaWriter` 第 5 参在生产 cmdCompile 落盘）从记录流里剥掉。段语法权威与
+ * fail-closed 判读归 `BaseSignatureCatalog`（消费方有界尾读既有链），本类只负责
+ * 「不让旁路块炸掉 end 闸」。剥离语义与生产写侧唯一形态严格对齐，fail-closed 不弱化：
+ * - `end` 行的**下一行**是 `signatures ` 段头 ⇒ 吞段头 + 吞其后**连续**的 `signature `
+ *   记录行；
+ * - 旁路中遇第一条非 `signature ` 行（含空行）⇒ 退出旁路并**透传**该行 ⇒ 既有 end 闸
+ *   按旧语义报「end 之后还有记录」，坏档不会被旁路块掩护；
+ * - `end` 与段头之间夹任何行（含空行）不容差 —— 严格相邻是生产写侧唯一形态；
+ * - 正文（`end` 前）出现 `signatures ` 行不经本类特判，照旧透传，由状态机按「期望 end」拒。
+ *
+ * 实现约束：零逐行分配（行缓冲与待发缓冲复用增长，照 [ReaderCursor] 口径）；按 LF
+ * 定界只做判别，透传字符（含行内与行尾 CR）逐字节保真，不改任何字符。被吞行不转发
+ * ⇒ 旁路块之后的行号相对原始文件前移，仅影响坏档诊断文案的行号（坏档本就被拒）。
+ */
+private class SignatureTailFilterReader(private val src: Reader) : Reader() {
+    companion object {
+        /** 行缓冲初始容量（复用缓冲起点；增长翻倍见 [readLineRaw]）。 */
+        private const val LINE_BUF_INIT = 256
+
+        /** `end` 行的 keyword 字面（[isEndKeywordLine] 与 bind 判据的同源字面）。 */
+        private const val END_KEYWORD = "end"
+    }
+
+    private val buf = CharArray(READ_CHUNK)
+    private var pos = 0
+    private var len = 0
+    private var eof = false
+
+    /** 待发给调用方的已决字符（复用增长）。 */
+    private var out = CharArray(READ_CHUNK)
+    private var outPos = 0
+    private var outLen = 0
+
+    /** 当前未决行的累积（LF 前的原始字符；判别完即清零复用）。 */
+    private var line = CharArray(LINE_BUF_INIT)
+    private var lineLen = 0
+
+    /** 上一行是 `end` ⇒ 当前行须判别是否段头（闸只管 end 的下一行）。 */
+    private var gateArmed = false
+
+    /** 已吞段头，正在吞 `signature ` 记录行。 */
+    private var inBypass = false
+
+    override fun read(cbuf: CharArray, off: Int, reqLen: Int): Int {
+        var result = 0
+        if (reqLen != 0) {
+            var drained = false
+            while (outPos >= outLen && !drained) {
+                drained = !pump() // 流尽且无残留行 ⇒ 结果停在 EOF 口径（-1）
+            }
+            result = if (outPos < outLen) {
+                val n = minOf(reqLen, outLen - outPos)
+                System.arraycopy(out, outPos, cbuf, off, n)
+                outPos += n
+                n
+            } else {
+                -1
+            }
+        }
+        return result
+    }
+
+    override fun close() {
+        src.close()
+    }
+
+    /** 决出下一批待发字符；流尽且无残留 ⇒ false。 */
+    private fun pump(): Boolean {
+        outPos = 0
+        outLen = 0
+        while (outLen == 0) {
+            val lineDone = readLineRaw()
+            if (!lineDone && lineLen == 0) return false // 流尽且无残留行
+            decide(lineDone)
+            lineLen = 0
+        }
+        return true
+    }
+
+    /** 读一行原始字符进 [line]（不含 LF）；返回是否遇到行界。流尽时残留行留在 [line]。 */
+    private fun readLineRaw(): Boolean {
+        var hitLf = false
+        while (!hitLf && !eof) {
+            if (pos >= len) {
+                len = src.read(buf)
+                pos = 0
+                if (len < 0) {
+                    eof = true
+                    len = 0
+                }
+            }
+            while (pos < len && !hitLf) {
+                val c = buf[pos++]
+                if (c == '\n') {
+                    hitLf = true
+                }
+                if (!hitLf && lineLen == line.size) {
+                    line = line.copyOf(lineLen * 2)
+                }
+                if (!hitLf) {
+                    line[lineLen++] = c
+                }
+            }
+        }
+        return hitLf
+    }
+
+    /** 对刚读完的一行做判别：吞或透传（透传时连同行界追加进待发缓冲）。 */
+    private fun decide(hadLf: Boolean) {
+        val startsSection = matchesPrefix(BaseSignatureCatalog.SECTION + " ")
+        val startsRecord = matchesPrefix(BaseSignatureCatalog.RECORD + " ")
+        var keep = true
+        when {
+            inBypass -> {
+                if (startsRecord) {
+                    keep = false // 继续吞记录行
+                } else {
+                    inBypass = false // 旁路结束：透传，交回既有 end 闸判死
+                }
+            }
+            gateArmed -> {
+                gateArmed = false // 闸只管 end 的下一行
+                if (startsSection) {
+                    keep = false
+                    inBypass = true
+                }
+            }
+            else -> {
+                if (isEndKeywordLine()) gateArmed = true
+            }
+        }
+        if (keep) appendLine(hadLf)
+    }
+
+    /** 行首是否恰为前缀（含前缀尾随空格；行内容不改写）。 */
+    private fun matchesPrefix(p: String): Boolean {
+        var matched = lineLen >= p.length
+        var i = 0
+        while (matched && i < p.length) {
+            matched = line[i] == p[i]
+            i++
+        }
+        return matched
+    }
+
+    /**
+     * 与 [bind] + `next("end")` 同判据的 `end` 行识别：keyword == "end" 且载荷全空白。
+     * keyword 提取照 [bind]：无空格 ⇒ 整行去两端空白；有空格 ⇒ 首个空格之前（不 trim）。
+     */
+    private fun isEndKeywordLine(): Boolean {
+        var sp = -1
+        for (i in 0 until lineLen) {
+            if (line[i] == ' ') {
+                sp = i
+                break
+            }
+        }
+        return if (sp < 0) keywordWithoutSpaceIsEnd() else keywordBeforeSpaceIsEnd(sp)
+    }
+
+    /** 无空格分支：整行去两端空白后判 keyword（bind 对无空格行取整行 trim 的口径）。 */
+    private fun keywordWithoutSpaceIsEnd(): Boolean {
+        var k0 = 0
+        while (k0 < lineLen && line[k0].isWhitespace()) k0++
+        var k1 = lineLen
+        while (k1 > k0 && line[k1 - 1].isWhitespace()) k1--
+        var matched = k1 - k0 == END_KEYWORD.length
+        var i = 0
+        while (matched && i < END_KEYWORD.length) {
+            matched = line[k0 + i] == END_KEYWORD[i]
+            i++
+        }
+        return matched
+    }
+
+    /** 有空格分支：首个空格之前（不 trim）判 keyword，其后载荷须全空白（含行尾 CR）。 */
+    private fun keywordBeforeSpaceIsEnd(sp: Int): Boolean {
+        var matched = sp == END_KEYWORD.length
+        var i = 0
+        while (matched && i < END_KEYWORD.length) {
+            matched = line[i] == END_KEYWORD[i]
+            i++
+        }
+        var blank = matched
+        var j = sp + 1
+        while (blank && j < lineLen) {
+            blank = line[j].isWhitespace()
+            j++
+        }
+        return blank
+    }
+
+    private fun appendLine(hadLf: Boolean) {
+        val extra = lineLen + if (hadLf) 1 else 0
+        val total = outLen + extra
+        if (total > out.size) out = out.copyOf(maxOf(out.size * 2, total))
+        System.arraycopy(line, 0, out, outLen, lineLen)
+        if (hadLf) out[outLen + lineLen] = '\n'
+        outLen = total
+    }
+}
+
 private object BootMetaCodec {
 
     // ------------------------------------------------------------------
@@ -1345,6 +1564,7 @@ private object BootMetaCodec {
         }
     }
 
+
     /**
      * 把一行原始文本绑成记录（[from]..[to) 含可能的行尾 CR）。
      *
@@ -1639,6 +1859,14 @@ private object BootMetaCodec {
             if (argStr < 0) throw failAt(r.lineNo, "function argStrCount 为负: $argStr")
             if (localSize < 0) throw failAt(r.lineNo, "function localSize 为负: $localSize")
             if (localsSize < 0) throw failAt(r.lineNo, "function localsSize 为负: $localsSize")
+            // 上界 = 官方 #LOCALSIZE/#LOCALSSIZE 合法域（spec: LogicalLineParser.cs:236-244：
+            // <=0 与 >= int.MaxValue 告警丢弃，其余原样写 LocalLength/LocalsLength）。
+            if (localSize >= Int.MAX_VALUE) {
+                throw failAt(r.lineNo, "function localSize 越官方合法域(0..int.MaxValue-1): $localSize")
+            }
+            if (localsSize >= Int.MAX_VALUE) {
+                throw failAt(r.lineNo, "function localsSize 越官方合法域(0..int.MaxValue-1): $localsSize")
+            }
             // v3 可选原子（见 FORMAT_VERSION）：position 恒是引号串，故「下一个不是引号串」
             // 就是可选区。一个裸整数 = floatLocalSize（v1/v2 侧车没有该位 ⇒ 0）；
             // 两个 = 前 floatLocalSize、后 returnsFloat（写出侧对浮点方法成对写，见 encode）。
@@ -1652,7 +1880,9 @@ private object BootMetaCodec {
                 returnsFloat = false
             }
             if (floatLocalSize < 0) throw failAt(r.lineNo, "function floatLocalSize 为负: $floatLocalSize")
-            if (floatLocalSize > 0xFFFF) throw failAt(r.lineNo, "function floatLocalSize 越 16 位域: $floatLocalSize")
+            if (floatLocalSize >= Int.MAX_VALUE) {
+                throw failAt(r.lineNo, "function floatLocalSize 越官方合法域(0..int.MaxValue-1): $floatLocalSize")
+            }
             if (returnsFloat && flags and 2 == 0) {
                 // MethodType 只存在于方法（fork LogicalLineParser.cs:183-193 先置 IsMethod）；
                 // 侧车是外部输入，非方法带浮点位只可能来自坏档。
@@ -1878,6 +2108,8 @@ private object BootMetaCodec {
 
         val end = next("end")
         if (!end.payloadBlank()) throw BootMetaFormatException("第 ${end.lineNo} 行：end 后不应有内容")
+        // 流式 read() 侧：M2-5 尾部签名段（end 行之后的旁路块）已在 SignatureTailFilterReader
+        // 剥掉；本闸在此看到的 `signatures` 记录 = 坏档（正文段头 / 旁路块后被塞了别的记录），照旧拒。
         if (cursor.peek()) {
             throw BootMetaFormatException("第 ${cursor.rec.lineNo} 行：end 之后还有记录（${cursor.rec.keyword()}）")
         }

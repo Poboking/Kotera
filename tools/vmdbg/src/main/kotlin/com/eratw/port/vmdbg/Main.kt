@@ -73,6 +73,8 @@ object Cli {
   --erbc <目录>     erbc.v1 产物目录（含 program.erbc / program.meta）；缺省读 ERATW_ERBC_DIR
   --game <目录>     游戏根（ERB 的上一级，含 CSV / emuera.config）；缺省读 ERATW_GAMEDIR
   --work <目录>     状态目录（call 落 last-error.json，where 读它）；缺省 <系统临时目录>/eratw-vmdbg
+  --sandbox <目录>  固定存档/内存库沙箱（必须是 --work 下的子目录）；缺省每次 <work>/save-sandbox-<随机>。
+                    显式给定时跨进程复用同一写根，用于验证「首次建库 / 二次会话不重建」。
   --steps N         单次 run 步数闸（VmConfig.maxStepsPerRun）；call/trace 缺省 20000000，sweep 缺省 2000000
   --step-wall-ms N  单段落墙钟闸（VmConfig.maxRunMillis，段落 = 相邻两次让出点之间）；缺省 0 = 关闭。
                     >0 时「一次提交后不回等待点」的纯计算挂起会在超时点被中断，抛点函数名/行号/pc/
@@ -85,12 +87,16 @@ object Cli {
                     同时自证 -Xmx 挡位真的生效（512m ⇒ maxMemoryBytes=536870912）
 
 子命令:
-  call <函数名> [--args 0,1,...] [--steps N]
+  call <函数名> [--args 0,1,...] [--pre "FN1;FN2"] [--addchara 1,2] [--sets "NAME[i,j]=V;..."] [--steps N]
       调用任意函数。能解析成整数的实参进 intArgs、其余进 strArgs（桶内保序）。
+      --pre 先在同一 GameSession 里按序跑无实参真实函数（分号分隔；SQL_CONNECT 连接不跨进程，
+            真启动链必须同会话先跑 QOL_DB_INIT 这类入口）；逐条打印 preCall[i]=...；
+      --addchara 逐号走 VariableStore.addCharacter（与 ERB ADDCHARA 语句同一实现）；
+      --sets 逐项走 CmdSet 的公开写单点（分号分隔，值内不含分号），三者都在目标调用前生效。
       输出 status/target/location/message/steps/elapsedMs/callChain + 控制台尾 10 行。
       status: PASS / NOT_FOUND / CODEEE / STEP_LIMIT / STACK_OVERFLOW / WALL_LIMIT / ERROR
-  trace <函数名> [--steps N] [--capacity N] [--out <文件>]
-      依赖路1 语句探针（ProcessRuntime.statementProbe）。逐条输出「行号 语句摘要 耗时ns」，
+  trace <函数名> [--pre "FN1;FN2"] [--addchara 1,2] [--sets "NAME[i,j]=V;..."] [--steps N] [--capacity N] [--out <文件>]
+      依赖路1 语句探针（ProcessRuntime.statementProbe）。逐条输出「函数 行号 语句摘要 耗时ns」，
       环形缓冲定长（缺省 100000）超限丢最旧；--out 落盘代替 stdout。
   where
       最近一次错误的现场（funcName/line/pc/callChain/message）；数据来自 call/trace 写下的
@@ -101,6 +107,15 @@ object Cli {
       枚举变量名（系统注册表 registry.all + 用户变量 allUserVars，glob 支持 星号 与 问号）。
   disasm <pc> [-n 条数]
       从 pc 起反汇编 n 条（缺省 16）：每条输出 pc/line/words + Disassembler 文本。
+  srcmap <pc> [-n 条数] | srcmap --func <名字> | srcmap --audit
+      pc → 文件:行:函数 的离线查询面（MODERN-R4-C）：只读 --erbc（program.erbc + 同目录
+      program.meta），不装配会话、不需要 --game。行号两列：line0 = Program.lineOf 原值（0 基），
+      line1 = line0 + 1（line0 < 0 时原样）；合成标记 position（· 开头）标 synthetic=true，
+      不可拆标 posUnsplit=true，无归属标 owned=false（func=- file=- line0=-1 line1=-1）。
+      --audit 报七计数（pcTotal/pcUnowned/funcNoPosition/funcSyntheticPosition/
+      funcNonIncreasingEntry/distinctFiles/linesUnknown）+ 三个诊断计数（pcSynthetic/funcTotal/
+      funcAbsoluteFile）。退出码 0 正常（含 --audit 报了异常）/ 1 用法或装载失败 /
+      2 pc 越界或函数名不存在。
   sweep [--out <目录>] [--only <regex>] [--skip-methods] [--shard i/n] [--resume] [--wall-ms N]
       全量函数清扫（跳过事件函数与编译器合成入口）。产 sweep.jsonl（每函数一条终态记录，
       字段 fn/key/status/cls/line/pc/msg/steps/elapsedMs + covered/stmts/coverPct =
@@ -117,6 +132,11 @@ object Cli {
   cheat money <N> | cheat day <N> | cheat raw <名字>[i]=<值>
       零脑配配方：money/day = MONEY[0] / DAY[0] 设为 N（SystemLayout.kt:15-16）；
       raw 是 set 的别名。eraTW 专用配方待按语料核实后追加（不猜变量名）。
+  sql <连接串> <语句> [--max N]
+      用真实桌面 SQLite 驱动（与 GameSession 同一个 DesktopSqliteHost）在 --sandbox 的
+      sql/ 写根上开库执行一条语句；SELECT 逐行输出 row[i]=列值（--max 缺省 100 行，
+      截断时 rows 为实际返回行数），非查询输出 changes=total_changes 差值。
+      用于读回首次/二次会话后的行数（GRAPH_DISTANCE / QOL_DISH_DB / MAX(slot)）。
   snapshot [--out <文件>]
       调试快照（DBG4 P2）：变量面走引擎 saveData 全链（落快照专用槽 99、只进 --work 沙箱，
       游戏根零接触），主文件 = 游戏自身 save 格式；sidecar（<主文件>.json）记 RNG 状态 /
@@ -169,10 +189,12 @@ object Cli {
                 "var" -> CmdVar.run(parsed, out, err)
                 "vars" -> CmdVars.run(parsed, out, err)
                 "disasm" -> CmdDisasm.run(parsed, out, err)
+                "srcmap" -> CmdSrcMap.run(parsed, out, err)
                 "sweep" -> CmdSweep.run(parsed, out, err)
                 "ledger" -> CmdLedger.run(parsed, out, err)
                 "set" -> CmdSet.run(parsed, out, err)
                 "cheat" -> CmdSet.runCheat(parsed, out, err)
+                "sql" -> CmdSql.run(parsed, out)
                 "snapshot" -> CmdSnap.run(parsed, out, err)
                 "restore" -> CmdSnap.runRestore(parsed, out, err)
                 "heap" -> CmdHeap.run(out)
@@ -189,6 +211,13 @@ object Cli {
             }
         } catch (e: CliError) {
             err.println("vmdbg: ${e.message}")
+            // 因果链逐段打印（2026-11-15 装置取证面）：CodeEE 现在会挂原始异常（根因），
+            // 只打 message 会把「为什么」再次吞掉 —— agent 台账要的是整条链的类名+消息。
+            var c = e.cause
+            while (c != null) {
+                err.println("vmdbg:   ↳ ${c.javaClass.simpleName}: ${c.message}")
+                c = c.cause
+            }
             1
         }
     }
@@ -210,10 +239,11 @@ class Args private constructor(
     companion object {
         /** 带值的选项名（其余 `--xxx` 记为布尔旗标）。 */
         private val VALUE_OPTS = setOf(
-            "--erbc", "--game", "--work", "--steps", "--step-wall-ms", "--args", "--out", "--only",
+            "--erbc", "--game", "--work", "--sandbox", "--steps", "--step-wall-ms", "--args", "--out",
+            "--only", "--addchara", "--sets", "--pre",
             "--shard", "--wall-ms", "--capacity", "-n", "--base", "--head", "--from",
             "--tags", "--watch", "--max",
-        ) + CmdExplore.VALUE_OPTS_NEEDED
+        ) + CmdExplore.VALUE_OPTS_NEEDED + CmdSrcMap.VALUE_OPTS_NEEDED
 
         fun parse(tokens: List<String>): Args {
             val positional = ArrayList<String>()

@@ -48,8 +48,22 @@ class BootMetaReport(
  *   引入该段之前逐字节相同——这就是「新写出·旧读不炸」的兼容通道；
  * - 旧侧车（无该段）由新读侧读回 null，`loadWarningsOrEmpty()` 给消费方空清单口径。
  *
- * 本对象不感知段内容：`text`/`write` 全部走 [BootMetadata.encodeText]，
+ * 本对象不感知段内容：`text`/`write` 全部走 [BootMetadata.encodeText] 生成主体，
  * 确定性判据不变（同一模型两次写出逐字节相同；告警清单本身保序直存，不排序）。
+ *
+ * ## M2-5 签名段（尾部旁路块，缺省关）
+ *
+ * [text] / [write] 末尾新增可选参数 `signatures`（函数键大写 → 完整签名规范串，
+ * 由 [SignatureExport.export] 产出）。非空时经 [SignatureExport.encodeSection] 在
+ * 主体文本（以 `end` 行结束）之后追加 `signatures <N>` 段；空表整段省略，
+ * 写出的文本与引入本参数之前逐字节相同 —— 这就是关态/缺省不变式
+ * （照 R7 波 0 的 omit_when_empty 口径，specs/erbc-format.md §5.9）。
+ *
+ * 该段是**旁路数据**：读侧 `BaseSignatureCatalog` 按行独立扫描，不进
+ * [BootMetadata.encodeText] 的记录流。生产落盘（ErbcArtifacts.write）当前不传
+ * 本参数 ⇒ 标准全量编译产线零变化；把带段侧车接进标准装载链时，装载侧须先经
+ * `BaseSignatureCatalog.stripSignatureSection` 剥离尾块再交给 `BootMetadata.read`
+ * （BootMetaCodec 的 `end` 之后不许有记录）—— 这条生产串联写进「需组长接线」。
  */
 object BootMetaWriter {
 
@@ -68,7 +82,12 @@ object BootMetaWriter {
         metadata: BootMetadata,
         programSha256: String? = null,
         engineTag: String = engineTag(),
-    ): String = metadata.withHeader(engineTag = engineTag, programSha256 = programSha256).encodeText()
+        signatures: Map<String, String> = emptyMap(),
+    ): String {
+        val base = metadata.withHeader(engineTag = engineTag, programSha256 = programSha256).encodeText()
+        // 签名段是尾部旁路块：空表 encodeSection 返回空串 ⇒ base 逐字节不变（关态不变式）。
+        return base + SignatureExport.encodeSection(signatures)
+    }
 
     /**
      * 写侧车（UTF-8、无 BOM、LF）。
@@ -81,8 +100,9 @@ object BootMetaWriter {
         metadata: BootMetadata,
         programSha256: String? = null,
         engineTag: String = engineTag(),
+        signatures: Map<String, String> = emptyMap(),
     ): BootMetaReport {
-        val text = text(metadata, programSha256, engineTag)
+        val text = text(metadata, programSha256, engineTag, signatures)
         // encodeText 只产出 LF：原始 CR 一定来自被引号串转义掉的字符串内容，行边界不会被破坏。
         check(!text.contains('\r')) { "侧车文本不得含 CR（LF 换行是行结构的判据）" }
         check(text.endsWith("\n")) { "侧车文本必须以 LF 结尾" }

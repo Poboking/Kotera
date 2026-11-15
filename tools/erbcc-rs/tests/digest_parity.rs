@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use erbcc_rs::digest::compiler_digest;
-use erbcc_rs::types::{current_dir, find_repo_root, COMPILER_SOURCE_ROOT_REL, ERBC_DIR_NAME};
+use erbcc_rs::types::{current_dir, find_repo_root, COMPILER_SOURCE_ROOTS, ERBC_DIR_NAME, MARKER_REL};
 
 /// 入库基准（小语料，13 行清单 + 3 个语料文件 + 产物四件套）。
 fn data_dir() -> PathBuf {
@@ -29,7 +29,7 @@ fn data_dir() -> PathBuf {
 /// 仓库根：测试的工作目录在 `eratw-android/tools/erbcc-rs`，上溯必命中 `MARKER_REL`。
 fn repo_root() -> PathBuf {
     find_repo_root(&current_dir())
-        .unwrap_or_else(|| panic!("找不到仓库根（{} 应从 cwd 上溯可见）", COMPILER_SOURCE_ROOT_REL))
+        .unwrap_or_else(|| panic!("找不到仓库根（{} 应从 cwd 上溯可见）", MARKER_REL))
 }
 
 /// 从 Kotlin 落盘的清单里取 `compiler-digest` / `compiler-sources` 两行。
@@ -103,21 +103,22 @@ fn rust_digest_is_deterministic_on_real_tree() {
     assert_eq!(a.file_count, kotlin_sources);
 }
 
-/// 文件集判据：`core-vm/src/main/kotlin` 递归的全部 `.kt` 普通文件（`:42` 的口径 1），
-/// 数量必须等于 Kotlin 基准的 `compiler-sources`。
+/// 文件集判据：[COMPILER_SOURCE_ROOTS] 两棵树递归的全部 `.kt` 普通文件（Kotlin 口径 1），
+/// 两根合计数量必须等于 Kotlin 基准的 `compiler-sources`。
 #[test]
 fn file_set_is_every_kt_under_compiler_source_root() {
     let root = repo_root();
-    let src_root = root.join(COMPILER_SOURCE_ROOT_REL);
     let mut count = 0usize;
-    let mut stack = vec![src_root.clone()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).expect("源码根必须可遍历") {
-            let path = entry.expect("目录项可读").path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.is_file() && path.file_name().map(|n| n.to_string_lossy().ends_with(".kt")).unwrap_or(false) {
-                count += 1;
+    for rel in COMPILER_SOURCE_ROOTS {
+        let mut stack = vec![root.join(rel)];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("源码根必须可遍历") {
+                let path = entry.expect("目录项可读").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.is_file() && path.file_name().map(|n| n.to_string_lossy().ends_with(".kt")).unwrap_or(false) {
+                    count += 1;
+                }
             }
         }
     }
@@ -125,17 +126,18 @@ fn file_set_is_every_kt_under_compiler_source_root() {
     let (_, kotlin_sources) = kotlin_manifest_lines(&data_dir().join(ERBC_DIR_NAME).join("manifest.txt"));
     assert_eq!(
         got.file_count, count,
-        "指纹参与的文件数必须等于 core-vm/src/main/kotlin 下的 .kt 总数"
+        "指纹参与的文件数必须等于两根（core-vm + tools/erbcc 主源集）下的 .kt 总数"
     );
     assert_eq!(
         count, kotlin_sources,
         "磁盘上的 .kt 总数与 Kotlin 基准 compiler-sources 不等（基准 {kotlin_sources}，磁盘 {count}）：\
-         基准产出后 core-vm 改过 ⇒ 重跑 compileCorpus 生成新基准\n"
+         基准产出后编译器源码树改过 ⇒ 重跑 compileCorpus 生成新基准\n"
     );
 }
 
 /// 合成树：改一个字节 ⇒ 指纹必变、计数不变（Kotlin 用例
-/// `CompilerDigestFreshnessTest.kt:87-90`，两个 `.kt` 的最小仓库）。
+/// `CompilerDigestFreshnessTest` 的合成装置，双根各两文件的仓库；
+/// 只改 erbcc 驱动文件同样必变 —— 驱动在编译链上，MODERN-R12-DIG 收口）。
 #[test]
 fn synthetic_tree_digest_is_sensitive_to_one_byte_change() {
     let repo = std::env::temp_dir().join(format!(
@@ -143,10 +145,12 @@ fn synthetic_tree_digest_is_sensitive_to_one_byte_change() {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&repo);
-    let write_tree = |body: &str| {
+    let write_tree = |compiler_body: &str, driver_body: &str| {
         for rel in [
             "core-vm/src/main/kotlin/com/eratw/port/core/compile/ErbProgramCompiler.kt",
             "core-vm/src/main/kotlin/com/eratw/port/core/code/ErbcWriter.kt",
+            "tools/erbcc/src/main/kotlin/com/eratw/port/erbcc/compile/CorpusCompile.kt",
+            "tools/erbcc/src/main/kotlin/com/eratw/port/erbcc/Main.kt",
         ] {
             let p = repo.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -155,7 +159,7 @@ fn synthetic_tree_digest_is_sensitive_to_one_byte_change() {
             repo.join(
                 "core-vm/src/main/kotlin/com/eratw/port/core/compile/ErbProgramCompiler.kt",
             ),
-            body.as_bytes(),
+            compiler_body.as_bytes(),
         )
         .unwrap();
         std::fs::write(
@@ -163,22 +167,44 @@ fn synthetic_tree_digest_is_sensitive_to_one_byte_change() {
             b"fun write() = 2\n",
         )
         .unwrap();
+        std::fs::write(
+            repo.join("tools/erbcc/src/main/kotlin/com/eratw/port/erbcc/compile/CorpusCompile.kt"),
+            driver_body.as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("tools/erbcc/src/main/kotlin/com/eratw/port/erbcc/Main.kt"),
+            b"fun main() = 4\n",
+        )
+        .unwrap();
     };
 
-    write_tree("fun compile() = 1\n");
+    write_tree("fun compile() = 1\n", "fun drive() = 3\n");
     let first = compiler_digest(&repo).expect("合成树必须能算指纹");
-    assert_eq!(first.file_count, 2, "参与文件数 = 源码树里的 .kt 个数（Kotlin :81）");
+    assert_eq!(
+        first.file_count, 4,
+        "参与文件数 = 两根源码树里的 .kt 个数（Kotlin 装置同款）"
+    );
 
-    write_tree("fun compile() = 99\n");
+    write_tree("fun compile() = 99\n", "fun drive() = 3\n");
     let changed = compiler_digest(&repo).expect("改内容后仍要能算指纹");
     assert_ne!(
         first.digest, changed.digest,
-        "编译器源码改一个字节 digest 必须变（Kotlin 用例 :89）"
+        "编译器源码改一个字节 digest 必须变"
     );
     assert_eq!(
         first.file_count,
         changed.file_count,
-        "只改内容不改文件集，计数必须不变（Kotlin 用例 :90）"
+        "只改内容不改文件集，计数必须不变"
+    );
+
+    // 只改 erbcc 驱动文件 ⇒ digest 必变（集合扩根前改驱动不重编、旧 .erbc 照放行的盲区）
+    let base = repo.join("tools/erbcc/src/main/kotlin/com/eratw/port/erbcc/compile/CorpusCompile.kt");
+    std::fs::write(&base, b"fun drive() = 99\n").unwrap();
+    let driver_changed = compiler_digest(&repo).expect("改驱动后仍要能算指纹");
+    assert_ne!(
+        changed.digest, driver_changed.digest,
+        "erbcc 驱动必须参与指纹：改驱动不改 core-vm，digest 也必须变"
     );
 
     // 排序键是「相对仓库根的 `/` 分隔路径」：把一个文件挪到另一个目录 ⇒ 指纹变、计数不变
@@ -189,15 +215,15 @@ fn synthetic_tree_digest_is_sensitive_to_one_byte_change() {
     std::fs::rename(&moved_from, &moved_to).expect("文件挪动必须成功，否则路径判据用例形同虚设");
     let moved = compiler_digest(&repo).expect("挪动目录后仍要能算指纹");
     assert_ne!(
-        changed.digest, moved.digest,
+        driver_changed.digest, moved.digest,
         "相对路径参与摘要（u32be(路径长) ‖ 路径），路径变了 digest 必须变"
     );
 
     let _ = std::fs::remove_dir_all(&repo);
 }
 
-/// 失败面：源码树缺失 / 树里没有 `.kt` ⇒ 必须报错，不许返回空哈希冒充「一致」
-/// （`ErbcCompilerDigest.kt:81-83` 与 `:91` 的两处 `check`）。
+/// 失败面：任一根源码树缺失 / 合流后没有 `.kt` ⇒ 必须报错，不许返回空哈希冒充「一致」
+/// （`ErbcCompilerDigest.kt:95-97` 与 `:107` 的两处 `check`）。
 #[test]
 fn missing_or_empty_source_tree_is_an_error_not_an_empty_hash() {
     let base = std::env::temp_dir().join(format!("erbcc-rs-digest-fail-{}", std::process::id()));
@@ -216,18 +242,42 @@ fn missing_or_empty_source_tree_is_an_error_not_an_empty_hash() {
     let msg = format!("{err:?}");
     assert!(
         msg.contains("编译器源码树不存在"),
-        "错误文案要与 Kotlin 同源（ErbcCompilerDigest.kt:82）：{msg}"
+        "错误文案要与 Kotlin 同源（ErbcCompilerDigest.kt:96）：{msg}"
     );
 
-    // 2) 树存在但一个 .kt 都没有
-    let empty_tree = base.join("empty-tree").join(COMPILER_SOURCE_ROOT_REL);
-    std::fs::create_dir_all(empty_tree.join("com/eratw/port/core")).unwrap();
+    // 2) 第二根（erbcc 驱动）缺失：不许静默降级成单根继续算（MODERN-R12-DIG 收口）
+    let half_repo = base.join("half-repo");
+    let core_root = half_repo.join(COMPILER_SOURCE_ROOTS[0]);
+    std::fs::create_dir_all(core_root.join("com/eratw/port/core/compile")).unwrap();
     std::fs::write(
-        empty_tree.join("com/eratw/port/core/README.txt"),
+        core_root.join("com/eratw/port/core/compile/ErbProgramCompiler.kt"),
+        b"fun compile() = 1\n",
+    )
+    .unwrap();
+    let err_half = match compiler_digest(&half_repo) {
+        Err(e) => e,
+        Ok(r) => panic!(
+            "缺 erbcc 根必须报错（不许静默降级单根把判据收窄），实际返回 digest={}",
+            r.digest
+        ),
+    };
+    let msg_half = format!("{err_half:?}");
+    assert!(
+        msg_half.contains("编译器源码树不存在") && msg_half.contains("erbcc"),
+        "错误要点名缺的是 erbcc 根（ErbcCompilerDigest.kt:96）：{msg_half}"
+    );
+
+    // 3) 两根都在但一个 .kt 都没有
+    let empty_base = base.join("empty-tree");
+    for rel in COMPILER_SOURCE_ROOTS {
+        std::fs::create_dir_all(empty_base.join(rel).join("com/eratw/port/core")).unwrap();
+    }
+    std::fs::write(
+        empty_base.join(COMPILER_SOURCE_ROOTS[0]).join("com/eratw/port/core/README.txt"),
         b"not a kotlin file\n",
     )
     .unwrap();
-    let err2 = match compiler_digest(&base.join("empty-tree")) {
+    let err2 = match compiler_digest(&empty_base) {
         Err(e) => e,
         Ok(r) => panic!(
             "源码树里没有 .kt 必须报错（不许把空文件集折成一个哈希），实际 digest={}",
@@ -237,7 +287,7 @@ fn missing_or_empty_source_tree_is_an_error_not_an_empty_hash() {
     let msg2 = format!("{err2:?}");
     assert!(
         msg2.contains("没有 .kt 文件"),
-        "错误文案要与 Kotlin 同源（ErbcCompilerDigest.kt:91）：{msg2}"
+        "错误文案要与 Kotlin 同源（ErbcCompilerDigest.kt:107）：{msg2}"
     );
 
     let _ = std::fs::remove_dir_all(&base);

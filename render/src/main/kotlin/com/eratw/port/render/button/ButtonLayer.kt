@@ -150,7 +150,22 @@ class ButtonLayer(
      */
     private val inlineGates = ArrayList<ArrayList<InlineGate>?>()
 
-    private class TipRange(val row: Int, val start: Int, val end: Int, val text: String)
+    /**
+     * 一条提示区间（与 [tipRanges] 一一对应）。
+     *
+     * [graphic] 是**承载这份 `title` 的那个行内节点**的负载：文本节点为 null、图形节点给
+     * 图元。原版 ToolTip 的纵判是按**节点自身**的 `Top/Bottom` 做的
+     * （`EmueraConsole.cs:2368` 的 `num4 < aConsoleDisplayNode.Top || num4 > aConsoleDisplayNode.Bottom`），
+     * 所以「这份提示在不在该点」必须拿它自己的节点盒判，不能拿「该列有没有可点按钮」判
+     * —— 那会把带 `title` 的不可点文本（`<nonbutton title='…'>`）整行判死。
+     */
+    private class TipRange(
+        val row: Int,
+        val start: Int,
+        val end: Int,
+        val text: String,
+        val graphic: InlineGraphic? = null,
+    )
 
     /**
      * 行内纵向门（IMG-A4 I2）：目标跨度里一个图形段的列区间 + 图元负载。
@@ -370,7 +385,9 @@ class ButtonLayer(
                     }
                 }
                 run.tooltip?.let { tip ->
-                    if (width > 0) tipRanges.add(TipRange(rowIndex, col, col + width, tip))
+                    // 节点负载随区间一起记：提示的纵向可查区就是**它自己的节点盒**
+                    //（[tooltipInline] 与 `EmueraConsole.cs:2368` 同一判据）。
+                    if (width > 0) tipRanges.add(TipRange(rowIndex, col, col + width, tip, run.graphic))
                 }
                 col += width
                 r++
@@ -567,6 +584,79 @@ class ButtonLayer(
     fun tooltip(row: Int, col: Int): String? {
         if (row < 0 || col < 0) return null
         return tipRanges.firstOrNull { it.row == row && col in it.start until it.end }?.text
+    }
+
+    /**
+     * **行内口径**的长按提示（[tooltip] 的加严面）：在 [tooltip] 的列门之上，再按
+     * **提示所属节点自己**的行内纵盒判一次 `yInRowPx`。
+     *
+     * 判据逐式对应原版 `EmueraConsole.cs:2368`：
+     * `num4 < aConsoleDisplayNode.Top || num4 > aConsoleDisplayNode.Bottom` 就跳过该节点
+     * —— 光标下没有任何节点自然也就没有 `pointingString`（`:2373-2379` 只在节点判通过后
+     * 才把 `consoleButtonString2` 落成候选，**非按钮节点同样落**），`:1891-1895` 的 ToolTip
+     * 于是拿不到 `Title`。
+     *
+     * 节点盒按 [nodeVerticalBox] 分类：文本节点走 `AConsoleDisplayNode.cs:29-31` 的缺省
+     * `Top = 0 / Bottom = Config.FontSize`；**语料口径 `LINE HEIGHT == FONT SIZE == 18`
+     * 下它就是整行带**，所以本层对文本类提示不加纵门（与 [hitInline] 对文本段的既有口径
+     * 同一条结论，不另造第二套判据）。图形节点（`<img>` / `<shape>`）才按图元盒加严，
+     * 压缩行按绘制侧同一个 k 收窄（[GraphicGeometry.nodeRowScale]）。
+     *
+     * **为什么这个判据必须留在本层**：它只依赖提示区间与节点负载，与「该列有没有可点
+     * 按钮」无关。壳体拿 [hitInline]（只认识可点目标）当纵门用，会让
+     * `<nonbutton title='…'>` 这种**天然不可点**的提示整行判空 —— 素质 / 种族这类长按提示
+     * 就是这么丢的（可点按钮的提示照旧，所以现象看着像「只有素质看不了」）。
+     *
+     * @param yInRowPx 点击点相对**该行行顶**的像素（`CanvasConsoleView` 的 `CellHit.yInRowPx`）
+     * @param rowHeightPx 该行在当前布局里的高度；非正 = 调用方不知道行几何（k = 1）
+     * @param lineHeightPx 执行行高；非正 = 同上（守卫在 [GraphicGeometry.nodeRowScale] 里）
+     * @param pureArtRow 该行是否只有图片段（口径同 [hitInline]）
+     */
+    @Suppress("LongParameterList")
+    fun tooltipInline(
+        row: Int,
+        col: Int,
+        yInRowPx: Float,
+        fontSizePx: Int,
+        rowHeightPx: Float = 0f,
+        lineHeightPx: Float = 0f,
+        pureArtRow: Boolean = true,
+    ): String? {
+        if (row < 0 || col < 0) return null
+        val tip = tipRanges.firstOrNull { it.row == row && col in it.start until it.end }
+        val geometry = InlineRowGeometry(yInRowPx, fontSizePx, rowHeightPx, lineHeightPx, pureArtRow)
+        return tip?.takeIf { inlineNodeCovers(it.graphic, geometry) }?.text
+    }
+
+    /**
+     * 行内纵盒判的入参组（[tooltipInline] 一次长按一份，不跨帧复用）。
+     * 收成一个组是为了让 [inlineNodeCovers] 只吃两个参数 —— 判据本身只有
+     * 「节点负载 + 该点的行内纵坐标与该行几何」这一件事。
+     */
+    private class InlineRowGeometry(
+        val yInRowPx: Float,
+        val fontSizePx: Int,
+        val rowHeightPx: Float,
+        val lineHeightPx: Float,
+        val pureArtRow: Boolean,
+    )
+
+    /**
+     * 该提示承载的节点在行内 **纵盒** 里是否覆盖 `yInRowPx`（[tooltipInline] 的判据半段）。
+     *
+     * `graphic == null` ⇒ 文本节点：缺省带 `Top = 0 / Bottom = Config.FontSize`
+     * （`AConsoleDisplayNode.cs:29-31`），语料口径 `LINE HEIGHT == FONT SIZE == 18` 下即整行带，
+     * 与 [hitInline] 对文本段的既有口径同一条结论 ⇒ 恒覆盖（不另造第二套判据）。
+     * 图形节点按图元盒加严，压缩行用绘制侧同一个 k（[GraphicGeometry.nodeRowScale]）。
+     */
+    private fun inlineNodeCovers(graphic: InlineGraphic?, geometry: InlineRowGeometry): Boolean {
+        if (graphic == null) return true
+        val box = nodeVerticalBox(graphic, geometry.fontSizePx)
+        val k = GraphicGeometry.nodeRowScale(
+            graphic, geometry.pureArtRow, geometry.rowHeightPx, geometry.lineHeightPx,
+        )
+        val hitBox = GraphicGeometry.scaledVerticalBox(box.first, box.second, k)
+        return geometry.yInRowPx >= hitBox[0] && geometry.yInRowPx <= hitBox[1]
     }
 
     /**

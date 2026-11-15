@@ -1,6 +1,7 @@
 package com.eratw.port.core.loader
 
 import com.eratw.port.core.code.CallArg
+import com.eratw.port.core.code.CodeCacheCensus
 import com.eratw.port.core.code.CallArgIndex
 import com.eratw.port.core.code.CallArgSource
 import com.eratw.port.core.code.ConstantPool
@@ -215,6 +216,34 @@ internal const val RECORDS_PER_VALIDATE_WORKER: Int = 4096
  * [ProgramLoader.decodeMapped] 的显式形参（测试用它把退路压到一两条就触发）。
  */
 internal const val MAX_ENSURE_DEPTH: Int = 256
+
+/**
+ * 运行期节点缓存上界（**每张记录源一张表**；段 2 / 段 3 各自独立计，entries 折块）。装载趟不设界。
+ *
+ * 为什么要有这一条：`RecordSource.nodes` 把解码过的结点按表下标钉住、永不归还，而运行期
+ * 解码面 = 「玩到过的全部代码」—— 2026-11-14 桌面 soak512 实测（真语料 + 512 MiB 挡）
+ * 25 分钟 GC 后 live 从装载基线 139 MiB 爬到 434~491 MiB 且逐字恒定不再涨（91 步零增长）：
+ * 不是每步泄漏，是「只进不出」的缓存把堆吃满。512 MiB 真机再叠加图形/渲染驻留
+ * （真机报告 Java 堆 live ≈ 505 MiB / GC 后 <1% 空闲）⇒ 玩家侧 OOM。
+ *
+ * 逐出策略 = **块级 LRU**（4,096 槽/块，热块按访问戳幸存、冷块渐进归还），不是整表重置：
+ * 整表重置会连当前工作集一起扔掉，紧随其后的重放是纯 decode 开销 —— 同一臂实测引导期
+ * ~28 次整表重置把引导从 ~3 分钟拖到 28 分钟（每次重置丢 ~50 万缓存结点，后续语句的
+ * 共享子树全部重放），本策略下热块幸存、只有冷数据按块归还，被逐出块里的实例只要
+ * 还被已物化语句/扁平片持有就照常活着，之后对该块的读取重放解出逐字段相同的结点。
+ *
+ * 取值口径：512 KiB 条/表（= 128 块 ≈ 8.5 MiB 结点引用 + 结点本体），两张表合计
+ * 结点簇 ≈ 20~40 MiB 封顶；装载基线 ≈ 139 MiB + 图形 62 MiB + 语句缓存之下，
+ * 真机 512 MiB 挡的 OOM 缺口由此收掉。触发频率随游玩覆盖面走，逐出成本 = 一次
+ * O(块数) 扫描（~200 块），只在新块分配越过预算时发生。
+ */
+internal const val RUNTIME_NODE_ENTRY_BUDGET: Int = 1 shl 19
+
+/** 运行期规范化代表表上界（单池一张表； ArgInterner.armRuntimeBudget）。取值口径同上节。 */
+internal const val RUNTIME_INTERN_FORM_BUDGET: Int = 1 shl 18
+
+/** 运行期内建串池去重表上界（StringPool.armRuntimeDistinctBudget）。取值口径同上节。 */
+internal const val RUNTIME_INTERN_STRING_BUDGET: Int = 1 shl 18
 
 /**
  * 单张字符串表数据块的映射上限（128 MiB）。
@@ -501,6 +530,17 @@ internal class StreamCursor(
 
     val remaining: Int get() = fileSize - pos
 
+    /**
+     * 把游标直接推进到 [position]（不读字节、不做判界）。
+     *
+     * 只给「批量扫描器代读」用：扫描器（[BulkScanCursor]）已在堆内缓冲上按**同一读序**
+     * 消费到 [position]，这里把游标同步到那个终点，后续 [skip] / [view] / [u32Array] 的
+     * 行为与逐字段读完一遍之后相同。等价性由扫描器自己的 `need()` 判定保证。
+     */
+    internal fun advanceTo(position: Int) {
+        pos = position
+    }
+
     private fun need(n: Int, what: String) {
         if (n < 0 || pos.toLong() + n > fileSize.toLong()) {
             throw ErbcDecodeException(pos, "$what 需要 $n 字节，文件只剩 $remaining 字节（总长 $fileSize）")
@@ -617,6 +657,138 @@ internal class StreamCursor(
         val from = pos
         pos += n
         return from
+    }
+}
+
+/**
+ * 段 2 / 段 3 节点边界扫描专用的**批量读游标**：读序、判界与报错文案与 [StreamCursor] 逐字同构，
+ * 差别只在介质 —— 每次从映射窗口搬一块进堆内 `ByteArray`，字段解释在堆内数组上做。
+ *
+ * 动机：逐字段版每读一个 u32 就是一次 `SectionWindow.u32At`（一次换块判定 + 4 次映射读），
+ * 段 2 节点表 24.4 MB / 898,118 条即 ~2400 万次单字节 `ByteBuffer.get`，是装载主杆。
+ * 同型先例见 [StreamCursor.u32Array] 与 `CodeSource.readPageInto`（后者一页 4096 次绝对读
+ * 实测占 VM 线程采样 39%，改成一次 `get(byte[])` 拷贝后降到 memcpy 级）。
+ *
+ * 保真口径：块重灌只发生在**字段边界**（[need] 先卡住 `n <= fileSize - pos`），因此字节读的
+ * 地址序列与逐字段版完全相同 —— 截断、未知标签、串表下标越界、子下标越界仍在同一字节位置
+ * 抛同一句话。扫描结束后由调用方用 [StreamCursor.advanceTo] 把原游标推进到同一终点。
+ */
+internal class BulkScanCursor(
+    private val win: SectionWindow,
+    private val fileSize: Int,
+    start: Int,
+) {
+    var pos: Int = start
+        private set
+
+    val remaining: Int get() = fileSize - pos
+
+    /** 当前块覆盖 `[blockStart, blockStart + blockLen)`；`blockLen == 0` = 还没有有效块。 */
+    private val block = ByteArray(SCAN_BLOCK_BYTES)
+    private var blockStart = 0
+    private var blockLen = 0
+
+    private fun need(n: Int, what: String) {
+        if (n < 0 || pos.toLong() + n > fileSize.toLong()) {
+            throw ErbcDecodeException(pos, "$what 需要 $n 字节，文件只剩 $remaining 字节（总长 $fileSize）")
+        }
+    }
+
+    /** 保证 `[pos, pos+n)` 落在块内，返回 `pos` 在块内的下标（必要时从当前 pos 整块重灌）。 */
+    private fun index(n: Int): Int {
+        val i = pos - blockStart
+        if (i >= 0 && i + n <= blockLen) return i
+        val len = if (fileSize - pos < SCAN_BLOCK_BYTES) fileSize - pos else SCAN_BLOCK_BYTES
+        if (len > 0) win.readInto(pos, len, block)
+        blockStart = pos
+        blockLen = len
+        return 0
+    }
+
+    fun u8(): Int {
+        need(1, "u8")
+        val i = index(1)
+        val v = block[i].toInt() and BYTE_MASK
+        pos += 1
+        return v
+    }
+
+    fun bool(): Boolean = u8() != 0
+
+    /** u32 按 Int 原样取回（可为负；无符号语义由调用方判），与 [StreamCursor.u32] 同口径。 */
+    fun u32(): Int {
+        need(U32_BYTES, "u32")
+        val i = index(U32_BYTES)
+        val b = block
+        val v = (b[i].toInt() and BYTE_MASK) or
+            ((b[i + 1].toInt() and BYTE_MASK) shl BITS_PER_BYTE) or
+            ((b[i + 2].toInt() and BYTE_MASK) shl (BITS_PER_BYTE * 2)) or
+            ((b[i + U32_LAST_INDEX].toInt() and BYTE_MASK) shl SHIFT_24)
+        pos += U32_BYTES
+        return v
+    }
+
+    fun i32(): Int = u32()
+
+    fun i64(): Long {
+        need(I64_BYTES, "i64")
+        val i = index(I64_BYTES)
+        var v = 0L
+        for (k in I64_BYTES - 1 downTo 0) {
+            v = (v shl BITS_PER_BYTE) or (block[i + k].toLong() and BYTE_MASK.toLong())
+        }
+        pos += I64_BYTES
+        return v
+    }
+
+    /**
+     * 计数类字段：三条判定与 [StreamCursor.count] **逐字相同**（含报错位置 `pos - 4`、
+     * 负值 / 大于剩余字节数 / 按元素最小字节宽度卡上界）。
+     */
+    fun count(
+        what: String,
+        minBytesPerItem: Int = 1,
+    ): Int {
+        val v = u32()
+        if (v < 0) failCount("$what 计数越界(u32=$v)")
+        if (v > remaining) failCount("$what 计数($v)大于剩余字节数($remaining)")
+        if (minBytesPerItem > 1) {
+            val needBytes = v.toLong() * minBytesPerItem
+            if (needBytes > remaining) {
+                failCount("$what 计数($v)至少需要 $needBytes 字节（每项 ≥ $minBytesPerItem 字节），剩余 $remaining 字节")
+            }
+        }
+        return v
+    }
+
+    /**
+     * 三条畸形判定共用出口：报错位置回退到 u32 头（`pos - 4`），与 [StreamCursor.count] 同口径。
+     * 返回类型是 [Nothing]，调用点因此不需要再写 `throw`。
+     */
+    private fun failCount(message: String): Nothing {
+        throw ErbcDecodeException(pos - COUNT_HEAD_BYTES, message)
+    }
+
+    private companion object {
+        /** 块大小：64 KiB（段 2 / 段 3 各一个实例，常驻 128 KiB，扫描结束即可回收）。 */
+        const val SCAN_BLOCK_BYTES = 64 * 1024
+
+        /** 单字节掩码（与本文件 `SectionWindow.u32At` 的拼接口径同源）。 */
+        const val BYTE_MASK = 0xFF
+
+        /** u32 / i64 的字节宽度。 */
+        const val U32_BYTES = 4
+        const val I64_BYTES = 8
+
+        /** 小端拼接的每字节移位步长 / 第 4 字节的移位量。 */
+        const val BITS_PER_BYTE = 8
+        const val SHIFT_24 = BITS_PER_BYTE * 3
+
+        /** u32 最后一个字节相对首字节的下标。 */
+        const val U32_LAST_INDEX = 3
+
+        /** `count()` 报错位置相对游标的回退量：u32 头已消费 4 字节。 */
+        const val COUNT_HEAD_BYTES = 4
     }
 }
 
@@ -1386,7 +1558,8 @@ private class JumpScan(
             Opcode._JUMP -> consider(start, end, pc, op, pc.toLong() + 1 + a)
             Opcode._JUMP_IF_FALSE, Opcode._JUMP_IF_TRUE -> consider(start, end, pc, op, pc.toLong() + 1 + b)
             // 条件位融合超指令（246，MODERN-T1）：偏移在 c，与 `_JUMP_IF_FALSE` 同一档。
-            Opcode._EVAL_INT_JZ -> consider(start, end, pc, op, pc.toLong() + 1 + c)
+            Opcode._EVAL_INT_JZ, Opcode._LT_JZ, Opcode._GT_JZ ->
+            consider(start, end, pc, op, pc.toLong() + 1 + c)
             Opcode._JUMP_DYN -> {
                 val labels = labelsOf(order[cursor]) ?: return
                 if (a < 0 || a >= labels.size) {
@@ -1591,6 +1764,14 @@ internal class BlockRefs<T : Any>(val size: Int) {
         for (i in 0 until blocks.length()) blocks.set(i, null)
     }
 
+    /**
+     * 单块清空（运行期节点缓存的**块级 LRU 逐出**专用）：只弃一块的背衬数组，
+     * 其余块与其中的实例原样保留。被逐出块里的实例只要还被语句/片持有就照常活着。
+     */
+    fun clearBlock(blockIndex: Int) {
+        blocks.set(blockIndex, null)
+    }
+
     /** 升序遍历**已物化**的条目（释放原文一类批处理；不再白扫 171 万个空槽）。 */
     fun forEachActive(block: (T) -> Unit) {
         for (i in 0 until blocks.length()) {
@@ -1621,7 +1802,7 @@ internal class BlockRefs<T : Any>(val size: Int) {
     @Suppress("UNCHECKED_CAST")
     fun castBlock(b: Any): AtomicReferenceArray<T?> = b as AtomicReferenceArray<T?>
 
-    private companion object {
+    internal companion object {
         /** 块宽 4,096 槽 = 16 KiB 背衬：全量语料三张表各 202～419 个块位，块表本体 ≤ 2 KiB。 */
         const val BLOCK_SHIFT = 12
         const val BLOCK = 1 shl BLOCK_SHIFT
@@ -1895,6 +2076,34 @@ internal class LazyStatementRecords(
     }
 
     /**
+     * 命令面审计扫描（ENGC-3 B4）：逐条记录只读两个字段 —— `u32 line`（偏移 +1）与
+     * `u32 codeName`（偏移 +9），把代码名与源行号交给 [visit]。记录头布局
+     * `u8 StmtTag + i32 line + u32 raw + u32 codeName`，写序 `ErbcWriter.stmtHead`、
+     * 读序 [RecordSource.readStatement] 同源；tag 与 raw 引用于审计无用，跳过。
+     * **不物化语句、不进 [cached]、不碰 [interner]** —— 走 [statementAt] 会因
+     * 「同一下标恒同一实例」的缓存契约把 171.7 万条语句树全拖进堆（≈+390 MB，
+     * 与 `buildFlatStatementsRange` KDoc 记的同一量级）。
+     *
+     * 为什么不逐字段走 [StreamCursor]：全量 171.7 万条 × 13 字节 = 2,200 万次窗口读，
+     * 真产物实测 cold 270 ms / hot 177 ms。改成每条记录两次 [SectionWindow.u32At]
+     * （各一次换块判定 + 4 次映射读，只取 `line` 与 `codeName`）后实测 cold 196–214 ms /
+     * hot 131–136 ms —— 与「整条 13 字节批量 copy」的写法同量级（映射读的瓶颈在次数，
+     * 不在字节数），取更简单的这一种。行号按无符号位型读回（i32 的同 4 字节）。
+     * 持 [materializeLock] 的理由与 [sharpStatementIndices] 相同 —— 与逐条物化共用
+     * 窗口游标状态（非 pin 档会换块）。
+     */
+    override fun scanStatementHeaders(visit: (codeName: String, line: Int) -> Unit) {
+        synchronized(materializeLock) {
+            for (i in 0 until recordOffsets.size) {
+                val at = recordOffsets.get(i)
+                val line = window.u32At(at + 1)
+                val codeName = arena.str(window.u32At(at + 9))
+                visit(codeName, line)
+            }
+        }
+    }
+
+    /**
      * T2-64 波次 C：装载期「压扁即弃」—— 逐条「解码 → 规范化去重 → 写入扁平流 → 当场弃树」。
      *
      * 与 [statementAt] 的关系：那条路把结果写进 `cached`（`Program.statement(i)` 的实例身份契约、
@@ -1963,6 +2172,29 @@ internal class LazyStatementRecords(
             cached.forEachActive { it.releaseRaw() }
         }
     }
+
+    /**
+     * 装载收尾武装（`Program.armRuntimeCodeCacheBudgets` 接线）：三件运行期缓存一起接上界 ——
+     * 本池的 [interner]（规范化代表表 + 内建串池）与本池 [arena]（段 3 节点表）。
+     * 段 2 表达式池的节点表归 [MappedExprSource] 自己武装（`Program` 门面分别调两边）。
+     * 幂等：重复武装同值无害。
+     */
+    override fun armRuntimeBudgets(
+        nodeEntries: Int,
+        internForms: Int,
+        internStrings: Int,
+    ) {
+        interner.armRuntimeBudget(internForms)
+        interner.strings.armRuntimeDistinctBudget(internStrings)
+        arena.armRuntimeNodeBudget(nodeEntries)
+    }
+
+    override fun codeCacheCensus(): CodeCacheCensus = CodeCacheCensus(
+        nodeBlocks = arena.cachedNodeBlocks(),
+        nodeEvictions = arena.runtimeNodeEvictions,
+        internForms = interner.formCount,
+        internStrings = interner.strings.distinct,
+    )
 
     override fun seedInterning(roots: List<Expr?>): ArgInterner.Stats {
         synchronized(materializeLock) {
@@ -2053,6 +2285,12 @@ internal class ErbcStreamDecoder private constructor(
     private val stats: DecodeStats? = if (stages == null) null else DecodeStats()
 
     companion object {
+        /** 表达式下标表每项至少 4 字节（`skipFuncCallNode` 的计数判界口径）。 */
+        private const val MIN_EXPR_INDEX_BYTES = 4
+
+        /** FormStringTerm 每部件至少 5 字节（tag 1 + 内联载荷 4 的保守下界）。 */
+        private const val MIN_FORM_PART_BYTES = 5
+
         /** 解码入口：调用方负责先 [MappedErbc.checkSectionLayout]（与 `ProgramLoader.load` 的次序一致）。 */
         fun decode(file: MappedErbc): Program = ErbcStreamDecoder(file, null, null, true).decodeProgram()
 
@@ -2979,10 +3217,14 @@ internal class ErbcStreamDecoder private constructor(
                         // - a < functionBase：base 区段的绝对下标（补丁调用 base 公共函数，R7 主流场景，
                         //   本段产物里没有那条记录可查）⇒ 放行，函数解析落 overlay 拼接后的 base 区段；
                         // - a ≥ functionBase：折回 a - functionBase 查本段 functions，越界才拒。
+                        // 负值域判据共用一份（RT2 superfix，哨兵协议 ABI-4）：仅 `CallSentinels`
+                        // 两个 super 设计哨兵精确放行、其余一切负值照拒 —— 判据真源 =
+                        // `ErbcReader.isRejectedCallNegative`（与 requireStackOpPool 同一共享纪律；
+                        // base 编译档不产出哨兵 ⇒ 本闸在 base 语料上是死值放行，与四池闸口径一致）。
                         // 文案与 `ErbcReader.validate` 的逐字副本保持一致（等价性对拍要求同一句），故只
-                        // 换判据不换措辞：`functions.size` 是本段条数，无基线时与绝对条数相同、判定与
-                        // 改造前的 `a !in functions.indices` 逐位相同。
-                        if (a < 0 ||
+                        // 换判据不换措辞：`functions.size` 是本段条数，无基线时与绝对条数相同、
+                        // 非负下标的判定与改造前的 `a !in functions.indices` 逐位相同。
+                        if (ErbcReader.isRejectedCallNegative(a) ||
                             (a >= program.functionBase && a - program.functionBase !in program.functions.indices)
                         ) {
                             throw ErbcDecodeException(0, "pc=$pc 的 _CALL 引用函数下标 $a，越界（共 ${program.functions.size} 个）")
@@ -3033,20 +3275,24 @@ internal class ErbcStreamDecoder private constructor(
             nodeCount: Int,
             rootsStart: Int,
         ): NodeOffsets {
+            // 介质换成 [BulkScanCursor]（整块搬进堆内解释）；读序与报错位置与逐字段版逐字相同，
+            // 扫完把原游标推进到同一终点（调用方后续还要接着读池根表）。
+            val scan = BulkScanCursor(cur.window, fileSize, cur.pos)
             val offsets = NodeOffsets.Builder(nodeCount)
             for (i in 0 until nodeCount) {
-                offsets.add(cur.pos)
+                offsets.add(scan.pos)
                 // 这里**不包**诊断前缀：原异常已带字节偏移，而
                 // `ErbcStreamEquivalenceTest` 要求「流式 vs 全读两条路径的异常文案逐字相同」。
-                skipNode(cur, strings, i, nodeCount)
+                skipNode(scan, strings, i, nodeCount)
             }
-            if (cur.pos != rootsStart) {
+            if (scan.pos != rootsStart) {
                 throw ErbcDecodeException(
                     0,
-                    "段 2 边界扫描错位：扫完 $nodeCount 条后 pos=${cur.pos}，期望池根表起点 $rootsStart" +
-                        "（差 ${cur.pos - rootsStart} 字节）",
+                    "段 2 边界扫描错位：扫完 $nodeCount 条后 pos=${scan.pos}，期望池根表起点 $rootsStart" +
+                        "（差 ${scan.pos - rootsStart} 字节）",
                 )
             }
+            cur.advanceTo(scan.pos)
             return offsets.build()
         }
 
@@ -3072,120 +3318,187 @@ internal class ErbcStreamDecoder private constructor(
             nodeCount: Int,
             stmtCount: Int,
         ): NodeOffsets {
+            val scan = BulkScanCursor(cur.window, fileSize, cur.pos)
             val offsets = NodeOffsets.Builder(nodeCount)
             for (i in 0 until nodeCount) {
-                offsets.add(cur.pos)
+                offsets.add(scan.pos)
                 // 与 scanNodeOffsets 同口径：这里**不包**诊断前缀，异常自带字节偏移。
-                skipNode(cur, strings, i, nodeCount)
+                skipNode(scan, strings, i, nodeCount)
             }
-            val recordBytes = file.endOf(ErbcFormat.SECTION_STATEMENTS) - cur.pos.toLong()
+            val recordBytes = file.endOf(ErbcFormat.SECTION_STATEMENTS) - scan.pos.toLong()
             if (recordBytes < stmtCount.toLong() * 15) {
                 throw ErbcDecodeException(
-                    cur.pos,
+                    scan.pos,
                     "段 3 边界扫描错位：扫完 $nodeCount 条节点后记录区只剩 $recordBytes 字节，" +
                         "不足 stmtCount($stmtCount)×15（一条语句记录的最短编码）",
                 )
             }
+            cur.advanceTo(scan.pos)
             return offsets.build()
         }
 
-        /** 跳过一条节点记录（字节长度与 [RecordSource.readNode] 逐字节对齐）。 */
+        /**
+         * 跳过一条节点记录（字节长度与 [RecordSource.readNode] 逐字节对齐）。
+         *
+         * 只做分派：每种 `ExprTag` 的字段读序拆在同组的小函数里，语义/报错位置逐字不变
+         * （当初单个 74 行的 `when` 分支体是为减少函数调用，扫描改成批量介质后这点开销
+         * 已可忽略，拆开只为可读性与静态检查）。
+         */
         private fun skipNode(
-            cur: StreamCursor,
+            cur: BulkScanCursor,
             strings: StreamStringTable,
             self: Int,
             nodeCount: Int,
         ) {
             when (val tag = cur.u8()) {
-                ExprTag.INT_LITERAL -> {
-                    cur.i64(); cur.i32(); cur.i32()
-                }
-
-                ExprTag.STR_LITERAL -> {
-                    strings.checkIndex(cur.u32()); cur.i32(); cur.i32()
-                }
-
-                ExprTag.FLOAT_LITERAL -> {
-                    // f64 = i64 raw bits：与 [RecordSource.readNode] 的 cur.f64() 逐字节对齐。
-                    cur.i64(); cur.i32(); cur.i32()
-                }
-
-                ExprTag.NULL_TERM -> {
-                    cur.bool(); cur.i32(); cur.i32()
-                }
-
-                ExprTag.VAR_REF -> {
-                    strings.checkIndex(cur.u32())
-                    val subKey = cur.u32()
-                    if (subKey != NONE_REF) strings.checkIndex(subKey)
-                    cur.u8() // operandType
-                    cur.u8() // flags
-                    skipChildList(cur, strings, self, nodeCount)
-                    cur.i32(); cur.i32()
-                }
-
-                ExprTag.KEYWORD_INDEX_ARG -> {
-                    skipChild(cur, self, nodeCount)
-                    strings.checkIndex(cur.u32())
-                    cur.i32(); cur.i32(); cur.i32()
-                }
-
-                ExprTag.FUNC_CALL -> {
-                    strings.checkIndex(cur.u32())
-                    cur.u8() // operandType
-                    // 参数表是 `readChildOptList`：允许 NONE_REF 空参占位（`childOpt`）。
-                    val n = cur.count("表达式下标表", 4)
-                    repeat(n) {
-                        val idx = cur.u32()
-                        if (idx != NONE_REF) skipChildIndex(idx, self, nodeCount)
-                    }
-                    cur.i32(); cur.i32()
-                }
-
-                ExprTag.UNARY, ExprTag.UNARY_AFTER -> {
-                    strings.checkIndex(cur.u32()) // operatorName
-                    skipChild(cur, self, nodeCount)
-                    cur.i32(); cur.i32()
-                }
-
-                ExprTag.BINARY -> {
-                    strings.checkIndex(cur.u32())
-                    skipChild(cur, self, nodeCount)
-                    skipChild(cur, self, nodeCount)
-                    cur.u8()
-                    cur.i32(); cur.i32()
-                }
-
-                ExprTag.TERNARY -> {
-                    skipChild(cur, self, nodeCount)
-                    skipChild(cur, self, nodeCount)
-                    skipChild(cur, self, nodeCount)
-                    cur.u8()
-                    cur.i32(); cur.i32()
-                }
-
-                ExprTag.FORM_STRING -> {
-                    val n = cur.count("FormStringTerm 部件数", 5)
-                    repeat(n) {
-                        when (val partTag = cur.u8()) {
-                            ErbcFormat.FormPartTag.TEXT -> strings.checkIndex(cur.u32())
-                            ErbcFormat.FormPartTag.EMBEDDED -> {
-                                skipChild(cur, self, nodeCount)
-                                skipConversion(cur, strings, self, nodeCount)
-                            }
-
-                            else -> throw ErbcDecodeException(cur.pos - 1, "未知 FormPart 标签: $partTag")
-                        }
-                    }
-                    cur.i32(); cur.i32()
-                }
-
+                ExprTag.INT_LITERAL, ExprTag.FLOAT_LITERAL -> skipScalarNode(cur)
+                ExprTag.STR_LITERAL -> skipStringLiteralNode(cur, strings)
+                ExprTag.NULL_TERM -> skipNullTermNode(cur)
+                ExprTag.VAR_REF -> skipVarRefNode(cur, strings, self, nodeCount)
+                ExprTag.KEYWORD_INDEX_ARG -> skipKeywordIndexNode(cur, strings, self, nodeCount)
+                ExprTag.FUNC_CALL -> skipFuncCallNode(cur, strings, self, nodeCount)
+                ExprTag.UNARY, ExprTag.UNARY_AFTER -> skipUnaryNode(cur, strings, self, nodeCount)
+                ExprTag.BINARY -> skipBinaryNode(cur, strings, self, nodeCount)
+                ExprTag.TERNARY -> skipTernaryNode(cur, self, nodeCount)
+                ExprTag.FORM_STRING -> skipFormStringNode(cur, strings, self, nodeCount)
                 else -> throw ErbcDecodeException(cur.pos - 1, "未知表达式节点标签: $tag")
             }
         }
 
+        /** INT_LITERAL / FLOAT_LITERAL：`i64` 载荷（浮点是 raw bits，同 [RecordSource.readNode] 的 `f64`）+ 2 个 i32。 */
+        private fun skipScalarNode(cur: BulkScanCursor) {
+            cur.i64(); cur.i32(); cur.i32()
+        }
+
+        /** STR_LITERAL：串表下标 + 2 个 i32。 */
+        private fun skipStringLiteralNode(
+            cur: BulkScanCursor,
+            strings: StreamStringTable,
+        ) {
+            strings.checkIndex(cur.u32()); cur.i32(); cur.i32()
+        }
+
+        /** NULL_TERM：布尔载荷 + 2 个 i32。 */
+        private fun skipNullTermNode(cur: BulkScanCursor) {
+            cur.bool(); cur.i32(); cur.i32()
+        }
+
+        /** VAR_REF：名字下标 + 子键下标 + operandType + flags + 子表 + 2 个 i32。 */
+        private fun skipVarRefNode(
+            cur: BulkScanCursor,
+            strings: StreamStringTable,
+            self: Int,
+            nodeCount: Int,
+        ) {
+            strings.checkIndex(cur.u32())
+            val subKey = cur.u32()
+            if (subKey != NONE_REF) strings.checkIndex(subKey)
+            cur.u8() // operandType
+            cur.u8() // flags
+            skipChildList(cur, strings, self, nodeCount)
+            cur.i32(); cur.i32()
+        }
+
+        /** KEYWORD_INDEX_ARG：子节点 + 名字下标 + 3 个 i32。 */
+        private fun skipKeywordIndexNode(
+            cur: BulkScanCursor,
+            strings: StreamStringTable,
+            self: Int,
+            nodeCount: Int,
+        ) {
+            skipChild(cur, self, nodeCount)
+            strings.checkIndex(cur.u32())
+            cur.i32(); cur.i32(); cur.i32()
+        }
+
+        /** FUNC_CALL：名字下标 + operandType + 参数下标表（允许 `NONE_REF` 空参占位）+ 2 个 i32。 */
+        private fun skipFuncCallNode(
+            cur: BulkScanCursor,
+            strings: StreamStringTable,
+            self: Int,
+            nodeCount: Int,
+        ) {
+            strings.checkIndex(cur.u32())
+            cur.u8() // operandType
+            // 参数表是 `readChildOptList`：允许 NONE_REF 空参占位（`childOpt`）。
+            val n = cur.count("表达式下标表", MIN_EXPR_INDEX_BYTES)
+            repeat(n) {
+                val idx = cur.u32()
+                if (idx != NONE_REF) skipChildIndex(idx, self, nodeCount)
+            }
+            cur.i32(); cur.i32()
+        }
+
+        /** UNARY / UNARY_AFTER：算符名下 + 1 个子节点 + 2 个 i32。 */
+        private fun skipUnaryNode(
+            cur: BulkScanCursor,
+            strings: StreamStringTable,
+            self: Int,
+            nodeCount: Int,
+        ) {
+            strings.checkIndex(cur.u32()) // operatorName
+            skipChild(cur, self, nodeCount)
+            cur.i32(); cur.i32()
+        }
+
+        /** BINARY：算符名下 + 2 个子节点 + 标志字节 + 2 个 i32。 */
+        private fun skipBinaryNode(
+            cur: BulkScanCursor,
+            strings: StreamStringTable,
+            self: Int,
+            nodeCount: Int,
+        ) {
+            strings.checkIndex(cur.u32())
+            skipChild(cur, self, nodeCount)
+            skipChild(cur, self, nodeCount)
+            cur.u8()
+            cur.i32(); cur.i32()
+        }
+
+        /** TERNARY：3 个子节点 + 标志字节 + 2 个 i32。 */
+        private fun skipTernaryNode(
+            cur: BulkScanCursor,
+            self: Int,
+            nodeCount: Int,
+        ) {
+            skipChild(cur, self, nodeCount)
+            skipChild(cur, self, nodeCount)
+            skipChild(cur, self, nodeCount)
+            cur.u8()
+            cur.i32(); cur.i32()
+        }
+
+        /** FORM_STRING：部件表（TEXT 只有串下标，EMBEDDED 是子节点 + 转换段）+ 2 个 i32。 */
+        private fun skipFormStringNode(
+            cur: BulkScanCursor,
+            strings: StreamStringTable,
+            self: Int,
+            nodeCount: Int,
+        ) {
+            val n = cur.count("FormStringTerm 部件数", MIN_FORM_PART_BYTES)
+            repeat(n) { skipFormPart(cur, strings, self, nodeCount) }
+            cur.i32(); cur.i32()
+        }
+
+        private fun skipFormPart(
+            cur: BulkScanCursor,
+            strings: StreamStringTable,
+            self: Int,
+            nodeCount: Int,
+        ) {
+            when (val partTag = cur.u8()) {
+                ErbcFormat.FormPartTag.TEXT -> strings.checkIndex(cur.u32())
+                ErbcFormat.FormPartTag.EMBEDDED -> {
+                    skipChild(cur, self, nodeCount)
+                    skipConversion(cur, strings, self, nodeCount)
+                }
+
+                else -> throw ErbcDecodeException(cur.pos - 1, "未知 FormPart 标签: $partTag")
+            }
+        }
+
         private fun skipConversion(
-            cur: StreamCursor,
+            cur: BulkScanCursor,
             strings: StreamStringTable,
             self: Int,
             nodeCount: Int,
@@ -3209,7 +3522,7 @@ internal class ErbcStreamDecoder private constructor(
         }
 
         private fun skipChildList(
-            cur: StreamCursor,
+            cur: BulkScanCursor,
             strings: StreamStringTable,
             self: Int,
             nodeCount: Int,
@@ -3220,7 +3533,7 @@ internal class ErbcStreamDecoder private constructor(
 
 
         /** 与 [RecordSource.child] 同一句判界（越界 + 后序性）。 */
-        private fun skipChild(cur: StreamCursor, self: Int, nodeCount: Int) {
+        private fun skipChild(cur: BulkScanCursor, self: Int, nodeCount: Int) {
             skipChildIndex(cur.u32(), self, nodeCount)
         }
 
@@ -3259,7 +3572,8 @@ internal class ErbcStreamDecoder private constructor(
  *
  * 与段 3 语句池同一套机制（[RecordSource.enableLazyNodes] / [RecordSource.nodeAt]）：
  * 节点表的后序性保证「子下标 < 父下标」，重放一条记录时子节点已在表里
- * 或按递归补齐；同一下标恒同一实例（[RecordSource] 的 `nodes[]` 缓存）。
+ * 或按递归补齐；同一下标在**同一缓存代内**恒同一实例（[RecordSource] 的 `nodes[]` 缓存；
+ * 运行期上界重置之后重放解出的是逐字段相同的新实例，语义见 LazyExprSource.node 的 KDoc）。
  */
 private class MappedExprSource(
     private val arena: RecordSource,
@@ -3296,6 +3610,21 @@ private class MappedExprSource(
     private val winPinned: Boolean = win.isPinnedWhole
 
     override val nodeCount: Int get() = poolCount
+
+    /**
+     * 装载收尾武装（`Program.armRuntimeCodeCacheBudgets` 接线）：给段 2 的节点表接运行期上界。
+     * 语义与 [RecordSource.armRuntimeNodeBudget] 同源（取值见 [RUNTIME_NODE_ENTRY_BUDGET]）。
+     */
+    override fun armRuntimeBudgets(nodeEntries: Int) {
+        arena.armRuntimeNodeBudget(nodeEntries)
+    }
+
+    override fun codeCacheCensus(): CodeCacheCensus = CodeCacheCensus(
+        nodeBlocks = arena.cachedNodeBlocks(),
+        nodeEvictions = arena.runtimeNodeEvictions,
+        internForms = -1,
+        internStrings = -1,
+    )
 
     override fun node(index: Int): Expr {
         // 判界在取数之前（与改造前的 `roots.size` 判定同一条文案），块表读不承担越界语义
@@ -3422,6 +3751,90 @@ internal class RecordSource(
      */
     private val nodes = BlockRefs<Expr>(nodeCount)
 
+    // ---- 运行期节点缓存的块级 LRU（2026-11-14 OOM 根修）--------------------------
+    //
+    // nodes[] 把解码过的结点按表下标钉住、永不归还，运行期解码面 = 「玩到过的全部代码」，
+    // 512 MiB 挡位上就是 OOM 缺口的主力（取值口径见 [RUNTIME_NODE_ENTRY_BUDGET]）。
+    // 上界用**块级 LRU**而不是整表重置：整表重置会把当前工作集连同冷数据一起扔掉，
+    // 紧随其后的重放是纯 decode 开销（桌面 soak512 实测引导期 ~28 次重置 → 引导 3 分钟
+    // 拖到 28 分钟）；块级逐出只弃「最久未碰的那一块」（4,096 槽），热块（正在跑的
+    // 语句/循环与热点 `_EVAL_INT` 池根所在块）按访问戳天然幸存，冷块渐进归还。
+    // 被逐出块里的实例只要还被已物化语句/扁平片持有就照常活着，之后对该块的读取
+    // 走 lazyEnsure 重放，解出逐字段相同的结点 —— 结构语义逐字不变。
+    //
+    // 线程口径与 nodes[] 既有形状一致（ADR-003）：写（填块/逐出）在 VM 线程；诊断第二线程
+    // 的语句解码走 materializeLock，块位表本体是 AtomicReferenceArray，逐出与读的竞态
+    // 最坏只是「刚读到的引用转头被逐出」（引用本身仍有效）。
+
+    /** 块数上界（0 = 未武装）；由 [armRuntimeNodeBudget] 按 entries 预算折算。 */
+    private var runtimeBlockBudget = 0
+
+    /** LRU 时钟（每次 touch 自增；Long 不回绕）。 */
+    private var blockClock = 0L
+
+    /** 每块最近访问戳（0 = 该块自武装以来从未被碰过 = 未分配）；按块下标索引。 */
+    private var blockStamps = LongArray(0)
+
+    /** 自武装以来已分配（有戳）的块数。 */
+    private var liveBlocks = 0
+
+    /** 运行期块逐出次数（诊断读数；装载趟不计）。 */
+    var runtimeNodeEvictions: Int = 0
+        private set
+
+    /** 当前已分配（有背衬数组）的块数（census 取数面；O(块位表) 扫描，恒廉价）。 */
+    fun cachedNodeBlocks(): Int = nodes.allocatedBlocks()
+
+    /** 装载收尾武装（`armRuntimeBudgets` 接线）；对未武装实例零影响。 */
+    fun armRuntimeNodeBudget(maxEntries: Int) {
+        val budgetBlocks = ((maxEntries + BlockRefs.BLOCK - 1) / BlockRefs.BLOCK).coerceAtLeast(2)
+        runtimeBlockBudget = budgetBlocks
+        blockStamps = LongArray(nodes.blockCount)
+        blockClock = 0L
+        liveBlocks = 0
+    }
+
+    /** 摸一块（读路径与填块路径都要调）：刷新访问戳。未武装（戳表未分配）零成本直返。 */
+    private fun touchBlock(bi: Int) {
+        if (blockStamps.isEmpty()) return
+        blockStamps[bi] = ++blockClock
+    }
+
+    /** 填块路径：新分配的块计入 [liveBlocks]，超预算就逐出最冷块（升序构建窗口内推迟）。 */
+    private fun touchBlockOnFill(bi: Int) {
+        if (blockStamps.isEmpty()) return
+        if (blockStamps[bi] == 0L) liveBlocks++
+        touchBlock(bi)
+        // ascendingBuild 窗口的不变式是「被引用的子节点此刻必已就位」——窗口内逐出会把
+        // 本轮刚建好的块清掉，收尾的 nodes[index] 与后续 child 读取会撞「尚未构建」。
+        // 稠密前缀构建是罕见退路，超额允许暂时越过预算，构建收尾后由后续填块正常逐出。
+        if (!ascendingBuild && liveBlocks > runtimeBlockBudget) evictColdest()
+    }
+
+    /** 逐出最冷块（戳最小者）；每次填块至多调一次，扫描 O(块数)。 */
+    private fun evictColdest() {
+        // 稠密前缀区（0..prefixBuiltThrough）不逐出：ascendingBuild 的不变式是
+        // 「≤ 游标的节点必已就位」，逐出游标以下的块会让后续稠密构建引用低址节点时
+        // 撞「尚未构建」。游标只由罕见的深表达式退路推进，生产语料恒 -1，保护区近似空。
+        val protectedThrough = if (prefixBuiltThrough < 0) -1 else prefixBuiltThrough / BlockRefs.BLOCK
+        var coldest = -1
+        var coldestStamp = Long.MAX_VALUE
+        for (i in blockStamps.indices) {
+            if (i <= protectedThrough) continue
+            val s = blockStamps[i]
+            if (s != 0L && s < coldestStamp) {
+                coldestStamp = s
+                coldest = i
+            }
+        }
+        if (coldest >= 0) {
+            nodes.clearBlock(coldest)
+            blockStamps[coldest] = 0L
+            liveBlocks--
+            runtimeNodeEvictions++
+        }
+    }
+
     // ---- 惰性节点重建（M10-MEM）----------------------------------------------------
     //
     // 索引趟解完语句记录后会把 [nodes] 整表清空（那些 Expr 已经没有任何语句引用了），
@@ -3484,6 +3897,7 @@ internal class RecordSource(
     ) {
         check(offsets.size == nodes.size) { "节点偏移表长 ${offsets.size} 与节点表长 ${nodes.size} 不符" }
         nodes.clear()
+        resetRuntimeLruState()
         prefixBuiltThrough = -1
         lazyWin = win
         nodeOffsets = offsets
@@ -3499,7 +3913,14 @@ internal class RecordSource(
      */
     fun discardBuiltNodes() {
         nodes.clear()
+        resetRuntimeLruState()
         prefixBuiltThrough = -1
+    }
+
+    /** LRU 记账随整表清空一并归零（戳清零 = 「有戳 ⟺ 已分配」不变式重新成立）。 */
+    private fun resetRuntimeLruState() {
+        if (blockStamps.isNotEmpty()) blockStamps.fill(0L)
+        liveBlocks = 0
     }
 
     /**
@@ -3533,6 +3954,7 @@ internal class RecordSource(
         try {
             val built = readNode(StreamCursor(win, offsets.get(index), lazyFileSize), index)
             nodes[index] = built
+            touchBlockOnFill(index shr BlockRefs.BLOCK_SHIFT)
             return built
         } finally {
             ensureDepth--
@@ -3554,6 +3976,7 @@ internal class RecordSource(
             for (j in (prefixBuiltThrough + 1).coerceAtLeast(0)..index) {
                 if (nodes[j] != null) continue
                 nodes[j] = readNode(StreamCursor(win, offsets.get(j), lazyFileSize), j)
+                touchBlockOnFill(j shr BlockRefs.BLOCK_SHIFT)
             }
             if (index > prefixBuiltThrough) prefixBuiltThrough = index
         } finally {
@@ -3587,7 +4010,15 @@ internal class RecordSource(
         if (index < 0 || index >= nodes.size) {
             throw ErbcDecodeException(0, "表达式根下标越界: $index（节点表长 ${nodes.size}）")
         }
-        return nodes[index] ?: lazyEnsure(index)
+        val cached = nodes[index]
+        // 已物化的读取刷新访问戳（热点 `_EVAL_INT` 池根的块因此幸存，不被 LRU 逐出）；
+        // 未物化走 lazyEnsure（填块路径自带戳与逐出）。戳只在已分配块上更新，
+        // 空块不碰戳，保持「有戳 ⟺ 已分配」的不变式。
+        if (cached != null) {
+            touchBlock(index shr BlockRefs.BLOCK_SHIFT)
+            return cached
+        }
+        return lazyEnsure(index)
     }
 
     /**

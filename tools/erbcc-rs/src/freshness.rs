@@ -8,7 +8,7 @@ use crate::types::{absolutize, current_dir, find_repo_root, ErbccError, HashEntr
 
 /// 产物新鲜度检查（**不重编**）。口径权威 = `compile/ArtifactFreshness.kt`：
 /// 容器字节数/摘要/段表、每个源文件摘要、`program.meta` 的 `program-sha256`、
-/// `program.stmt.idx` 的语句条数、`compiler-digest` × 当前 core-vm 源码树。
+/// `program.stmt.idx` 的语句条数、`compiler-digest` × 当前编译器源码树（core-vm + erbcc 双根）。
 /// 清单无 `compiler-digest` 行或不等 ⇒ 判旧产物（与 app staging 的 CMP-66 同一判据）。
 ///
 /// `program.meta` 分两层：**头层**（[read_meta_head]，三行 + 配对凭证）本文件自己算；
@@ -119,14 +119,14 @@ impl Report {
 
 /// 侧车头部解析结果。
 struct MetaHead {
-    /// `program-sha256` 行：`-` = None（`BootMetadata.kt:1463-1465`）。
+    /// `program-sha256` 行：`-` = None（`BootMetadata.kt:1520-1523`）。
     program_sha256: Option<String>,
 }
 
 /// 读 `program.meta` 的头部三行（`format-version` / `engine` / `program-sha256`）。
 ///
 /// **口径范围（诚实声明）**：本函数只解头部三行，Kotlin 侧走 `BootMetadata.read`
-/// （`BootMetadata.kt:414-426`，`core-vm` 里那台全文状态机 `:1382-1818`）做**全文**解析
+/// （`BootMetadata.kt:450-462`，`core-vm` 里那台全文状态机 `:1440-1904`）做**全文**解析
 /// （严格 UTF-8 + 全部段的记录序/计数/载荷校验）。**深处坏而头部好**的侧车本函数一律返回 Ok ——
 /// 这不是放行：`check_sidecars` 在 Ok 分支上必须再走 [meta_leg_via_jvm]（委托 JVM 真跑
 /// `BootMetadata.read`，把 `META_UNREADABLE` / `META_STALE` 原文取回来），判据面与 Kotlin
@@ -134,20 +134,28 @@ struct MetaHead {
 /// 漂移的根源），头层这几条只是**便宜的先筛**，一条没放宽（`kotlin-vs-rust.tsv` 的头部族
 /// 逐字同文读数就是它的现状钉）。
 ///
-/// 头部判据逐条对齐 `BootMetaCodec.parseReader`（`BootMetadata.kt:1444-1465`）：
+/// 头部判据逐条对齐 `BootMetaCodec.parseReader`（`BootMetadata.kt:1502-1523`）：
 /// 空侧车 / 首条必须 `format-version` / 版本 1..=FORMAT_VERSION / 次条 `engine` / 再次 `program-sha256`。
+///
+/// **版本判据照抄 Kotlin 读侧**（2026-11-10 对齐：v1 → v3 预存镜像滞后清账）：
+/// Kotlin `BootMetadata.FORMAT_VERSION = 3`（`BootMetadata.kt:422`）只拒「更高」（`:1512-1516`）
+/// 与「< 1」（`:1517`），1..=3 全收 —— v2 的 `private-dim isFloat`、v3 的 `function
+/// floatLocalSize`/`returnsFloat` 与 `private-dim defaultsFloat` 都是**版本门控的可选原子**
+/// （`:1647-1660` / `:1732` / `:1738`），全在头三层之后，本函数不消费；缺段/载荷判据由
+/// [meta_leg_via_jvm] 委托 JVM 真跑全文状态机。本侧**不发明版本宽容**（读到旧版放行 =
+/// 与 Kotlin 双标）：Kotlin 怎么判，这里就怎么判。
 fn read_meta_head(path: &Path) -> Result<MetaHead, String> {
-    const META_FORMAT_VERSION: i32 = 1; // BootMetadata.kt:386
+    const META_FORMAT_VERSION: i32 = 3; // BootMetadata.kt:422
     let raw = std::fs::read(path)
         .map_err(|e| format!("BootMetaFormatException: {}: 读取失败（IOException: {e}）", path.display()))?;
-    // 严格 UTF-8（CMP-07，`BootMetadata.kt:405-410`）：坏字节报错，不许换成 U+FFFD 静默进模型。
+    // 严格 UTF-8（CMP-07，`BootMetadata.kt:471-476`）：坏字节报错，不许换成 U+FFFD 静默进模型。
     let text = std::str::from_utf8(&raw).map_err(|_| {
         format!(
             "BootMetaFormatException: {}: 严格 UTF-8 解码失败（MalformedInputException）",
             path.display()
         )
     })?;
-    // 记录切分口径（`BootMetadata.kt:1256-1287`）：只按 `\n` 切、剥**一个**尾部 CR、空行跳过但计入行号。
+    // 记录切分口径（`BootMetadata.kt:1348-1376`）：只按 `\n` 切、剥**一个**尾部 CR、空行跳过但计入行号。
     let mut records: Vec<(usize, &str)> = Vec::new();
     for (i, line) in text.split('\n').enumerate() {
         let line_no = i + 1;
@@ -183,7 +191,7 @@ fn read_meta_head(path: &Path) -> Result<MetaHead, String> {
     expect(records.get(1), "engine")?;
     let sha_rec = expect(records.get(2), "program-sha256")?;
     let payload = sha_rec.trim();
-    // 写侧无配对哈希时写裸短横线（`BootMetadata.kt:1463-1465`），非空时写引号十六进制串。
+    // 写侧无配对哈希时写裸短横线（`BootMetadata.kt:1520-1523`），非空时写引号十六进制串。
     let program_sha256 = if payload == "-" {
         None
     } else {
@@ -202,7 +210,7 @@ fn split_record(line: &str) -> (&str, &str) {
     }
 }
 
-/// `Cursor.next(expect)`（`BootMetadata.kt:1415-1423`）的头部版判据。
+/// `Cursor.next(expect)`（`BootMetadata.kt:1473-1481`）的头部版判据。
 fn expect<'a>(rec: Option<&'a (usize, &'a str)>, want: &str) -> Result<&'a str, String> {
     let rec = rec.ok_or_else(|| {
         format!("BootMetaFormatException: 侧车在 {want} 处提前结束")
@@ -233,7 +241,7 @@ fn unquote(payload: &str) -> Option<String> {
 ///
 /// 存在理由：`check` 的 Rust 腿只做**便宜的先筛**（头层 [read_meta_head]、容器、清单），
 /// 而 `program.meta` 「头部三行之后」的判据权威在 `core-vm` 那台全文状态机里
-/// （`BootMetadata.kt:414-426` + `:1382-1818`）。Rust 侧重写它就是第二实现方漂移
+/// （`BootMetadata.kt:450-462` + `:1440-1904`）。Rust 侧重写它就是第二实现方漂移
 /// （契约 §0 铁律 1），所以**委托**：真跑一次 JVM 的 `erbcc check`，把它的 `META_*`
 /// 结论原文取回来。测试用这一层注入替身（恒放行 / 抛错 / 计数），生产走 [meta_leg_via_jvm]。
 pub type MetaLeg<'a> = dyn Fn(&Path, &Path) -> Outcome<Vec<Issue>> + 'a;
@@ -456,7 +464,7 @@ fn parse_entry(rest: &str) -> Option<HashEntry> {
 /// 三种形态共用一个 kind（语义都是「产物不是当前编译器编的」），detail 里区分。
 ///
 /// 仓库根定位：Kotlin `locateRepoRoot(outDir)` 有三档提示（outDir → `user.dir` →
-/// 本类 class 位置，`ErbcCompilerDigest.kt:117-134`）。冻结的 `check` 签名里没有仓库根形参，
+/// 本类 class 位置，`ErbcCompilerDigest.kt:122-150`）。冻结的 `check` 签名里没有仓库根形参，
 /// 故本侧按 **outDir → 进程工作目录** 两档上溯；第三档（class 位置）在 Rust 无对应物 ——
 /// 产物目录与 cwd 都在仓库外时两侧行为不同（Kotlin 仍可能定位到、本侧报 COMPILER_STALE），
 /// 记 TODO(verify)。

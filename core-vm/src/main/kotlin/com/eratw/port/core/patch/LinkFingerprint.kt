@@ -28,7 +28,9 @@ import java.util.Locale
  *   `requires` / `loadAfter`（[ModuleLinkOrder.plan] 会重排，源顺序不影响产物）、
  *   componentSchemas / entityArchetypes / relationshipSchemas / csvPatches /
  *   csvValuePatches / entityRefs / globalDims / privateDims 的**名字集合**——
- *   名字大写归一（NamePolicy 口径）后排序；
+ *   名字大写归一（NamePolicy 口径）后排序；`charaRoutes` 的路由行集合（行序无语义，
+ *   freeze 派生按族名定序）与行内格号集合同归一——**无路由时不落渲染行**，既有无路由
+ *   manifest 的指纹与本规则加入前逐字节不变（M5-4 刀 2 判据 4）；
  * - **保持列表序**（顺序有物理/叠加语义）：`externalCalls`（列表序 = 哨兵槽位）、
  *   [moduleArtifactSha256s]（链接序 = 函数窗口分配序）、csvPatches/csvValuePatches
  *   的**条目序**（同格叠加按序生效）——只按列表序哈希、绝不排序。
@@ -83,6 +85,12 @@ object LinkFingerprint {
             line("schema", m.componentSchemas.map { it.render() }.sorted().joinToString("|"))
             line("archetype", m.entityArchetypes.map { it.render() }.sorted().joinToString("|"))
             line("relation", m.relationshipSchemas.map { it.render() }.sorted().joinToString("|"))
+            // M5-4 刀 2（RECON R4 采纳项）：路由声明参与指纹——路由改变投射器的脱水面，
+            // 同 ABI 结论不该静默变坏（exportedMacros 同款论证）。**无路由不落行**：
+            // 无路由 manifest 的指纹与本行加入前逐字节不变（契约判据 4）。
+            if (m.charaRoutes.isNotEmpty()) {
+                line("charaRoutes", m.charaRoutes.map { it.render() }.sorted().joinToString("|"))
+            }
             line("dims", m.globalDims.map { it.render() }.sorted().joinToString("|"))
             line("privateDims", m.privateDims.entries
                 .sortedBy { it.key.uppercase(Locale.ROOT) }
@@ -118,6 +126,14 @@ object LinkFingerprint {
         (if (directed) ">" else "<") +
         (if (dedupeEdges) "d" else "") + (if (cascadeOnDestroy) "c" else "") +
         (if (autoInverse) "->" + inverseName!!.uppercase(Locale.ROOT) else "")
+
+    /**
+     * 角色变量路由行（M5-4 刀 1 声明形状的渲染）：族名大写归一 + 格号集合排序
+     * （格号集合顺序无语义——freeze 派生对显式格同样排序，同内容不同声明序不漂移；
+     * 空格集 = 全跨度族级路由，渲染成空方括号）。
+     */
+    private fun CharaRouteDeclaration.render(): String =
+        variable.uppercase(Locale.ROOT) + "[" + cells.sorted().joinToString(",") + "]"
 
     private fun DimSpec.render(): String = name.uppercase(Locale.ROOT) + (if (isStr) "$" else "") +
         "[" + dims.joinToString(",") + "]" + (if (isConst) "c" else "") +

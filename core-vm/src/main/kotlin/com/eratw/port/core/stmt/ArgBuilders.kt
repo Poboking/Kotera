@@ -1791,7 +1791,10 @@ object ArgBuilders {
                 var allConst = true
                 for (i in list.indices) {
                     val e = list[i] ?: fail(ctx, "右值不能省略")
-                    if (!e.isInteger()) fail(ctx, "不能把字符串赋给整数变量")
+                    // 2026-11-14 语料换代 261111 校准：蛇版 SP_SET_ArgumentBuilder 的解析期闸只拒
+                    // 字符串右值（trerror.CanNotAssignStrToInt，ArgumentBuilder.cs:1147-1149/:1164-1166），
+                    // 浮点右值放行、执行期走整型通道截断（Instraction.Child.cs:696 GetIntValue）。
+                    if (e.operandType == OperandType.STR) fail(ctx, "不能把字符串赋给整数变量")
                     if (allConst) {
                         val c = e.constInt()
                         if (c != null) consts[i] = c else allConst = false
@@ -1802,7 +1805,10 @@ object ArgBuilders {
                 return arg
             }
             val term = list[0]!!
-            if (!term.isInteger()) fail(ctx, "不能把字符串赋给整数变量")
+            // 同上：只拒字符串（CanNotAssignStrToInt）；浮点右值由执行层 SET 整型通道截断
+            //（蛇版 Instraction.Child.cs:696 `Term.GetIntValue(exm)`；
+            // SingleFloatTerm.GetIntValue = `(long)fValue`，Term.cs:117-120）。
+            if (term.operandType == OperandType.STR) fail(ctx, "不能把字符串赋给整数变量")
             when (op) {
                 OperatorCode.ASSIGNMENT -> {
                     val arg = SpSetArgument(dest, term)

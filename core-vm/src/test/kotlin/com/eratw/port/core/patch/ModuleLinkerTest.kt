@@ -128,7 +128,7 @@ class ModuleLinkerTest {
     }
 
     private fun linkAll(vararg modules: LinkableModule, policy: ResolverPolicy = ResolverPolicy.MODERN) =
-        ModuleLinker.link(compileBase(), baseMetas, modules.toList(), policy)
+        ModuleLinker.link(LinkInputs(compileBase(), baseMetas, modules.toList(), policy))
 
     // ------------------------------------------------------------------
     // 正向：指令改写四支 + 拼接面
@@ -215,7 +215,7 @@ class ModuleLinkerTest {
     @Test
     fun `空模块集拒绝`() {
         val ex = assertFailsWith<IllegalArgumentException> {
-            ModuleLinker.link(compileBase(), baseMetas, emptyList(), ResolverPolicy.MODERN)
+            ModuleLinker.link(LinkInputs(compileBase(), baseMetas, emptyList(), ResolverPolicy.MODERN))
         }
         assertTrue("base-only" in ex.message!!, ex.message)
     }
@@ -243,7 +243,7 @@ class ModuleLinkerTest {
     fun `base元数据不对齐拒绝`() {
         val shortMetas = listOf(FuncMeta(index = 0, key = "ENTRY"))
         val ex = assertFailsWith<IllegalArgumentException> {
-            ModuleLinker.link(compileBase(), shortMetas, listOf(moduleC()), ResolverPolicy.MODERN)
+            ModuleLinker.link(LinkInputs(compileBase(), shortMetas, listOf(moduleC()), ResolverPolicy.MODERN))
         }
         assertTrue("不同长" in ex.message!!, ex.message)
     }

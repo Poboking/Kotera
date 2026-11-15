@@ -1,5 +1,7 @@
 package com.eratw.port.core.vars
 
+import com.eratw.port.core.compat.NicknameKeywordPolicy
+import com.eratw.port.core.compat.RelationMasternamePolicy
 import com.eratw.port.core.err.CodeEE
 
 /**
@@ -41,6 +43,22 @@ data class VarConfig(
      * [DimParseConfig.varsizeDimConfig]。
      */
     val varsizeDimConfig: Boolean = false,
+
+    /**
+     * `GETNUM`/`GETNUMB` 的关键字面：`WITH_NICKNAME_MASTERNAME` 时 `NICKNAME`/`MASTERNAME`
+     * 可解析（v24 的 `GetKeywordDictionary` 有这两个 case，spec: ConstantData.cs:876-877），
+     * 否则只有 `NAME`/`CALLNAME`（em/snake/cs，spec: :1075-1076 / :1454-1455 / :1091-1092）。
+     * 真源 = [com.eratw.port.core.compat.EngineDialect.nicknameKeywords]。
+     */
+    val nicknameKeywords: NicknameKeywordPolicy = NicknameKeywordPolicy.NAME_CALLNAME_ONLY,
+
+    /**
+     * `RELATION` 逆引表是否收 `MASTERNAME` 列（`relationDic` 建表循环）。
+     * v24/em 会加（spec: ConstantData.cs:640-641 / :711-712），snake/cs 不加
+     * （spec: :854-863 / :743-753）。真源 =
+     * [com.eratw.port.core.compat.EngineDialect.relationMastername]。
+     */
+    val relationMastername: RelationMasternamePolicy = RelationMasternamePolicy.EXCLUDED,
     ) {
     // LongArray 在 data class 里的 equals 是引用比较；本类只当配置包用，不做值比较。
     override fun equals(other: Any?): Boolean = this === other

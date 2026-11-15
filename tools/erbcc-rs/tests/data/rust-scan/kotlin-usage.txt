@@ -3,7 +3,7 @@ erbcc - EraBasic 编译器 (eratw-android)
 用法:
   erbcc scan --corpus <ERB目录> [--use-index <lazyloadingfiles.dat>] [--rename <_Rename.csv>] [--out <报告目录>]
   erbcc symbols --corpus <ERB目录> [--json <输出文件>]
-  erbcc compile --corpus <ERB目录> --out <产物目录> [--limit <N>]
+  erbcc compile --corpus <ERB目录> --out <产物目录> [--limit <N>] [--mode strict|compat] [--allow-parse-failures <容错清单>]
   erbcc check --corpus <ERB目录> [--out <产物目录>]
   erbcc audit --corpus <ERB目录> [--game-root <游戏根>] [--out <TSV文件>] [--limit <N>] [--strict] [--allow <白名单>]
   erbcc audit --corpus <ERB目录> [--game-root <游戏根>] --roundtrip [--artifact-dir <产物目录>] [--limit <N>]
@@ -20,6 +20,14 @@ compile 选项（全量语料 → .erbc 产物 + 确定性 manifest，规约见 
   --corpus      游戏数据根（ERB 语料所在目录）
   --out         产物输出目录（默认 tools/erbcc/erbc-out/；落成 <out>/erbc.v1/{program.erbc,program.meta,manifest.txt}）
   --limit       只编译前 N 个文件（调试用；manifest 会注明，正式产物必须全量）
+  --mode        strict | compat（缺省 strict）
+                strict：任何解析失败都拒落盘（出包默认，防编译器回归被吞）。
+                compat：配合 --allow-parse-failures 使用，清单内失败切片降级为 THROW 空体桩
+                （运行到该函数时抛原版 Lang.Error.CalledFailedFunc 文案，等价原版
+                「该函数不可用」，而不是静默返回默认值）；manifest 追加 degraded-slices 段随包留痕。
+  --allow-parse-failures <清单>
+                容错档清单（每行 `相对路径:行号`，`#` 开头为注释）。仅 --mode compat 接受。
+                清单外的任何失败、或清单项未命中（源已修好/行号漂移）一律退出码 1。
   退出码        0 = 成功并落盘；1 = 编译/构建失败（stderr 逐条给 文件:行号，不落盘）；2 = 参数错误
   侧车          program.meta 是装载期元数据（函数元数据 / #DIM / 标签 / 数据节 / 宏表），
                 与 program.erbc 成对分发；装载侧用 ProgramLoader + BootMetadata.read 一起读。
@@ -36,7 +44,11 @@ audit 选项（装载期符号链接审计：解析期使用点 × 运行期真�
   --limit       只切片前 N 个文件（调试用）
   --strict      有硬差异时退出码 1（未绑定变量/关键字/#DIM 注册失败等；动态关键字下标不计）
   --allow       白名单 TSV（每行 `<kind>\t<name>` 或 `<kind>\t<functionKey>\t<name>`；# 开头为注释）；不是合法 UTF-8 ⇒ 退出码 2 拒绝（不做有损解码，且在落任何产物之前挡下）；文件不存在不是错误 —— 打一行提示后按空白名单处理
-  退出码        0 = 审计完成且（--strict 时）无硬差异；1 = 编译失败或 --strict 下有硬差异；2 = 参数错误（含 `--allow` 白名单不是合法 UTF-8 的拒绝档）
+  --reachability 追加可达性/可移植性报告（缺省关；审计的 stdout/退出码/TSV 与不带本开关时逐字节相同）：根 = 事件名（IdentifierDictionary.cs:72-89）∪ 系统名（:91-135），BFS 给可达集与深度；静态不可判定的调用落成 dynamic-call 行（报告是下界）；可达函数上的 CLIENTWIDTH/CLIENTHEIGHT/GETFONT/GGETFONT*/GDRAWTEXT 按 persist/display/unknown 分级
+  --reach-out    可达性报告 TSV（缺省 = --out 同目录的 reachability.tsv；仅 --reachability 时生效）
+  --reach-expect 可达性读数对拍基线（仅 --reachability 时生效，与 --reach-write-expect 互斥）：基线是纯 ASCII key=value（version=1 + roots/reachable/dynamicCalls/portability/persist 五项计数 + 全表 TSV 的 tsvSha256）；六项全等 ⇒ 追加一行「reachability 基线一致」；任一漂移 ⇒ stderr 逐字段一行「reachability 基线不一致：<field> 期望 <a> 实际 <b>」并退出码 1；基线文件坏（非文件/缺字段/未知或重复字段/version 不认识/tsvSha256 不是 64 位小写十六进制）⇒ 退出码 2
+  --reach-write-expect 把当前读数写成该基线文件（父目录不存在则创建；仅 --reachability 时生效），stdout 追加「reachability 基线已写入：<绝对路径>」
+  退出码        0 = 审计完成且（--strict 时）无硬差异；1 = 编译失败或 --strict 下有硬差异、或可达性读数与基线有漂移；2 = 参数错误（含 `--allow` 白名单不是合法 UTF-8 的拒绝档，以及两个基线开关缺 --reachability 或互斥同给）
 
 audit --roundtrip（CMP-79：落盘后再装载对账，审计口径改走 .erbc + program.meta 真装载链）:
   --roundtrip      编译 → 落盘 → ProgramLoader + BootMetadata.read 重建会话 → 与内存产物对账；

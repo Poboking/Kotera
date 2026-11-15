@@ -23,13 +23,15 @@ import java.nio.file.StandardOpenOption
  *   `env.functionKey/line/pc` 与 [Briefs.stmt] 摘要后**复制**进环形缓冲，禁止存引用。
  * - 回调不得阻塞、不得抛 —— 探针体全部包 runCatching，失败静默丢该条（不干扰执行）。
  * - 环形缓冲定长（缺省 [Cli.DEFAULT_TRACE_CAPACITY]，超限丢最旧）；跑完输出
- *   `行号 语句摘要 耗时` 逐条（`--out 文件` 落盘代替 stdout）。
+ *   `函数 行号 语句摘要 耗时` 逐条（`--out 文件` 落盘代替 stdout）。函数列是实时帧的
+ *   `functionKey`，用于跨函数链路取证（同一行号可能出现在多个文件，单靠行号不够指路）。
  */
 object CmdTrace {
 
     fun run(a: Args, out: PrintStream, err: PrintStream): Int {
         val name = a.positional.getOrNull(1) ?: throw CliError("用法: trace <函数名> [--steps N] [--capacity N] [--out 文件]")
         val assembled = Assembler.assemble(a, out = out)
+        CmdCall.applyPreState(assembled, a, out)?.let { return it }
         val capacity = a.longOr("--capacity", Cli.DEFAULT_TRACE_CAPACITY.toLong()).toInt()
         if (capacity <= 0) throw CliError("--capacity 必须为正整数")
         val dump = TraceSupport.install(assembled.session.runtime, capacity)
@@ -127,7 +129,7 @@ object TraceSupport {
                 append(e.elapsedNs).append("ns")
                 if (e.error != null) append(" ERROR=").append(e.error)
             }
-            lines.add("${e.line} ${e.brief} $tail")
+            lines.add("${e.functionKey} ${e.line} ${e.brief} $tail")
         }
         if (file != null) {
             val p = Path.of(file).toAbsolutePath().normalize()

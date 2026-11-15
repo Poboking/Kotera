@@ -4,7 +4,7 @@ import com.eratw.port.boot.GameRoot981
 import com.eratw.port.core.code.VmConfig
 import com.eratw.port.core.compile.ErbProgramCompiler
 import com.eratw.port.core.compile.FuncSig
-import com.eratw.port.core.err.CodeEE
+import com.eratw.port.core.err.clampWarnings
 import com.eratw.port.core.expr.Binary
 import com.eratw.port.core.expr.IntLiteral
 import com.eratw.port.core.expr.OperandType
@@ -43,6 +43,13 @@ import org.junit.jupiter.api.Assumptions
  * 既有裁定（提交 9948a5da）只证到「会抛」，本类回答**参数为什么是 0**。文案面已有钉
  * （[RandArgMessageTest] / [CompatiRandKeyTest]），这里一个字都不碰。
  *
+ * **2026-11-12 版本漂移订正**：本类回答的「参数为什么是 0」依然成立，但下面 ① 的
+ * 「PC 原版同抛、ADR-005 不修」是拿 **1.824 语义**下的 4.980 语料根作的判词。
+ * 复刻目标蛇版 4.981 的 `CHANGELOG.md:105-112`（12.2.0）已把 `RAND:n` 的 `n ≤ 0`
+ * 改成「钳制返回 0 + 首次告警」（`VariableToken.cs:1413-1436`），**不再抛 CodeEE**。
+ * ⇒ 这 130 份上报的根因是**移植引擎侧停在 1.824**，不是语料侧缺陷；引擎侧本轮已修，
+ * 语料侧的降级环洞保留（钳制后对玩家无害）。取值链取证因此仍然有效。
+ *
  * ## 语料根：两簇都在 **4.980**，不在 4.981
  *
  * 上报「行 N」= **0 基**物理行下标，对应物理行 N+1（与 `PowerFloatRealCorpusTest`
@@ -60,11 +67,12 @@ import org.junit.jupiter.api.Assumptions
  *
  * ## 两条链的判词（不同源）
  *
- * ① QOL 采集 ⇒ **(a) 玩家状态下合法为 0，PC 原版同抛，ADR-005 原样复刻不修**。
+ * ① QOL 采集 ⇒ **(a) 玩家状态下合法为 0；语料洞不修，4.981 引擎钳制后不再中断**。
  *   `FINAL_COUNT` 由 4.980 `:57-68` 的降级抽选环决定：每轮开头 `FINAL_COUNT = 0`，
  *   命中才 `FINAL_POOL:(FINAL_COUNT++) = ITEM_ID`，命中即 `BREAK`。
  *   **`BREAK` 是唯一正路出口**；靠条件出口（`TARGET_LEVEL` 一路 `--` 到 -1）出体时，
- *   出体那一轮开头的 `FINAL_COUNT = 0` 没有任何命中去改写它 ⇒ 上界恒 0 ⇒ 抛。
+ *   出体那一轮开头的 `FINAL_COUNT = 0` 没有任何命中去改写它 ⇒ 上界恒 0。
+ *   1.824 引擎在这一步抛 CodeEE；4.981 12.2.0 起钳制返回 0，玩家不再看到弹窗。
  *   可复现链条（逐环带语料行号）：
  *   - 起点档 `:38 TARGET_LEVEL = RAND_ADVANTAGE(MAX_LEVEL + 1, BONUS_ROLLS)`，
  *     `Misc.ERB:376-386` 的返回值域是 `0 ~ MAX_VAL-1`，**0 在域内**（`ROLLS ≥ 1` 时
@@ -104,8 +112,12 @@ import org.junit.jupiter.api.Assumptions
  * ## 覆盖面与卡点
  * - 4.981 的同族式 `ROLL_VAL = RAND:TOTAL_WEIGHT`（物理 67 ⇒ 0 基 66）**不在**本类判据内：
  *   它换成了权重累加池，依赖 `#DIM CONST GATHER_WEIGHT, 6` 与 `ITEMPRICE` 两级读数链。
- *   TODO(verify)：若后续上报出现「QOL_GATHERING_DRAWING 行66」这一支，要另开一路验
- *   `TOTAL_WEIGHT` 的累加与 `VALID_WEIGHT:VALID_COUNT` 回读；卡点是本路只对齐了 4.980 的行号。
+ *   ~~TODO(verify)~~ **已收口（lane rand0，2026-11-14）**：`WeightedPoolInitChainTest`
+ *   把声明解析 → defaultsInt → 私有静态懒回填 → TOTAL_WEIGHT 累加 → 加权走池 →
+ *   全零退化时钳制保命五节钉成回归锁；另附真语料端到端读数（桌面 vmdbg + 4.981
+ *   compat 档全量 erbc：`call QOL_Gathering_Drawing --args 1,500,0` PASS、steps=4241618、
+ *   控制台零钳制告警、`TOTAL_WEIGHT` var 事件按 100/40/70/10 步进真实累加、复跑逐位一致）。
+ *   「行66」这一支若再上报，先查钳制告警留痕（`clampWarnings().lines()`）再谈链路。
  * - ①只证「可达」、不证「频率」：报告口径不含变量取值与存档，玩家现场的价格分布与
  *   起点档抽样序列拿不到，无法核对该 4 台设备的实际触发率。
  * - 上报第三形态「实际 -3（无脚本位置，app 0.2.35）」走的是同一道 `num <= 0` 闸
@@ -374,20 +386,24 @@ class RandZeroArgChainAuditTest {
     }
 
     @Test
-    fun `QOL 池内等级全部高于起点档时上界合法落零`() {
+    fun `QOL 池内等级全部高于起点档时上界零被 4_981 钳制`() {
         // 池 3 件、等级 [4,4,5]，起点 2 ⇒ TARGET_LEVEL 2→1→0→-1 条件出体，
-        // 出体那一轮开头 FINAL_COUNT 已被重置成 0 且全程零命中 ⇒ RAND:0 抛。
-        // ⇒ 上报的 0 是**语料降级环自己的洞**（原版同形，ADR-005 原样复刻不修）。
+        // 出体那一轮开头 FINAL_COUNT 已被重置成 0 且全程零命中 ⇒ RAND:0。
+        // 降级的洞属于**语料侧**（4.980 环），本轮不修语料；但 4.981 引擎已把
+        // RAND:0 钳制为 0 + 首次告警，不该再把这个洞变成玩家可见的脚本中断。
         val r = runMain(*qolLoop.toTypedArray())
         r.seedPool(listOf(4, 4, 5))
         r.store.set0("FINAL_COUNT", 0L)
         r.store.set0("TARGET_LEVEL", 2L)
         val t = runCatching { r.runtime.execute() }.exceptionOrNull()
-        assertIs<CodeEE>(t, "条件出体时 FINAL_COUNT 必为 0 ⇒ RAND 抛（原版同款）")
-        assertTrue(t!!.message!!.startsWith("RAND不能指定0以下的值(0)"), "抛的是上界 0：${t.message}")
+        assertEquals(null, t, "4.981 12.2.0：RAND:0 钳制返回 0，脚本不再中断，实际 ${t?.javaClass?.name}: ${t?.message}")
         assertEquals(0L, r.store.i0("FINAL_COUNT"), "出体现场 FINAL_COUNT 读数")
         assertEquals(-1L, r.store.i0("TARGET_LEVEL"), "出体时 TARGET_LEVEL 已被减到 -1， WHILE 的条件闸收口（唯一非 BREAK 出口）")
-        assertTrue(r.rand.bounds.isEmpty(), "bound 0 在取值桩之前就抛，桩不该被调到：${r.rand.bounds}")
+        assertTrue(r.rand.bounds.isEmpty(), "bound 0 在取值桩之前就钳制返回，桩不该被调到：${r.rand.bounds}")
+        assertTrue(
+            r.store.aux.clampWarnings().lines().single().startsWith("RAND不能指定0以下的值(0)"),
+            "钳制告警仍须留痕，便于日后定位语料洞",
+        )
     }
 
     @Test

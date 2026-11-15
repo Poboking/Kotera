@@ -95,6 +95,11 @@ class UpstreamStatementsTest {
         assertEquals("开始播放DEMO", req.timeUpMessage)
         assertEquals(2L, req.defInt, "第 2 参是数值默认值")
         assertEquals(true, req.macroEnabled, "出厂输入宏开关 = true")
+        assertEquals(
+            true,
+            req.noFocus,
+            "TINPUTNF 走 WaitInputNoFocus（Instraction.Child.cs:1126-1127 / InputRequest.cs:51）",
+        )
     }
 
     @Test
@@ -106,6 +111,36 @@ class UpstreamStatementsTest {
         assertEquals(InputRequest.InputType.STR, req.type)
         assertEquals(2000L, req.timeLimit)
         assertEquals("UPDATE", req.defStr, "第 2 参是字符串默认值")
+        assertEquals(
+            true,
+            req.noFocus,
+            "TINPUTSNF 走 WaitInputNoFocus（Instraction.Child.cs:1179-1180 / InputRequest.cs:51）",
+        )
+    }
+
+    @Test
+    fun `noFocus 只有 NF 族置位 其余 TINPUT 族保持缺省 false`() {
+        // 反证：非 NF 的 TINPUT/TONEINPUT/TINPUTS/TONEINPUTS 不能顺手带上 NF 位，
+        // 否则 EmueraConsole.cs:716-755 的「清上滚标志并强制贴底」会被整族吃掉。
+        val cases = listOf(
+            FunctionCode.TINPUT to (IntLiteral(0) to false),
+            FunctionCode.TONEINPUT to (IntLiteral(0) to false),
+            FunctionCode.TINPUTS to (StrLiteral("D") to false),
+            FunctionCode.TONEINPUTS to (StrLiteral("D") to false),
+            FunctionCode.TINPUTNF to (IntLiteral(0) to true),
+            FunctionCode.TINPUTSNF to (StrLiteral("D") to true),
+        )
+        for ((code, defAndExpected) in cases) {
+            val (def, expected) = defAndExpected
+            val env = Env(InputOutcome(intValue = 1L, strValue = "typed"))
+            env.run(instr(code, tInputArg(1000, def, 0, StrLiteral(""))))
+            assertEquals(expected, env.input.requests.single().noFocus, "$code 的 noFocus 位")
+        }
+    }
+
+    @Test
+    fun `InputRequest 的 noFocus 缺省是 false`() {
+        assertEquals(false, InputRequest(type = InputRequest.InputType.INT).noFocus)
     }
 
     // ------------------------------------------------------------------

@@ -1,6 +1,5 @@
 package com.eratw.port.core.rand
 
-import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.ParserConfig
 import com.eratw.port.core.lexer.LineKind
@@ -23,9 +22,12 @@ import kotlin.test.assertTrue
  *
  * 开关在两处消费，**两处都要**跟着它走：
  *   1. 取值面：`VariableData.cs:3154` 的三元式选 `RandToken` 还是 `CompatiRandToken`
- *      （`RandToken.GetIntValue` :845-853 = `GetNextRand(n)`；`CompatiRandToken` :863-875 =
- *      `n==0 → 0`、`n<0 → -n`、`GetNextRand(32768) % n`）。移植侧等价物 = `VarConfig.compatiRand`
- *      → `VariableStore.random`，本类用**同一颗种子**的两态对拍钉住「走了哪条通道」。
+ *      （4.981 12.2.0 起 `RandToken.GetIntValue`（`VariableToken.cs:1422-1435`）= n≤0 钳制
+ *      返回 0 + 首次告警、否则 `GetNextRand(n)`；1.824 `VariableData.cs:845-853` 的
+ *      「n≤0 抛 CodeEE」是旧口径，钳制落点见 ClampWarnings；`CompatiRandToken`
+ *      `VariableToken.cs:1443-1451` = `n==0 → 0`、`n<0 → -n`、`GetNextRand(32768) % n`）。
+ *      移植侧等价物 = `VarConfig.compatiRand` → `VariableStore.random`，本类用
+ *      **同一颗种子**的两态对拍钉住「走了哪条通道」。
  *   2. 解析面：`VariableParser.cs:160-170` —— 关时 `RAND` 省略下标报 `OmittedRandArg`、
  *      `RAND:0` 报 `RandArgIsZero`；开时两者合法（eramaker 口径）。移植侧 = `ParserConfig.compatiRAND`。
  *
@@ -56,9 +58,13 @@ class CompatiRandKeyTest {
         val s = store(compatiRand = false, rng = probe())
         assertEquals(7L, rand(s, 3L), "通道上界是 n 本身（stub 只在 32768 上返回 5）")
         assertEquals(7L, rand(s, 1000L))
-        // spec: VariableData.cs:846-850 —— 非 Compati 通道 n<=0 直接 CodeEE。
-        assertFailsWith<CodeEE> { rand(s, 0L) }
-        assertFailsWith<CodeEE> { rand(s, -5L) }
+        // spec: 4.981 12.2.0 `VariableToken.cs:1413-1436` —— 非 Compati 通道 n<=0 已由
+        // 1.824 的 `VariableData.cs:846-850` 抛 CodeEE 改成钳制返回 0（首次告警一次）。
+        // 移植侧 76a360ec0 落钳制时改了 RandArgMessageTest，漏订本类这两行 ⇒ main 上的
+        // 存量基线红（lane rand0 2026-11-14 实跑复现）。文案与留痕归 ClampWarningsTest，
+        // 本类只钉「n<=0 在关-通道走钳制、不再抛」这一个分岔点。
+        assertEquals(0L, rand(s, 0L), "n==0 钳制返回 0（不再抛 CodeEE）")
+        assertEquals(0L, rand(s, -5L), "n<0 同样钳制返回 0")
     }
 
     @Test

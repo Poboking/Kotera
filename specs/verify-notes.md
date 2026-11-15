@@ -312,6 +312,8 @@ case '\'':
 
 ## 附：官方 bug 清单（长期资产，M2 对拍基准）
 
+> **缺陷台账入口（2026-11-10 收敛）**：本节及本文件内的「官方 bug」登记不再新增；完整待提清单见 `docs/UPSTREAM-BUG-PR.md`（A 语料类 / B 引擎类），新增 / 改判只写那里。本节保留为版本校准纪实与取证锚。
+
 > 2026-11-08 MODERN-T5 校准：本清单原把字符串 `>=`/`<=` 记为「官方 bug 需复刻」，但那读数是 **1.824** 的；
 > 本项目目标是 **4.981**，该两处已在 4.981 修好 ⇒ 从「复刻清单」降级为「版本校准纪实」，移植已回正。
 
@@ -1947,10 +1949,25 @@ commit `48494165eaf3335f3982b6a7c33bee662b8ba2c1`（2026-08-28）的 1-based 行
   （`Creator.Method.cs:2653-2743`）⇒ 首个 SQL 串之后全部按字符串绑定。
 - 语料（B）：`魔改内容\qol\qol_db.ERB:61-62`（`SQL_IMPORT_MAP_XML "TR_DB", …`）、`qol_item.ERB:99`、
   `qol_mushi.ERB:114`、`qol_PHARMACY.ERB:196`、`qol_graph_query.ERB:146`。自改说明 `:22-24`、`:249-256`。
-- **TODO(verify)**：`Creator.cs:404-428` 实际注册了 **25 个** SQL 名（还有 `GET_FLOAT` /
-  `SCALAR_FLOAT` / `P_SCALAR_FLOAT` / `SQL_DISCONNECT` / 6 个 `IMPORT/EXPORT_*_XML`），本波只按任务书
-  落了 4.981 语料用到的那批，剩余记 TODO；驱动是 Microsoft.Data.Sqlite ⇒ Android 端要换
-  SQLitePCLRaw bundle 才有 A 级等价（需组长接线）。
+- **已销账（2026-11-15，SQLite 迁移 P1 `f2bf08be8` / T1 `eb8ae50a5`）**：原
+  **TODO(verify)** 记「`Creator.cs:404-428` 实际注册了 **25 个** SQL 名（还有 `GET_FLOAT` /
+  `SCALAR_FLOAT` / `P_SCALAR_FLOAT` / `SQL_DISCONNECT` / 6 个 `IMPORT/EXPORT_*_XML`），本波只按
+  任务书落了 4.981 语料用到的那批，剩余记 TODO；驱动是 Microsoft.Data.Sqlite ⇒ Android 端要换
+  SQLitePCLRaw bundle 才有 A 级等价（需组长接线）」——两项缺口现均已闭合：
+  ① **25/25 全实装**：移植侧 `core-vm/.../core/sql/SqlMethods.kt` + `SqlXmlMethods.kt` 注册全部
+     25 名（P1 补齐 9 个缺名 + `SqlValue.VFloat` + XML 导入导出族），
+     `specs/builtin-functions.yaml` 同步登记；261111 语料审计闸 `CorpusSqlSurfaceAuditTest`
+     钉 234 处 / 174 条去重全过。
+  ② **真实 SQLite 驱动双端装配**：`SqlDriver` 端口由
+     `platform/.../AndroidSqliteHost.kt`（`androidx.sqlite:sqlite-bundled`，生产入口
+     `app/.../GameHost.kt:1015-1020`）与 `tools/vmdbg/.../DesktopSqliteHost.kt` /
+     测试 `RealSqlDriver`（`sqlite-bundled-jvm`，同 SQLite 3.46.0）兑现；自研
+     `SqlEngine.kt` / `SqliteFileReader.kt` 已随 T1 删除、全仓零引用 ⇒ 不再有
+     Microsoft.Data.Sqlite 的 Android 等价性问题，自研时代的「文本数值前缀折算（含小数前缀）」
+     等近似语义也随引擎一并作废（裁定见 BOARD 在办首行余量③）。
+  **仍开**：`CONTRACT-SQLITE-MIGRATION` §7 的最后一条「最小 API 21 真机冒烟」未验
+  （`DELIVERY-SQLITE-A1-APK.md` §6：本机无设备/模拟器运行时，静态打包验收已过），
+  已登记 BOARD「在册缺口」。
 
 ### 23.3 `GETANIMETIMER` —— A
 
@@ -2460,6 +2477,7 @@ commit `48494165eaf3335f3982b6a7c33bee662b8ba2c1`（2026-08-28）的 1-based 行
 - **为什么保留**：设备被系统降频/抢占时墙钟会误杀合法重负载，指令数闸与设备速度无关，是「不误杀优先」的最后一道；官方行为面（弹框问玩家）由 ENGFIX-4 的 AlertDialog 接线承接，两者不冲突。
 - **ENGFIX-4 接线面**：`VmConfig.infiniteLoopAlertTimeMs` 阈值取会话生效配置 `InfiniteLoopAlertTime`（置 0 关）；`ProcessRuntime.askInfiniteLoop` 经 `infiniteLoopPrompt` 把 VM 线程阻塞到 UI 作答；app 侧 `BlockingInfiniteLoopPrompt` + `PortraitShellCopy.dialogYes/dialogNo`（三语）。
 - **验证**：`core-vm` 定向 `*InfiniteLoop*` / `*StepLimit*`、`platform` 的 `BlockingInfiniteLoopPromptTest`（6 例）、`app` 的 `PortraitShellCopyTest`（56 条形状闸）。
+- **2026-11-09 补（lane bug-loopguard）**：`maxStepsPerRun` 命中不再直接抛（官方从不按指令数中止）：经 `VmHost.askDeviceBudgetContinue` 复用墙钟闸同一条 `infiniteLoopPrompt` 问一次，答「继续」⇒ 预算加一整份、复位段落行数/计时原地续跑（≙ `Process.cs:509-510`），并落 `loopguard.device_budget_continue steps= budget= next=`；答「退出」或 headless 无框 ⇒ 仍抛 `StepLimitExceeded(DeviceBudget)`，类型/文案/`elapsedMs=-1`/callChain 逐字不变。定向：`InfiniteLoopDeviceBudgetTest` 5/0 + `InfiniteLoopDeviceBudgetTraceTest` 2/0 + 同批回归 45/0。**另记**：2026-11-07 那份「可能进入了无限循环因此选择强制终止 @ BASE自然変動」的报告经复核是**墙钟闸 + 玩家选「是」**（`guardCause=PlayerChoseExit`），不是 DeviceBudget；两半均已在基线收口（`configOverlay` 重标定 100000 ms、`UiFault.isRecoverableScriptError`）。
 
 ## 33. div 覆盖块版面语义全量复刻（「登记分歧（浮动块模型缺失，不硬造）」翻案，HTMLDIV-B1 · 2026-11-06）
 
@@ -2834,3 +2852,392 @@ assets 读 sidecar（classpath resources 不进 APK；`#family` 反查文件名�
    与此前「被算成 164 格而误折」是两回事。
 定向闸：`FontWidthRulerTest`（尺读数）、`ConsoleScreenFontWidthWireTest`（屏级接线：
 折行行数/列区间按尺 vs 缺省静态表逐值不变）。
+
+## 2026-11-09 CALLSHARP 未提供本机方法：执行期不抛 CodeEE（通用策略，ADR-005 有意偏离）
+
+**这是有意偏离，不是「官方 bug 复刻」**，登记口径按 §12/§13 的先例：官方在此处抛错中断脚本，
+本移植版**不抛**，理由是「插件缺失」在本版是常态而不是异常。
+
+### 现象与已撤回的补丁
+
+线上上报簇 `9bcc9efd`「No native method ModelSet found（CHAT_ACTION 行34）」（5 份 / 4 机）：
+4.981 的 `ERB/DLC/AI对话补丁/对话调用.erb:35-36` 调 `CALLSHARP ModelSet/Chat`，这两个原生名由
+随包 `plugins/ChatCallSharp.dll` 提供；Android 没有 .NET 插件运行时 ⇒ 装载期裁决为行级错误，
+执行到该行抛 `CodeEE` ⇒ 整个事件中断、真机表现为崩溃/报错。
+
+`44d9bb20` 曾按「给这两个名字写 Kotlin 本机实现」（`platform/chat/ChatCallSharpHost` +
+`MiniJson`，993 行）收口；**该笔已整体撤回**：per-plugin 实现不 scale（以后每个补丁都要再写一遍
+它的依赖），且它只是把「这首歌」补成能跑，不是机制。
+
+### 官方口径（被偏离的那一半）
+
+- 联结期 `CALLSHARP_Instruction.SetJumpTo`（`FunctionIdentifier.cs:1193-1210`）对常量名查
+  `PluginManager.HasMethod`（`:1201-1202`），未命中 `:1204` `ParserMediator.Warn(..., isError: true)`
+  ⇒ 只把 `line.IsError / ErrMes` 记到行上（`ParserMediator.cs:125-136`），装载完统一上屏
+  （`:143-158`）。
+- 执行期 `Process.cs:1017-1019` `if (currentLine.IsError) throw new CodeEE(currentLine.ErrMes)`
+  （惰性建参后再查一遍是 `:1030-1032`）⇒ **整段脚本中断**。文案原样 `No native method <名> found`。
+
+### 新口径（本波落地）
+
+1. **装载期不动**：仍由 `prefillSharpLinks`（`core/fn/PluginMethods.kt`）按原版相位逐行裁决、
+   收警告统一上屏（`GameSession.sharpLoadWarnings`）—— 「该行不执行也见警告」保持。
+2. **执行期不抛**：未命中时把**同一句官方文案**经 `ConsoleSink.printError`
+   （spec: `EmueraConsole.PrintError`，`EmueraConsole.cs:3098-3115` 的呈现面）打一行错误行，然后
+   **跳过整条语句**：实参不求值、不回写 ⇒ 无副作用、变量保持原值；脚本继续往下跑。
+3. **每行只提示一次**（`StatementExecutor.sharpUnavailableNoticed`，键 = `SharpLinkTable` 同一套
+   行键）：`@CHAT_ACTION` 挂在 `EVENTCOMEND` 上，一段对话可能走到十几次，每执行都打会刷屏。
+4. **零 per-plugin 代码**：以后任何补丁调用本版未提供的本机方法，都走这一条。
+
+### 为什么不选「整单元禁用该 DLC」
+
+那是更干净的语义，但要推翻官方既有形态：装载器对行级错误只 `continue` 该行、同文件其余函数照常
+装载（`ErbLoader.cs:1598-1600`，ENGFIX sharp `46dd382e2` 已复刻并有负控
+`SharpLoadRejectTest`）。单元级禁用需给 erbc 增「函数/语句 → 来源文件」归属并做跨单元引用闭包
+（否则别的文件 CALL 被禁用的函数会换一种方式崩），偏离更大、面也更大。本波取行级通用策略。
+
+### 判据（定向）
+
+`AiChatSharpStubTest`（无桩 ⇒ 两条提示按序、不中断）、`CallSharpLinkPhaseTest`（记行错 /
+后注册不复活 / 提示只一次 / 前后语句都执行，flat 与对象树两通道）、`CallSharpLoadPrefillTest`
+（预填未命中 ⇒ 首执行只提示、不重查）、`SharpLoadRejectTest`（普通函数与已注册行照常执行，
+未注册行只被跳过）、`IsaGapTest`（单语句面：文案 + 跳过 + 不回写）、
+`ChatActionRealCorpusReproTest`（**真语料端到端**：两句错误行按语料序上屏 ⇒ 第一条没打断脚本；
+有桩一侧整段跑完）。app 侧三段严格序哨兵 `GameHostSharpWireTest` 不变。
+
+### 残量 / TODO(verify)
+
+1. 本策略只覆盖 `CALLSHARP` 通道。「移植版不提供的其它宿主能力」是否也要各自定义降级口径，
+   不在本波范围。
+2. 错误报告面：该簇不再产生 `CodeEE`，线上**不该**再出现「No native method … found」的崩溃上报；
+   若仍出现，说明走的是别的路径（例如装载期被重新当成致命错），需回看。
+3. 真机长会话：确认错误行不会被玩家误当正文（走 `Kind.ERROR` 强制左对齐、默认样式、不折行，
+   与原版 `PrintError` 同形；样式差已在 §13.1 (a2) 登记）。
+
+## 2026-11-10 替身正文族的 CP932 已知码位回静态网格（地灵殿地图碎裂修复）
+
+玩家反馈「地灵殿地图碎裂：内容都在但边框/墙体散成错位带，0.2.43 正常、之后推送的包坏」。
+病灶 = `COLOREDMAPS/DRAW_COLOREDMAP.ERB:125` 用 `HTML_PRINT` + `<font face='ＭＳ ゴシック'>`
+逐行打印字符画（`COLOREDMAPS/COLOREDMAP_09.ERB` CHIREIDEN_1），画布按 PC 原版段字体本尊
+（ＭＳ ゴシック = CP932 系统字体，`StringMeasure.cs:42-72` GetDisplayLength +
+`ConsoleStyledString.cs:25,82` GetFont(style.Fontname)）的全角口径排布：JIS 制表符 ━┃┼、
+希腊 Ψψρ、数学 ∵∴∥∫≡、罗马数字 ⅡⅢ、西里尔 п о 全部 2 格。2026-11-08 SETFONT 排版尺
+（上节）落地后，真机按 sidecar 真实 advance 推进，而随包替身字体 Sarasa Mono SC 的 hmtx
+把这一批设计成半角 500（等宽拉丁习惯）⇒ CHIREIDEN_1 row07 前段全行 68 格只剩 45 格，
+且各行压缩量随行内记号数浮动，边框竖带碎成几条错位带。桌面 headless 缺表退化到静态网格
+逐值不变，所以单测一直绿 —— 典型「桌面绿真机炸」。
+
+**裁决规则**（`FontWidthRuler.compute`）：替身正文族（Sarasa Mono SC 等顶替 CP932
+系统字体的随包族）下，生成表 `Cp932Encodable`（`tools/fontsubset/gen_cp932_encodable.py`
+产出的 BMP 位图，9,408 码点）命中的码位直接按静态 CP932 网格（`CellMetrics.cellsOf`）
+量宽，不进 sidecar 链；表外字（块元素 ▉ U+2589、组合记号 U+0300-036F/U+3099-309A、
+emoji、带音标拉丁字母）保留 sidecar 真实 advance —— 老虎机 ▉▂ 半角一格与组合记号零推进
+两条既有读数靠这条保住（原版对表外字走 GDI+ 回退，读数未定义，随包真实 advance 是最好
+模型）。**Saitamaar 整族豁免**：PC 原版对 `SETFONT "Saitamaar"` 量的是字体本尊（玩家机
+真装了它），比例 advance 才是忠实读数 —— 豁免错了会把觉 AA 画推回 2026-11-08 之前的错位。
+
+**随本条修正一处既有登记**：2026-11-08 节把「框线 ━ 按随包 Sarasa 半角 1 格」登记为
+平台字体差异；本条证伪之 —— 黄金基准 `pc-golden-root.txt:61` 99 个 `━` 填满 1797px
+（18px/个）说明原版 DRAWLINE 的 `━` 就是全角 2 格，地图画布同口径。
+`FontWidthRulerTest` 该断言改回 2 格，DRAWLINE 填充数量与黄金基准同值。真机折行/推进/
+命中的其余读数不受影响（sidecar 与静态表对这些码位本就同值）。
+
+**判据（定向）**：`FontWidthRulerCp932SubstituteTest` 7 例（受害字符全角/整行 68 格/
+「阿燐」起点列 50/块元素 1 格/组合记号 0/Saitamaar 0.36/缺表退化）；反向证明撤规则 ⇒
+恰 3 红（前三例），恢复后源文件 sha 逐字节同值复绿。`:render` 全模块 1,306/0、
+`:render-canvas` 200/0、core-vm 定向（LineBuffer/FontDisplayWidth/CellWidth/FontSidecar）
+156/0、vmdbg/erbcc 编译绿。
+
+**残量 / TODO(verify)**：
+1. 真机地灵殿/妖怪之山等地图页截图对账（`adb devices` 空；随下一包）。
+2. T4B 开态字形缓存（`eratw.render.glyphCache=1`，缺省关）的 `GlyphEntry.advanceCells`
+   仍直接读 sidecar、不经本裁决 —— 两口径在替身族已知码位上会分家；开态转正前必须接
+   同一裁决（属 `:render` GlyphCache 面，另笔立项）。
+3. `Cp932Encodable` 的「可编码」以 Python `cp932` codec 为权威（与 JDK `Windows-31J`
+   同源）；U+E000-U+E757 的 PUA 段是官方映射自带回环位，语料不出现。若未来发现语料
+   码点在 JDK/Python 两表有出入，以真机像素对账为准再钉。
+
+
+## 2026-11-11 常量关键字下标：装载期折叠的相位规则（M_CFLAG 报错根修）
+
+- **语义**：原版 `VariableStrArgTerm.Restructure`（`VariableStrArgTerm.cs:57-69`）在**装载期**就把
+  常量字符串下标折成 `SingleLongTerm`，产物里只留整数；`GetIntValue` 的按名查表只服务动态下标。
+- **移植侧口径**：凡是**编译脚本**的路都必须在解析期折 —— ① erbcc 全量编译（出包产物，数据面 =
+  编译机 `CSV/` + ERB 目录下 `.erd` 的 ERD 表）；② 设备端补丁编译（`PatchCompiler`，玩家导入口上，
+  数据面 = 设备现盘同一份表）。
+- **禁止的形态**：把常量下标编成 `KeywordIndexArg`、运行期按名查盘上 CSV。产物与数据面耦合后，
+  盘上表旧/半截就在剧情里抛「M_CFLAG.csv 中未定义关键字」（2026-11-10 真机 ×5，`5fce232df` 起修）。
+- **数据面闸**：`erbcc compile --require-fold`（gradle `compileCorpus` 恒带）在 CSV 读不到 /
+  系统名表空 / ERD 表空时拒绝落盘，防折叠数静默归零；补丁路数据面缺时返回 null 退回运行期查表，
+  报错原文不变（方向安全）。
+- **已判不折的例外**：`RELATION`（运行期角色模板表，编译期折会与设备加装角色后的顺序错位）——
+  语料 101 处 `RELATION:` 全是动态整数下标，无常量角色名。
+- **验证**：`ConstantKeywordFoldTest` 9/0；全量重编 3971 文件 / 0 失败、折叠 237,388 处，
+  `program.erbc` 内无独立的关键字参数（仅语句 `raw 原文` 留存）。
+
+## 2026-11-12 长按提示的纵判归层（素质 / 种族 title 丢失根修）
+
+- **玩家反馈**：「属性里的素质好像不能长按查看了？0.2.44版本」。素质屏 = 语料
+  `ERB/fromEN/HTML_TALENTS/HTML_TALENTS.ERB` 的 `MO_TALENT` 返回式
+  `<font color='..'><b><nonbutton title='..'>[素质]</nonbutton></b></font>`（:79），
+  经 `HTML_PRINT` 落**正文行**（该文件 HTML_DIV 命中 0 处 ⇒ 无 div 覆盖块），行内没有任何可点按钮。
+- **根因层 = 输入状态机（长按提示的命中判据）**：数据面一直通（`TextRun.tooltip` →
+  `ButtonLayer.tooltip(row,col)`，`ButtonLayerTest`「不可点文本也能带提示且不变成可点」已钉）。
+  断在壳体：`CanvasConsoleView.tooltipAt` 在 `aa3eb0ef1`（行内纵门全链路接线，2026-11-06 22:54）
+  之后**把点击面的可点性判据复用到提示面**——`if (hit.gated && inlineHitOrNull(console, hit) == null) return null`，
+  而 `hitInline` 只认识**带 value 的可点目标** ⇒ 提示整行判空；可点按钮的提示照旧正常
+  ⇒ 玩家感知是「只有素质看不了」。
+  **同族受害者**（一起被掐、只是没人报）：`<nonbutton title>` 全体、**无 value 的 `<button title>`**
+  （`HtmlRunFlatten` 在 `value == null` 时落 TEXT，PC 上照样弹提示）、clearbutton 区间内降级按钮的提示。
+- **归属版次**：`aa3eb0ef1` 是 0.2.42（30f14e37b，11-06 13:45）之后的提交，且是 0.2.43+19
+  （`fc29db5f9`）与 0.2.44+20（`34d667893`）的祖先 ⇒ 首个带门的出包是 **0.2.43**，0.2.44 只是继续带着；
+  玩家「0.2.44 才发现」与代码面差一版。TODO(verify)：0.2.43 那只 APK 是否真从 fc29db5f9 树出
+  （卡点 = 本机 `adb devices` 为空，装不到机器上验）。
+- **C# 锚**：`EmueraConsole.cs:2368` 的纵判按**节点自己的** `Top/Bottom`；判通过后
+  `:2373-2379` 把该节点所属串记成光标候选（**非按钮节点同样记**：`if (!flag) consoleButtonString2 =
+  consoleButtonString3;` 早于 `if (!IsButton) continue`）；`:1891-1895` 的 ToolTip 因此能从
+  非按钮串取到 `Title`。文本节点缺省盒 = `AConsoleDisplayNode.cs:29-31` 的
+  `Top = 0 / Bottom = Config.FontSize`，语料 `emuera.config` 的 `FONT SIZE:18` /
+  `LINE HEIGHT:18` ⇒ 整行带（故本层只对图形节点按图元盒加严，文本类提示不加纵门）。
+- **修法（判据下沉，不在壳体打补丁）**：`ButtonLayer` / `ConsoleScreen` 新增 `tooltipInline(...)`
+  —— 列门之上按**提示所属节点**的纵盒判（`TipRange` 增记承载节点的图形负载）；
+  `CanvasConsoleView.tooltipAt` 改调它并按 `CellHit` 同一份行几何传入，壳体不再复用点击面判据。
+  `tooltip(row,col)` 原口径保留给 div 像素入口（`divTooltipAt` → `pixelRowTooltip`）与非锚行路径。
+- **验证**：`TooltipInlineTest` 4/0 —— ①手装不可点文本三档 y 均查得到、②行外列/非法坐标 null、
+  ③图形节点盒内/外分界（盒外 null 与 `hitInline` 同结论）、④**端到端**：语料形态 HTML 走
+  `HtmlRunFlatten` → `DisplayRow` → `ButtonLayer.attach` 后仍查得到（并覆盖无 value 的
+  `<button title>` 同族）；同时钉住反向证明载体「同一坐标 `hitInline` 为 null」。
+  `TooltipInlineWireAuditTest` 3/0（源码面：必须走 `tooltipInline`、不许出现 `inlineHitOrNull` /
+  `hit.gated &&`、行几何三参必须传；只作补充、不作行为证明）。
+  **反向证明 A**（`tooltipInline` 退化成「先过 `hitInline` 再查」= 0.2.44 复合判据）：恰 **2 红**
+  —— 手装不可点文本 + 语料端到端两例，图形节点两例不受影响（指纹证明「只掐不可点提示」）；
+  **反向证明 B**（`tooltipAt` 里临时插回 `if (hit.gated && inlineHitOrNull(console, hit) == null) return null`）：
+  审计闸恰 1 红。两次撤补丁后复绿。
+  连带回归：`ButtonLayerTest` 29/0、`ButtonLayerDivHitTest` 8/0、`DivFrameHitTest` 3/0、
+  `HtmlRunFlattenPosTest` 13/0、`CanvasTapOutcomeAuditTest` 4/0。
+- **质量闸**：`detekt` 全仓 **0 weighted issues**。本笔第一版被判 `ReturnCount`（4）与
+  `LongParameterList`（6），**按代码修正**而非进 baseline：纵盒判据半段拆成
+  `inlineNodeCovers(graphic, InlineRowGeometry)`（组入参一次长按一份），`tooltipInline` 收敛到
+  2 个 return；仅函数签名本身 7 参沿用既有 `@Suppress("LongParameterList")` 口径（与
+  `ConsoleScreen.hitInline` 同形）。同批把**他路** B6 lane（`579240a3e`，已在 origin/main）带进
+  main 的 3 处 baseline 签名漂移（`ArgSignatureCheck.checkOneBuiltin` 增 `builtinView`/`unknownSink`
+  两参 ⇒ 规则 ID 失配）与 2 条新 ID（`LongMethod` / `LongParameterList`）刷进
+  `config/detekt/baseline.xml`（**+5/−3，无无关条目增删**，未改阈值、未加 @Suppress）；
+  该路 `checkOneBuiltin` 的复杂度存量仍待其 owner 重构，本节只做存量 freeze 不掩盖。
+- **残量 / TODO(verify)**：真机读数（素质屏长按 → 提示卡弹出）待随下一包对账，卡点 = 本机
+  `adb devices` 为空。div 覆盖块在场时走像素入口，那条路本就不叠可点性门（素质屏无 div，
+  像素入口恒 null、救不了这条），与本笔无交叉。
+## 2026-11-12 用户函数实参多于形参：4.981 静默丢弃（「婚礼策划 → 日期」闪退根修）
+
+- **现象（玩家反馈）**：「婚礼策划中的策划日期点了就会闪退」。桌面 vmdbg 精确复现：
+  `call DATEPICKER --args -1,1` 在 `steps=91` 报 `CODEEE`，`last-error.json` =
+  `GET_MONTH函数: 参数过多`。调用链 = 点「日期」
+  （`ERB/fromEN/Addition/Marriage/Add_CUSTOM_COM14 Wedding Planning.ERB:209` `CALL DATEPICKER(...)`）
+  → `ERB/fromEN/Addition/lib/DATEPICKER.ERB:56` `MONTH_TEXT '= GET_MONTH(ACTIVE_MONTH, 1)`
+  → `ERB/日時天候管理.ERB:189` `@GET_MONTH(ARG)` 只有 1 个形参。
+- **根因层 = 执行相位（用户函数建帧/实参转换）**：端口当年按 1.824 的 `ConvertArg` 复刻出
+  「实参多于形参 ⇒ `TooManyFuncArgs`」硬判（`ProcessRuntime.requireArgCount` / `checkTooManyArgs`
+  建帧前抛 CodeEE）。**复刻目标蛇版 4.981 没有这条判据**：
+  `reference/emuera-skia-4.981/Emuera/Runtime/Script/Process.CalledFunction.cs:212-357` 只循环
+  `func.Arg.Length` 次，超出位的实参不转换、不求值、不写回；fork 更新记录
+  `reference/emuera-skia-4.981/CHANGELOG.md` 的 2.0.0 Fixed 段写明「ConvertArg() 多余参数静默丢弃：
+  移除 TooManyFuncArgs 报错，增加 TRY 安全网」。`reference/emuera-cs`
+  `MinorShift.Emuera.Runtime.Script/CalledFunction.cs:137-142` 只是历史对照锚（与 verify-notes §1
+  「字符串 >=/<= 移植曾误按 1.824 复刻」同一类版本漂移）。
+- **修法（落点 = ①层自身，不落 UI 壳/白名单/语料）**：
+  1. `ProcessRuntime`：删 `requireArgCount` / `checkTooManyArgs`，三处调用点（VM 建帧
+     `onFunctionEnter`、宿主 `executeMethod`、重入 `invokeUserMethod`）一并去掉；KDoc 换成
+     「实参多于形参 = 静默丢弃」的 4.981 口径与 C# 锚。绑定点本来就只写被调形参覆盖的位
+     （`bindCallArgs` 的 `plans.getOrNull(a.position) ?: continue`），删闸即恢复宿主行为。
+  2. `ArgSignatureCheck`（装载期诊断，宽松模式、生产钩子丢弃返回值）：用户函数位不再产
+     `TOO_MANY`（否则会给 4.981 下合法写法报假警）；内建函数/方法的 `TooManyFuncArgs` 保留
+     （4.981 `Emuera/Runtime/Script/Statements/Function/FunctionMethod.cs:263`、`Creator.Method.cs:3381` 仍在）。
+  3. 语料零改动、无白名单、无兜底。
+- **实测读数**（erbc = 4.981 全量语料，`fromEN/Addition/lib/DATEPICKER.ERB` sha `7b10bff8…`）：
+  - 修前：`call DATEPICKER --args -1,1` ⇒ `status=CODEEE` / `GET_MONTH函数: 参数过多` / `steps=91`。
+  - 修后：`sweep --only '^DATEPICKER$'` ⇒ `WALL_LIMIT`（`covered=96 / stmts=125`、10 s 内应答
+    450 万次 INPUT）—— 即日历全段画完、停在 `INPUT` 等待循环，不再报错。
+  - 定向单测（fresh XML）= `ExtraArgToleratedTest` 2/0 + `CallMesTextTest` 17/0 +
+    `JumpBindArgsTest` 3/0 + `FuncArgConvertTest` 13/0 + `ArgSignatureCheckTest` 13/0。
+    新增/改钉：语句位 `CALL F(7,99)` 打到 `@F(PA)` ⇒ `PA=7`、第 2 个实参丢弃；表达式位
+    `OUTS '= GET_MONTH(1, 1)`（DATEPICKER 现场逐字形态）⇒ 返回 `春之月`、不抛；
+    尾跳超 arity ⇒ 返回 5（只绑 ARG:0）；`callF` / `invokeUserMethod` 两条宿主通道同口径。
+- **连带判读订正**：`specs/corpus-bugs.md` CB-001（`K51_EGG_SPECIAL_EVENT函数: 参数过多`）
+  当年的「官方 PC 同炸」结论只对 1.824 成立；4.981 下该形态不炸 ⇒ 那簇玩家报错的真根因也含
+  本笔引擎偏差。CB-001 的语料补丁保留不回退（4.981 语义下补丁前后行为等价，仅让调用点与声明对齐）。
+- **残量 / TODO(verify)**：真机复验（点「日期」出日历）卡点 = 本机 `adb devices` 为空；
+  另：`Trigger` 类同形写法若还有别的语料残留，`sweep` 台账口径会从 CODEEE 掉到 WALL_LIMIT/正常，
+  可用修前/修后两份台账 `ledger diff` 复核新增 PASS 面。
+
+## 2026-11-14 L15 UNCLAIMED-B1：顶层未认领键原始切片回写（ADR-005 例外登记）
+
+- **裁定**：`CONTRACT-RT2-UNCLAIMED-B1`（组长已登记 ADR-005 例外）。只做顶层 normal/global、
+  只回写 `def == null` 的条目、只落 `EOF` 之前；`char` 域与 EM 段第二波。
+- **根因层**：存档格式面的读写不对称（读侧 `SaveData.applyEntry` / `VariableData.cs:4081-4160`
+  读掉即丢，写侧 `SaveCapture.emitVariables` / `VariableData.cs:3980-3997` 只遍历声明表）
+  ⇒ 落点在读/写边界本身，不在报告层/壳层。
+- **实现**：`SaveFormat.read` 截原始切片（类型字节起、值末止；不解析、不重编码）→
+  `SaveData.unclaimedVariables` → `SaveUnclaimedPassthrough`（`store.aux` 槽 `save.unclaimed`）→
+  `SaveCapture.emitNormal` / `emitGlobal` 与 `SaveFormat.writePayload` 在已知变量之后、`EOF` 前回写。
+  normal 域以 `lastLoadNo` 作失效闸（`ResetData` 经 `SetDefaultValue` 复位，`VariableData.cs:3511-3512`）。
+- **读数**（fresh XML）：`SaveUnclaimedPassthroughTest` 11/0（原始切片逐字节/原序、往返、重复稳定、
+  无未知键逐字节不变、生产路、物化入口、normal/global 不串档、大数组不展开、报告面）；
+  `SaveUnclaimedNoWriteBackTest` 3/0（顶层回写 + char 域仍丢弃）；
+  `SaveFormatAuditTest` 25/0、`SaveHostTest` 20/0、`SaveRoundTripTest`+`SaveRoundTripAuditTest` 24/0、
+  `SaveStreamByteIdentityTest` 7/0、`SaveUnknownKeySkipTest` 4/0、`SaveUpgradeSemanticsTest` 7/0、
+  `RestoreReportUnclaimedTest` 6/0。全量 `:core-vm:test` = 8142 tests / 12 失败（皆为非存档面存量红）。
+- **反证**：① 摘写侧回写 ⇒ 14 个相关用例中 7 红；② 摘读侧捕获 ⇒ 9 红；
+  恢复后两文件 sha256 与备份一致、相关用例复绿。
+- **边界 / TODO(verify)**：`char` 域与 EM 段（第二波）；文本格式（非 eratw 口径）不回写；
+  `RESETGLOBAL` 后 global 域切片的清理属第二波接线；PC 实机对回写档的接受度由验收窗复核。
+
+## 2026-11-14 L17 UNCLAIMED-B2：角色块未认领键原始切片回写（ADR-005 例外第二波）
+
+- **裁定**：`CONTRACT-RT2-UNCLAIMED-B2`（组长已登记 ADR-005 例外，承 L15 顶层口径）。
+  只做普通存档（`NORMAL`）的角色块；`chara_*.dat`（CHARVAR，追加角色语义）与 EM 段不捕获。
+- **根因层**：仍是存档格式面的读写不对称（char 域）——读侧 `VariableData.cs:4081-4160`
+  读完即丢，写侧 `CharacterData.cs:513-558` 只遍历声明表；落点 = 读/写边界本身。
+- **身份绑定**：分桶键 = 块内 `NO` 条目的数值（`SystemLayout.charaInt0D` 第 2 项），
+  **不按块位置（pos）**；`NO` 缺失/重复/非整数标量、跨块桶键撞车、当前 store 无该 `NO`
+  ⇒ 整桶丢弃 + `SaveDiagnostics.note`（fail-closed，宁可丢不可挂错人）。
+- **实现**：`SaveFormat.readCharacterBlock` 截原始切片（类型字节起、值末止）→
+  `SaveUnclaimedPassthrough.bucketByNo` 按 `NO` 分桶 → `SaveData.unclaimedCharacterVariables`
+  → `FileSystemOps` 存槽（与顶层同槽 `save.unclaimed`、同 `lastLoadNo` 闸）→
+  `SaveCapture.emitNormal` / `SaveFormat.writePayload` 在同 `NO` 块的 `EOC` 前直写。
+- **读数**（fresh XML）：`SaveUnclaimedCharaPassthroughTest` 11/0（分桶原序与逐字节、
+  往返、顺序交换不串块、删角色桶留痕、NO 缺失/重复/撞车丢弃留痕、零变化、CHARVAR 不捕获、
+  物化=流式同字节、回标题失效）；`SaveUnclaimedPassthroughTest` 11/0、
+  `SaveUnclaimedNoWriteBackTest` 3/0、存档包级定向 48 类 467/0
+  （含 `SaveFormatAuditTest` 25/0、`SaveHostTest` 20/0、`SaveRoundTrip*` 24/0、
+  `SaveStreamByteIdentityTest` 7/0、`SaveUnknownKeySkipTest` 4/0、`SaveUpgradeSemanticsTest` 7/0、
+  `CharaFileNicknameSaveTest` 10/0、`SaveBinaryRoundTripAudit3Test` 17/0）。
+- **反证**：① 摘写侧 char 回写 ⇒ `*Unclaimed*` 31 例中 7 红；② 摘读侧 char 捕获 ⇒ 同面 11 红；
+  恢复后 `SaveFormat.kt` / `SaveCapture.kt` sha256 与备份一致（
+  `5828BE2E…7F1C` / `A23F1A9C…3D14`），相关用例复绿。
+- **边界 / TODO(verify)**：未知条目在块内的**原始相对位置**不保留（只保证落 EOC 之前、
+  已知条目之后）；CHARVAR 未知键仍按原版丢弃；文本格式（非 eratw 口径）不回写；
+  PC 实机对回写档的接受度与 `RESETGLOBAL` 面同 L15 待复核。
+
+## 2026-11-14 L23 UNCLAIMED-B2-PHASE：角色块未认领切片的相位保真（ADR-005 例外第二波补丁）
+
+- **裁定**：`CONTRACT-RT2-UNCLAIMED-B2-PHASE`（承 L17；上游 = L19 RECON §7 的跨 lane 交接）。
+  L17 把未认领切片一律追加在块尾（= 用户相位），系统相位切片会被读成用户段条目；
+  同名变量将来被重新声明时落错查找分支而被丢（文件里有键、运行期读不到）。本波只补相位。
+- **根因层**：仍是存档格式面的读写不对称（char 域相位）—— `CharacterData.SaveToStreamBinary`
+  先系统项、`UserDefCVarDataList.Count != 0` 才 `WriteSeparator()` 再写用户项
+  （`CharacterData.cs:601-663` / `:666-668`），读侧 `LoadFromStreamBinary` 的 `bool userDefineData`
+  在 `case Separator:` 置位后只认 `UserDefinedCharaVariableToken`（`:692` / `:718-720` / `:702-707`）；
+  落点 = 读/写边界本身。
+- **载体**：`UnclaimedCharaEntry(key, bytes, phase)` + `CharaPhase { SYSTEM, USER }`；
+  `UnclaimedCharaBlock.entries` 与 `SaveData.unclaimedCharacterVariables` 仍是「NO → 切片列表」，
+  每条自带相位（缺省空 = 零变化）；`NO` 分桶与 fail-closed（缺失/重复/撞桶整块丢弃）原样。
+- **实现**：`SaveFormat.readCharacterBlock` 以块内 `Separator` 为界记相位 →
+  `SaveUnclaimedPassthrough` 存槽（只滤键，保持相位）→ `SaveCapture.emitNormal` 把切片交给
+  `CharaFileIO.emitCharacter`（系统相位落 `Separator` 之前、用户相位落之后，无 `Separator`
+  而存在用户相位切片时补一个）→ `SaveFormat.writePayload` 的 `writeCharaBlock` 同一口径。
+- **读数**（fresh XML）：`SaveUnclaimedCharaPhaseTest` 8/0（读相位、`writePayload` 相位回写 +
+  canonical 夹具逐字节不变、块内无 `Separator` 的合成、生产路系统切片在 `Separator` 前、
+  无用户角色变量时补 `Separator` 且读回仍 USER、无切片逐字节不变、物化=流式含相位、CHARVAR 不捕获）；
+  `SaveUnclaimedCharaPassthroughTest` 11/0、`SaveUnclaimedPassthroughTest` 11/0、
+  `SaveUnclaimedNoWriteBackTest` 3/0、`RestoreReportUnclaimedTest` 6/0；
+  存档包级定向（`com.eratw.port.core.save.*` + `*Unclaimed*` + `*CharaFile*`）417/0；
+  `com.eratw.port.core.data.save.*` + `SaveBinaryRoundTripAudit3Test` 65/0（`CharaFileNicknameSaveTest` 10/0、
+  `SaveBinaryRoundTripAudit3Test` 17/0）；detekt 全仓 0（`--rerun-tasks`）。
+- **反证**：① 写侧相位固定回「全部块尾」（L17 行为）⇒ `SaveUnclaimedCharaPhaseTest` 8 例中 **5 红**
+  （`writePayload` 相位回写、块内无 `Separator` 的合成、生产路系统切片位置、无用户角色变量时补
+  `Separator`、物化=流式）；② 摘 `Separator` 合成 ⇒ 同面 **2 红**（两条用户相位合成用例）；
+  恢复后 `SaveFormat.kt` / `CharaFileIO.kt` sha256 与备份一致（`2C3FBC8C…D18FD6` / `20B95C5B…229B21`），
+  同面 8/0 复绿。
+- **边界 / TODO(verify)**：切片在**同相位段内**的相对位置仍不保留（只保证相位正确、
+  已知条目之后）；已声明条目即使出现在「错误相位」也按名字写回变量池（原版按相位分支丢弃，
+  属既有读语义，不在本波）；CHARVAR 未知键仍按原版丢弃；文本格式（非 eratw 口径）不回写；
+  PC 实机对回写档的接受度同 L15/L17 待复核。
+
+## 2026-11-14 L28 UNCLAIMED-B3-EM：EM 段未认领容器名的原始切片回写（ADR-005 例外第三波）
+
+- **裁定**：`CONTRACT-RT2-UNCLAIMED-B3-EM`（上游 = L19 RECON §1/§8 的 P0 裁定，触发面 =
+  4.980 名字表读 4.981 档的 `QOL_FISH_INSTANCE`（`SAVE_DTS`，4.980 只有两张 `DT_UFUFU_*`））。
+- **根因层**：存档格式面的读/写不对称（EM 段）—— 读侧 `VariableData.LoadVariableBinary` 的
+  Map/Xml/DT 三支只接受 `Save* ∪ Global*`（`:4095-4124`），不在并集的名字读完值即丢；
+  写侧 `SaveEMDataToStreamBinary` / `SaveGlobalEMDataToStreamBinary` 只遍历声明名
+  （`:3936-3959` / `:3911-3934`），没有回写设施。落点 = 读/写边界本体，**不在**
+  `EmDataPools` 的 MAP/XML/DT 语义里改（池操作与函数语义零改动）。
+- **载体**：`SaveData.unclaimedEmData: List<UnclaimedSaveEntry>`（复用顶层切片的
+  「类型字节 + 容器名 + 值」形状，缺省空 = 零变化）；EM 名**不进** `droppedVariables`
+  （不是变量，上屏文案只说变量，L16 口径不变）。
+- **读侧**：新增 `SaveFormat.read(bytes, keepKey, emKeepKey)` 三参重载；旧二参签名逐字不变
+  （`write(read(f)) == f` 仍命中 `sourceFile` 幂等短路）。EM 被拒条目经
+  `Cursor.peekString` 只读判名后 `skipValue`，`captureRejectedEm` 从 `entryStart` 截到 `c.pos`。
+  **为什么不给旧函数加第三个缺省参数**：Kotlin 尾随 lambda 永远绑定最后一个形参，加参会把
+  全仓 `read(bytes) { 变量谓词 }` 的谓词悄悄变成 EM 谓词（实测 6 例立刻红：
+  `SaveUnknownKeySkipTest` / `SaveUnclaimedNoWriteBackTest` / `RestoreReportUnclaimedTest` /
+  `SaveUpgradeSemanticsTest`），也不需要改别人 lane 的 `CharaFileIO`。
+- **写侧**：`SaveCapture.emitNormal` / `emitGlobal` 在 `EmDataPools.emitSnapshot` 之后、EM 段
+  `EOF` 之前调 `emitUnclaimedEm`；`SaveFormat.writePayload` 同一插入点。写回闸 =
+  **本档自己的声明表**（`emitNormal` 用 `SAVE_*`、`emitGlobal` 用 `GLOBAL_*`，与 `emitSnapshot`
+  同源）：名字在表内 ⇒ 活池已写过一条、切片跳过；名字只在另一域表里 ⇒ 本档不写它、切片保留
+  （按 `loadAccept` 并集过滤会把这条容器从本档删掉 = 丢数据）。
+- **域与生命周期**：`SaveUnclaimedPassthrough` 扩 em normal / em global 两槽（`captureNormal` /
+  `captureGlobal` 各带 `emEntries`，`clearNormal` / `clearGlobal` 一并清）；normal 与顶层共用
+  `lastLoadNo` 闸（`ResetData` 后旧档 EM 切片不进新局），global 跨局。物化入口
+  `SaveCapture.normal` / `global` 的读回 EM 接受集 = 本次发射的 `EmDataNames`，于是物化产物与
+  流式产物逐字节一致、切片不被解析成值对象再重编码。
+- **透传**：`SaveCodec.read(..., SaveReadFilters(keepKey, emKeepKey), config)`——两个谓词打包是
+  为了不越 detekt `LongParameterList` 阈值（6）；`FileSystemOps` 用 `isKnownSaveKey` +
+  私有 `EmLoadAccept.contains`（`EmSaveSets.loadAccept` 三张 `HashSet` 构造期预计算，
+  `isKnownEmName` 逐条判名字表会退化成 O(n)）。
+- **读数**（fresh XML）：`SaveUnclaimedEmPassthroughTest` **11/0**（读侧切片原序+逐字节、
+  未知 Xml/DT 不解析值、往返稳定、已知条目字节/顺序不变、无未知逐字节不变、生产路回写一次、
+  回标题不写新局、normal/global 不串档、装载后重新声明跳过、物化=流式、槽未装配零变化）；
+  合约定向（`com.eratw.port.core.save.*` + `*Unclaimed*` + `*EmData*` + `*MapData*` +
+  `*SaveFormatAudit*`）**481/0**（`SaveEmPoolTest` 13/0、`SaveUnclaimedPassthroughTest` 11/0、
+  `SaveUnclaimedCharaPassthroughTest` 11/0、`SaveUnclaimedCharaPhaseTest` 8/0、
+  `SaveUnclaimedNoWriteBackTest` 3/0、`RestoreReportUnclaimedTest` 6/0、`MapDataAuditTest` 27/0、
+  `MapDataTableMethodsTest` 36/0）；旁证 `com.eratw.port.core.data.save.*` +
+  `SaveBinaryRoundTripAudit3Test` + `*CharaFile*` + `*SaveStream*` + `*SaveText*` + `*SaveAudit2*`
+  + `*ResetGlobalAudit*` **150/0**；detekt 全仓 **0**。
+- **反证**：① 摘写侧（`emitNormal` / `emitGlobal` 里的 `emitUnclaimedEm` 两行）⇒ 同面 **4 红/11**
+  （生产路回写、装载后重声明、normal/global 不串档、物化=流式）；② 摘读侧捕获（`emCapture`
+  恒 null）⇒ 同面 **9 红/11**（读侧切片、不解析值、往返、已知字节序、生产路、回标题、
+  不串档、重声明、物化=流式）。恢复后 `SaveCapture.kt` / `SaveFormat.kt` sha256 与恢复时点备份
+  一致（`90448472…26AF3` / `53C9D015…96230E`），同面 **11/0** 复绿（`SaveFormat.kt` 此后仅在
+  KDoc 补了打红用例名单，现行 `4A32941C…4E81C8`，字节口径未动）。
+- **边界 / TODO(verify)**：`chara_*.dat`（CHARVAR）未知容器仍按原版丢弃；文本格式路
+  （`SystemSaveInBinary=false`，非 eratw 口径）与二进制→文本跨格式仍丢 EM（原版文本格式
+  没有 EM 段，`VariableEvaluator.cs:2788-2866` 不调 `SaveEMDataToStreamBinary`）；
+  `RESETGLOBAL` 清 em global 槽未接线（`StatementExecutor` 不在本波文件面，与 L15 的 global
+  顶层槽同一条既有 TODO：后果仅限「global.sav 里残留旧档未知容器」，不会灌进已声明变量）；
+  没有「未知 EM 名」的真档样本（触发面由两版 `VarExtGameData.csv` 差 + 代码路径推出）；
+  第三方包自带 `VarExt*.csv` 的注入面未取证；PC 实机对回写档的接受度同 L15/L17 待复核。
+
+## 2026-11-15 未认领键玩家面告知退役：读档回到原版静默（玩家「老存档加载不了」根修）
+
+**现象**（玩家上报）：0.2.46 读 261017 旧档后屏上出现「读档完成：5 个变量在当前游戏中没有声明，
+本次未载入」+ 处置告知 + 键清单（`EXTRA_UFUFU_TIME`、`SPELL_LEVEL_RESETED`、`无限TSP`、
+`无限法力`、`神性时间影响削弱`），玩家据此认定老存档加载失败。
+
+**根因层 = 读档相位（报告通道），不在存档解析**：读档本身成功，5 个键是**合法遗留键**——
+261017 语料 `DLC/魔法DLC/魔法相关参数.ERH:12-28` 把它们写成**无条件** `#DIM SAVEDATA`
+（与 DLC 开关无关，故玩家没开 DLC 也照样每个档都有、值为 0）；261111 上游把这 5 条注释成
+`;#DIM`（DLC 改由 `M_FLAG` 位承载）⇒ 新引擎读旧档必然把它们判成「当前游戏没声明」。原版对
+这种键是**读完即丢、全程静默**：`VariableData.LoadVariableBinary` 的 Int 分支
+（`VariableData.cs:1418-1421`，源码注释「該当変数なし、or型不一致なら読み捨てる」）、
+Str `:1424-1426`、数组/浮点 `:1430-1500`，`vToken == null` 时只 `reader.ReadInt()` /
+`ReadIntArray(null, true)`，无任何 `ParserMediator.Warn` / 控制台输出；`LOADGLOBAL` 同循环同口径。
+
+**修法（引擎侧、非补丁）**：把移植侧 M1-2 的玩家面告知整条通道退役，回到原版静默：
+`SaveRestoreCopy`（三语表）、`SaveLoadHandoff.restoreRenderer` / `recordRestore` /
+`takeRestoreNotice`、`StatementExecutor.printRestoreNotice`（`LOADDATA` / `LOADGLOBAL` 两处
+语句形态 × 槽码/栈码两路）、`GameHost` 装配期渲染器注入，全部删除；`RestoreReport` 保留为
+内部读数（`applyTo` 返回值 / 诊断），不再进控制台。
+
+**读数**（fresh XML）：`:core-vm` `LoadStatementSilenceTest` **3/0**（`LOADDATA` 只 `Quit` +
+零输出、`LOADGLOBAL` 写 RESULT + 零输出、语句层/交接层源码哨兵）；
+`SaveUnclaimedNoWriteBackTest` 4/0、`SaveUnclaimedPassthroughTest` 11/0、
+`RestoreReportUnclaimedTest` 6/0、`SaveUnclaimedCharaPassthroughTest` 11/0、
+`SaveUnclaimedCharaPhaseTest` 8/0、`SaveUnclaimedEmPassthroughTest` 11/0。
+`SaveRestoreCopyShapeTest` / `SaveRestoreWireTest` / `SaveLoadHandoffNoticeTest` /
+`RestoreNoticeStatementTest` 随旧通道一并退役（其钉的行为已由 `LoadStatementSilenceTest` 反向钉住）。
+
+**边界**：内部 `RestoreReport` 的未认领键清单仍会算（写回闸与诊断共用），只是不再上屏；
+`specs/save-format.md` §7/§8/§9/§10 的切片回写口径不变（ADR-005 例外仍登记在案）。

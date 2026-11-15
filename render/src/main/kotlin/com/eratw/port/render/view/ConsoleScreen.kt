@@ -483,6 +483,31 @@ class ConsoleScreen(
      */
     fun tooltip(row: Int, col: Int): String? = buttons.tooltip(row, col)
 
+    /**
+     * **行内口径**的长按提示（[tooltip] 的加严面，`ButtonLayer.tooltipInline` 的屏幕级入口）。
+     *
+     * 与 [hitInline] 的分工：点击/高亮那条路要的是「有没有**可点**目标」，而提示这条路
+     * 要的是「该点有没有**节点**」—— 原版 ToolTip 读 `pointingString.Title`
+     * （`EmueraConsole.cs:1891-1895`），而 `pointingString` 在节点判通过后**非按钮也落**
+     * （`:2373-2379`），所以不可点文本（`<nonbutton title='…'>`）同样要能查。拿
+     * [hitInline] 当纵门会把这类提示整行判空（素质 / 种族的长按提示即此）。
+     *
+     * 纵盒按提示自己所属的节点算（`EmueraConsole.cs:2368` 的 `Top/Bottom` 判）；
+     * 参数据 [hitInline] 同一套行几何，缺省 ⇒ k = 1。
+     */
+    @Suppress("LongParameterList")
+    fun tooltipInline(
+        row: Int,
+        col: Int,
+        yInRowPx: Float,
+        fontSizePx: Int,
+        rowHeightPx: Float = 0f,
+        lineHeightPx: Float = 0f,
+        pureArtRow: Boolean = true,
+    ): String? = buttons.tooltipInline(
+        row, col, yInRowPx, fontSizePx, rowHeightPx, lineHeightPx, pureArtRow,
+    )
+
     /** 点击回环：命中则返回喂给 VM 的字符串（口径见 `button/ButtonLayer.kt` 的类文档）。 */
     fun click(row: Int, col: Int, acceptance: ButtonAcceptance = ButtonAcceptance.ANY): String? =
         buttons.hit(row, col, acceptance)?.let { buttons.selectedString(it, acceptance) }

@@ -21,6 +21,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.io.TempDir
@@ -84,18 +85,41 @@ import org.junit.jupiter.api.io.TempDir
  *   - 文本格式（`SystemSaveInBinary=NO`）存档的真机样本缺失：语料 5 个 `.sav` 全是 GZip 二进制
  *     容器，[SaveTextFormat] 的逐字段回环**没有真实存档可对拍**，只有合成用例。
  *
- * ## 语料根两列（savecorpus 波，2026-11-06）
+ * ## 样本来源（L35 save-fixture，2026-11-14 夹具化）
  *
- * 本文件的样本取自 `ERATW_GAMEDIR/sav`（语料侧在位就用语料的，否则回落仓内备份），
+ * **门禁输入不读 `ERATW_GAMEDIR` 下的 `sav` 目录**：那是游戏的**写盘目录**
+ * （`SaveConfig.ERATW` 的 `useSaveFolder` ⇒ 游戏根下的 `sav`），任何跑过游戏的进程都会往里落档。
+ * L30 RECON #4 实测：4.981 根的 `sav/global.sav` 是 2026-11-11 02:27:10（mtime）的**运行期档**
+ * （514 B / 27 条），4.980 根同期是 494 B / 25 条 ⇒ 同一提交在不同机器/写盘历史下读数不同
+ * （25→27 的差异不可复现，既可能是假红也可能是假绿）。
+ *
+ * 现在的样本分两级，都是 **git 跟踪的固定字节**：
+ * - **全局档夹具**（classpath `/save-fixtures/`，仓内
+ *   `core-vm/src/test/resources/save-fixtures/`）：
+ *   - `global-4.980-backup.sav`：**544 B / 25 条**，来源 = 上游仓的存档备份样本
+ *     `global.sav`（2026-10-18 快照，
+ *     sha256 `af8e331093c5d2285f506dadfbc0725d62efcf37531404dcb9e78ec80f1faf21`）；
+ *   - `global-4.981-runtime.sav`：**514 B / 27 条**，来源 = 4.981 语料根 `sav/global.sav`
+ *     （mtime 2026-11-11 02:27:10，
+ *     sha256 `fe95116d9d86f438939dea2507acf7d0b6294ad450ddff419bc8c4cde425e39d`）。
+ *     27 = 25 + `KOJO_PRESET` / `KOJO_PRESET_NAME`（4.981 `DLC/实用设置补丁/实用设置.ERH:30-31`
+ *     的两个 `#DIM/#DIMS GLOBAL SAVEDATA`），不是语料升版带来的漂移。
+ *   两档的期望值按**样本名**钉死（见 [全局档没有角色块且扩展段为空]），与语料根无关。
+ * - **`save00.sav` 整档**（60151 字节）：上游仓的存档备份样本（与 `SaveFormatTest` /
+ *   `SaveRoundTripTest` 同一批字节）。4.980 语料 `sav/` 里同名文件与备份逐字节相同、
+ *   4.981 语料 `sav/` 没有它 ⇒ 只读备份就能让两根读到同一份字节，不必再碰语料写盘目录。
+ *   公开仓适配：备份样本不随公开仓分发，改由 `ERATW_SAVE_SAMPLES` 指目录；没指就 assume-skip。
+ *
  * 期望读数里凡**随语料根变**的一律 `when (CorpusProfile)` 两列（4.980 | 4.981）：
  * `CSV/VarExtGameData.csv` 的段数/非空行数/生效 `SAVE_DTS`，以及样本描述里的版本行。
  * 随样本字节走的读数（60151 字节、94 字符描述、168 角色块、540 条全局条目、168 个分隔符、
- * 15626 条角色条目、payload 571185、`global.sav` 25 条）两根解析到同一份字节 ⇒ 两根同值，实读。
+ * 15626 条角色条目、payload 571185）两根解析到同一份 git 跟踪字节 ⇒ 两根同值，实读。
  * 旧版把这些写死成 4.981 一列，闸口径（AGENTS.md §5）指向 4.980 时恒红。
  *
- * 样本缺失不再 assume-skip：`ERATW_GAMEDIR` 没设 / 判不出语料版本 / 语料与仓内备份都找不到
- * 这份样本 ⇒ **AssertionError 判红**并打印找过的路径（旧实现是 5 处 `assumeTrue(false, …)`，
- * 样本一缺整族用例就不跑，闸看着仍绿）。
+ * 样本缺失不再 assume-skip（上游口径）：夹具缺失 ⇒ **AssertionError 判红**。
+ * 公开仓适配：存档备份样本与语料根都不随公开仓分发 —— 备份样本改读
+ * `ERATW_SAVE_SAMPLES` 指的目录（没指就 assume-skip）；`ERATW_GAMEDIR` 没设也 assume-skip
+ * （显式设了但目录不完整仍判红，与上游一致）。
  *
  * ## 与 `n-stmtreset` 的接口约定
  *
@@ -109,11 +133,56 @@ import org.junit.jupiter.api.io.TempDir
 class SaveRoundTripAuditTest {
 
     // ------------------------------------------------------------------
-    // 装置：样本定位（**只读**，语料与仓内备份都不写）
+    // 装置：样本定位（**只读**；夹具 = git 跟踪字节，语料 `sav` 目录不参与）
     // ------------------------------------------------------------------
 
     /**
+     * 门禁夹具：classpath `/save-fixtures/<name>`（仓内
+     * `core-vm/src/test/resources/save-fixtures/`，git 跟踪）。
+     *
+     * **不得**在这里接 `ERATW_GAMEDIR`：语料根下的 `sav` 是游戏写盘目录，不是分发内容
+     * （L30 RECON #4）。源哨兵 [源哨兵 门禁样本不读语料 sav 目录] 盯死这条。
+     */
+    private fun fixtureBytes(name: String): ByteArray {
+        val resource = "/save-fixtures/$name"
+        return SaveRoundTripAuditTest::class.java.getResourceAsStream(resource)?.use { it.readBytes() }
+            ?: throw AssertionError(
+                "找不到存档夹具 $resource（应位于 core-vm/src/test/resources/save-fixtures/$name）：" +
+                    "夹具随 git 跟踪，缺了就是仓库不完整，不退回落、不跳过。",
+            )
+    }
+
+    /**
+     * `save00.sav` 一族整档样本：上游仓的存档备份样本（与 `SaveFormatTest` 同一批字节）。
+     *
+     * 4.980 语料 `sav/` 里的同名文件与备份逐字节相同（sha256 前缀 27883f1663969468 实测）、
+     * 4.981 语料 `sav/` 没有它 ⇒ 只读备份就能让两根读到同一份字节。
+     *
+     * 公开仓适配：样本目录由 `ERATW_SAVE_SAMPLES` 指定；没设或样本缺失 ⇒ assume-skip
+     * （公开仓不分发真实存档，跳过不算闸失效；显式指了目录但文件缺 ⇒ 判红）。
+     */
+    private fun backupBytes(name: String): ByteArray {
+        val searched = BACKUP_DIRS.map { it.resolve(name).toAbsolutePath().normalize() }
+        val file = searched.firstOrNull { Files.isRegularFile(it) }
+        if (file == null) {
+            val envDir = System.getenv("ERATW_SAVE_SAMPLES")
+            org.junit.jupiter.api.Assumptions.assumeTrue(
+                envDir != null,
+                "公开仓无存档备份样本（ERATW_SAVE_SAMPLES 未设置）：跳过整档审计用例",
+            )
+            throw AssertionError(
+                "ERATW_SAVE_SAMPLES=$envDir 下找不到存档样本 $name：下列路径都不存在\n" +
+                    searched.joinToString("\n"),
+            )
+        }
+        return Files.readAllBytes(file)
+    }
+
+    /**
      * 语料游戏根 + 判出来的版本档。
+     *
+     * 只服务「按根取列」的用例（`CSV/VarExtGameData.csv` 读数、样本版本行）；
+     * **存档样本定位不走这里**（见 [fixtureBytes] / [backupBytes]）。
      *
      * `ERATW_GAMEDIR` 未设 / 指到的目录判不出语料版本（`ERB/DIM.ERH` 缺、`NOW_VERSION` 不在册）
      * ⇒ **AssertionError 判红** —— 口径同 `core/config/ConfigChainTest` 的 `corpusRoot`：
@@ -122,9 +191,12 @@ class SaveRoundTripAuditTest {
     private fun corpusRoot(): Pair<Path, CorpusProfile> {
         val env = System.getenv("ERATW_GAMEDIR")
             ?: run {
-                // 公开仓无外部语料/样本：按公开适配口径跳过（上游为硬判红）。
-                org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_GAMEDIR：跳过存档审计语料根")
-                throw AssertionError("unreachable")
+                // 公开仓适配：CI / 克隆环境不带语料根 ⇒ assume-skip（上游为硬判红）。
+                org.junit.jupiter.api.Assumptions.assumeTrue(
+                    false,
+                    "公开仓无 ERATW_GAMEDIR：跳过按语料根取列的用例",
+                )
+                @Suppress("UNREACHABLE_CODE") throw AssertionError("unreachable")
             }
         val dir = Path.of(env)
         if (!Files.isDirectory(dir)) throw AssertionError("ERATW_GAMEDIR=$env 不是目录：语料根不完整")
@@ -138,33 +210,16 @@ class SaveRoundTripAuditTest {
      * 样本档描述里那段「版本行」的按根期望值。
      *
      * 这一格是**样本文件**的属性（原版 `Process.cs` 拼串时写的是写出该档那次运行的游戏版本），
-     * 不是语料根的属性：4.980 根下样本取自语料 `sav/`、4.981 根下样本回落仓内备份，
-     * 两份 `save00.sav` 是同一份字节（sha256 前缀 27883f1663969468）⇒ 两列**同值**。
-     * 仍然按根写成两列：哪天 4.981 语料的 `sav/` 落了 4.981 时代的真档，这格会在断言里显形，
+     * 不是语料根的属性：`save00.sav` 恒取仓内 git 跟踪备份（60151 字节，
+     * sha256 前缀 27883f1663969468），两根读同一份字节 ⇒ 两列**同值**。
+     * 仍然按根写成两列：哪天样本换成 4.981 时代的真档，这格会在断言里显形，
      * 而不是被一枚看不出出处的常量吞掉。
      */
     private fun sampleVersionTail(profile: CorpusProfile): String = when (profile) {
-        // 4.980 列：本路 2026-11-06 实读（从 4.980 语料 sav/save00.sav 的描述里取出，含尾空格）
+        // 4.980 列：2026-11-06 从备份 save00.sav 的描述里取出，含尾空格
         CorpusProfile.V4_980 -> "Ver 4.980 - 日语交流用画蛇添足版CH20260326 "
-        // 4.981 列：4.981 语料 sav/ 是空目录 ⇒ 样本回落到仓内 4.980 时代备份（同一份字节）
+        // 4.981 列：同一份备份字节 ⇒ 同值（语料根不再参与样本定位）
         CorpusProfile.V4_981 -> "Ver 4.980 - 日语交流用画蛇添足版CH20260326 "
-    }
-
-    /**
-     * 单个样本的**实际落地路径**：公开仓只认 `ERATW_SAVE_SAMPLES`（`-PsaveSamples` 由
-     * `core-vm/build.gradle.kts` 导出）。不携带任何内部存档备份路径；没有显式来源时按
-     * 公开适配口径跳过（上游是硬判红）。
-     */
-    private fun sample(name: String): Path {
-        val dir = System.getenv("ERATW_SAVE_SAMPLES")?.trim()?.takeIf { it.isNotEmpty() }
-            ?: run {
-                // 公开仓不含内部存档样本：按公开适配口径跳过。
-                org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 ERATW_SAVE_SAMPLES：跳过真存档样本判据")
-                throw AssertionError("unreachable")
-            }
-        val f = Path.of(dir).resolve(name)
-        if (Files.isRegularFile(f)) return f
-        throw AssertionError("ERATW_SAVE_SAMPLES=$dir 下找不到存档样本 $name")
     }
 
     /** 语料 CSV 目录（[VarExt 名单按根取列] 用）；语料根不完整 ⇒ 判红。 */
@@ -231,12 +286,12 @@ class SaveRoundTripAuditTest {
      * 实测量（`sav/save00.sav`）：60151 字节文件、GZip 魔数、版本 1808、校验表条数 0、
      * GZip 外壳头 `1f 8b 08 00 00 00 00 00 00 0a`（.NET 8 的 OS 字节 0x0A）。
      *
-     * 60151 这根**两根同值，实读**：两个语料根解析到的 `save00.sav` 是同一份字节
-     * （4.980 走语料 `sav/`、4.981 走仓内备份，sha256 前缀 27883f1663969468 相同）。
+     * 60151 这根**两根同值，实读**：样本恒取仓内 git 跟踪备份的同一份 `save00.sav`
+     * （sha256 前缀 27883f1663969468；语料 `sav` 目录不参与定位）。
      */
     @Test
     fun `容器头三字段与原版写侧常量对拍`() {
-        val bytes = Files.readAllBytes(sample("save00.sav"))
+        val bytes = backupBytes("save00.sav")
         assertEquals(60151L, bytes.size.toLong(), "save00.sav 文件长度实测")
 
         var magic = 0L
@@ -272,7 +327,7 @@ class SaveRoundTripAuditTest {
      */
     @Test
     fun `payload 头部字段与写出序逐一对拍`() {
-        val d = readSample("save00.sav")
+        val d = readSave00()
         assertEquals(SaveFileKind.NORMAL, d.fileType, ":2594 WriteFileType(Normal)")
         assertEquals(realCode, d.uniqueCode, ":2595 ScriptUniqueCode 实测 7153")
         assertEquals(0L, d.scriptVersion, ":2596 ScriptVersion 实测 0（游戏侧未定义）")
@@ -311,7 +366,7 @@ class SaveRoundTripAuditTest {
      */
     @Test
     fun `真档 1D 整型数组逐元素读回`() {
-        val d = readSample("save00.sav")
+        val d = readSave00()
         val day = d.variables.filterIsInstance<SaveEntry.IntArray1>().firstOrNull { it.key == "DAY" }
         assertTrue(day != null, "真档全局段应含 DAY")
         assertEquals(100, day!!.values.size, "DAY 维度实测 100")
@@ -353,8 +408,8 @@ class SaveRoundTripAuditTest {
      */
     @Test
     fun `payload 与源文件逐字节一致`() {
-        val d = readSample("save00.sav")
-        val bytes = Files.readAllBytes(sample("save00.sav"))
+        val d = readSave00()
+        val bytes = backupBytes("save00.sav")
         val src = SaveFormat.sourcePayloadOf(bytes)
         assertTrue(src != null, "源 payload 解不出来")
         val back = SaveFormat.encodePayload(d)
@@ -371,8 +426,7 @@ class SaveRoundTripAuditTest {
      */
     @Test
     fun `write 对未改动存档原样回写是移植侧自造分支`() {
-        val f = sample("save00.sav")
-        val bytes = Files.readAllBytes(f)
+        val bytes = backupBytes("save00.sav")
         val d = SaveFormat.read(bytes)
         assertTrue(SaveFormat.write(d).contentEquals(bytes), "回写分支：write(read(f)) == f")
         // 自造分支的判据：把同一模型重建成「无源文件」的存档后，容器字节走真实压缩路径 ⇒ 长度可变
@@ -399,8 +453,7 @@ class SaveRoundTripAuditTest {
      */
     @Test
     fun `临时目录真文件回环逐字段一致`(@TempDir tmp: Path) {
-        val src = sample("save00.sav")
-        val bytes = Files.readAllBytes(src)
+        val bytes = backupBytes("save00.sav")
         val a = SaveFormat.read(bytes)
         val out = RootedSaveFileIo(tmp, null)
         assertTrue(out.write("sav/save00.sav", SaveFormat.write(withoutSource(a))), "落临时目录失败")
@@ -452,7 +505,7 @@ class SaveRoundTripAuditTest {
      */
     @Test
     fun `真档扩展段只有两张 DT 且都是空表`() {
-        val d = readSample("save00.sav")
+        val d = readSave00()
         assertEquals(listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG"), d.emData.map { it.key }, "档内扩展段名字与顺序")
         assertTrue(d.emData.all { it is SaveEntry.DataTableValue }, "两条都是 DT（类型字节 34）")
         for (e in d.emData.filterIsInstance<SaveEntry.DataTableValue>()) {
@@ -474,11 +527,11 @@ class SaveRoundTripAuditTest {
      */
     @Test
     fun `真档经语句层往返`() {
-        val src = sample("save00.sav")
+        val src = backupBytes("save00.sav")
         val sets = EmSaveSets(save = EmDataNames(dts = listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG")))
 
         val io = MemorySaveIo()
-        io.files["sav/save00.sav"] = Files.readAllBytes(src)
+        io.files["sav/save00.sav"] = src
         val s1 = realStore()
         FileSystemOps(s1, io, eratwConfig(), sets).loadData(0)
 
@@ -523,8 +576,7 @@ class SaveRoundTripAuditTest {
      */
     @Test
     fun `真档头探测四分支读数`() {
-        val src = sample("save00.sav")
-        val bytes = Files.readAllBytes(src)
+        val bytes = backupBytes("save00.sav")
         val gb = GameBaseData(gameCode = realCode, version = 0L)
 
         val ok = SaveDataProbe.checkBytes(bytes, SaveFileKind.NORMAL, gb)
@@ -575,16 +627,48 @@ class SaveRoundTripAuditTest {
         )
     }
 
-    /** `global.sav`（若有）：类别 1、无角色数、描述恒空串、扩展段为空（语料没有 `GLOBAL_*` 生效行）。 */
+    /**
+     * `global.sav` 的**两个固定夹具**（`core-vm/src/test/resources/save-fixtures/`，git 跟踪；
+     * 来源/字节数/条数/与两档的关系见类 KDoc「样本来源」）：
+     * - `global-4.980-backup.sav`：544 B / **25 条**（4.980 时代备份档）；
+     * - `global-4.981-runtime.sav`：514 B / **27 条**（4.981 运行期档，mtime 2026-11-11 02:27:10）。
+     *
+     * 27 = 25 + `KOJO_PRESET` / `KOJO_PRESET_NAME`（4.981 `DLC/实用设置补丁/实用设置.ERH:30-31`
+     * 的两个 `#DIM/#DIMS GLOBAL SAVEDATA`）⇒ 两档的差是**注册面扩张**，不是语料升版。
+     * 期望值按**样本名**钉死，与语料根无关：4.980 / 4.981 两个 `ERATW_GAMEDIR` 下读数一致。
+     *
+     * 两个样本的共同形态：类别 1、无角色数、描述恒空串、扩展段为空
+     * （语料 `GLOBAL_*` 三条指令全是注释行 ⇒ 接受集为空）。
+     */
     @Test
     fun `全局档没有角色块且扩展段为空`() {
-        val d = readSample("global.sav")
-        assertEquals(SaveFileKind.GLOBAL, d.fileType, "WriteFileType(Global)（VariableEvaluator.cs:2485）")
-        assertEquals("", d.text, ":2488 WriteString(\"\")")
-        assertTrue(d.characters.isEmpty(), "全局档不写角色数（:2483-2493 无 :2598 那一步）")
-        assertTrue(d.emData.isEmpty(), "语料 GLOBAL_* 三条指令全是注释行 ⇒ 扩展段空")
-        assertEquals(25, d.variables.size, "global.sav 全局条目数实测 25")
-        assertEquals(listOf("GLOBAL", "GLOBALS"), d.variables.take(2).map { it.key }, "前两条实测")
+        // (夹具名, 字节数, 全局条目数) 三件一起钉：换样本必须同时改这里和类 KDoc
+        val samples = listOf(
+            Triple("global-4.980-backup.sav", 544, 25),
+            Triple("global-4.981-runtime.sav", 514, 27),
+        )
+        val keysByName = LinkedHashMap<String, List<String>>()
+        for ((name, size, entries) in samples) {
+            val bytes = fixtureBytes(name)
+            val d = SaveFormat.read(bytes)
+            assertEquals(size, bytes.size, "$name 夹具字节数（git 跟踪的固定样本）")
+            assertEquals(SaveFileKind.GLOBAL, d.fileType, "$name WriteFileType(Global)（VariableEvaluator.cs:2485）")
+            assertEquals("", d.text, "$name :2488 WriteString(\"\")")
+            assertTrue(d.characters.isEmpty(), "$name 全局档不写角色数（:2483-2493 无 :2598 那一步）")
+            assertTrue(d.emData.isEmpty(), "$name 语料 GLOBAL_* 三条指令全是注释行 ⇒ 扩展段空")
+            assertEquals(entries, d.variables.size, "$name 全局条目数（按样本名钉死，不按语料根）")
+            assertEquals(listOf("GLOBAL", "GLOBALS"), d.variables.take(2).map { it.key }, "$name 前两条实测")
+            keysByName[name] = d.variables.map { it.key }
+        }
+        // 两档关系：4.981 运行期档只比 4.980 备份档多两个键（注册面扩张），没有别的差异
+        val old = keysByName.getValue("global-4.980-backup.sav")
+        val cur = keysByName.getValue("global-4.981-runtime.sav")
+        assertEquals(
+            listOf("KOJO_PRESET", "KOJO_PRESET_NAME"),
+            (cur.toSet() - old.toSet()).sorted(),
+            "4.981 运行期档相对 4.980 备份档的新增键（多一条/少一条都应红）",
+        )
+        assertTrue(cur.toSet().containsAll(old), "4.981 运行期档不得缺 4.980 备份档的键：${old - cur.toSet()}")
     }
 
     // ------------------------------------------------------------------
@@ -759,11 +843,47 @@ class SaveRoundTripAuditTest {
     }
 
     // ------------------------------------------------------------------
+    // 9. 源哨兵：门禁样本不得回退到语料 sav 目录
+    // ------------------------------------------------------------------
+
+    /**
+     * **源哨兵**（照 `StallSentinelTest.codeLines` / `ModCsvPlanWireTest.sourceOf` 的既有模式）：
+     * 本类源码里不得再出现「把语料根拼到 `sav`」的表达式，样本定位段也不得读 `ERATW_GAMEDIR`。
+     *
+     * 为什么只能钉源码：`sav` 是游戏**写盘目录**（L30 RECON #4），读它等于把玩家/机器的运行历史
+     * 当门禁输入；行为面挡不住回退——若某个 4.980 根恰好也落了一份 27 条档，把输入改回语料
+     * `sav` 的用例仍会绿，只有源码哨兵能当场红。
+     */
+    @Test
+    fun `源哨兵 门禁样本不读语料 sav 目录`() {
+        val src = ownSource()
+        val savJoin = "resolve(\"sav\")"
+        assertFalse(src.contains(savJoin), "门禁样本不得再拼 <语料根>/sav：源码里出现 $savJoin")
+        assertTrue(src.contains("/save-fixtures/"), "夹具入口必须读 classpath 的 /save-fixtures/")
+        assertTrue(src.contains("global-4.980-backup.sav"), "4.980 备份档夹具名必须在位")
+        assertTrue(src.contains("global-4.981-runtime.sav"), "4.981 运行期档夹具名必须在位")
+        // 语料根仍被「按根取列」的既有用例使用（CSV/VarExt 与版本行），这是允许的；
+        // 但样本定位段（fixtureBytes / backupBytes）里不许出现它 —— 否则样本又会随根漂移。
+        val locators = src.substringAfter("private fun fixtureBytes(").substringBefore("private fun corpusRoot(")
+        assertFalse(locators.contains("System.getenv(\"ERATW_GAMEDIR\")"), "样本定位段不得读 ERATW_GAMEDIR")
+        assertFalse(locators.contains("corpusRoot()"), "样本定位段不得依赖语料根")
+    }
+
+    /** 本测试类自己的源码（测试任务 cwd 是模块目录 `core-vm/`；候选与 `SaveFormatTest` 同口径）。 */
+    private fun ownSource(): String {
+        val rel = "src/test/kotlin/com/eratw/port/core/save/SaveRoundTripAuditTest.kt"
+        val candidates = listOf(File(rel), File("core-vm/$rel"), File("../core-vm/$rel"))
+        val file = candidates.firstOrNull { it.isFile }
+            ?: throw AssertionError("找不到本类源码（试过 ${candidates.joinToString { it.path }}）")
+        return file.readText(Charsets.UTF_8).replace("\r\n", "\n")
+    }
+
+    // ------------------------------------------------------------------
     // 工具
     // ------------------------------------------------------------------
 
-    /** 读样本；样本不在位由 [sample] 直接判红（不再有「读不到就跳过」的支）。 */
-    private fun readSample(name: String): SaveData = SaveFormat.read(Files.readAllBytes(sample(name)))
+    /** `save00.sav` 整档（仓内 git 跟踪备份，60151 字节；两根同字节）。 */
+    private fun readSave00(): SaveData = SaveFormat.read(backupBytes("save00.sav"))
 
     /** 去掉「原样回写」依据，逼出真实压缩分支（构造参数的默认值就是 null）。 */
     private fun withoutSource(d: SaveData): SaveData = SaveData(
@@ -839,4 +959,12 @@ class SaveRoundTripAuditTest {
         println(line)
     }
 
+    private companion object {
+        /**
+         * 存档备份样本目录：公开仓不随仓分发，由 `ERATW_SAVE_SAMPLES` 显式指定。
+         * 上游仓口径是仓内 git 跟踪备份、gradle test 的 cwd 在 `core-vm/`。
+         */
+        val BACKUP_DIRS: List<Path> =
+            System.getenv("ERATW_SAVE_SAMPLES")?.let { listOf(Path.of(it)) } ?: emptyList()
+    }
 }

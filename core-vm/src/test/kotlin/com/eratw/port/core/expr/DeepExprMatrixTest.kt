@@ -15,7 +15,8 @@ import kotlin.test.assertTrue
  *   :813-848 ReduceBinaryTerm 三类分派（int-int 全表 / str-str 七条 / 仅 Mult 的混型）、
  *   :754-811 ReduceUnaryTerm / ReduceUnaryAfterTerm；
  * - `:22-24` PlusIntInt、`:55-58` MinusIntInt、`:69-72` MultIntInt —— arguments[0] 先求值；
- * - `:129-137` DivIntInt 与 `:148-156` ModIntInt —— **arguments[1] 先求值**（先判 0）；
+ * - 4.981 `SafeArithmetic.cs:67-89` SafeDivide/SafeModulo + `OperatorMethod.cs:374/:388`
+ *   —— Div/Mod 也是 arguments[0] 先；1.824 `:129-137/:148-156` 的「先取除数判 0」已作废；
  * - `:159-373` 六个比较族的参数次序同 arguments[0] 先；
  * - `:375-465` And/Or/Nand/Nor 的短路判据（C# `&&`/`||` 写法本身，见各方法体）；
  * - `VariableParser.cs:182-188` → 关键字下标包装 `index = 数组位置(0 基)`；
@@ -110,7 +111,7 @@ class DeepExprMatrixTest {
     }
 
     // ------------------------------------------------------------------
-    // 3. 二元参数求值次序（唯一例外：Div / Mod 先右后左）
+    // 3. 二元参数求值次序（左先右后；4.981 起 Div / Mod 不再例外）
     // ------------------------------------------------------------------
 
     @Test
@@ -132,9 +133,12 @@ class DeepExprMatrixTest {
         assertEquals(listOf("F1()", "F2()"), run("||", 0L), "|| 次序")
         assertEquals(listOf("F1()", "F2()"), run("!|", 0L), "!| 次序")
 
-        // Div / Mod 是全族唯一例外：先求 arguments[1] 判 0 再求 arguments[0]（:131/:136、:150/:155）。
+        // 4.981 `DivIntInt`/`ModIntInt` 走 `SafeArithmetic.SafeDivide/SafeModulo`
+        // （`SafeArithmetic.cs:67-89`），实参按 C# 从左到右求值
+        // （`OperatorMethod.cs:374` / `:388`，4.981 升级时 `:131/:136`、`:150/:155`
+        // 「先取除数判 0」的 1.824 形态已随之作废）⇒ 与其它二元算子同序。
         for (o in listOf("/", "%")) {
-            assertEquals(listOf("F2()", "F1()"), run(o, 6L), "$o 次序（先右后左）")
+            assertEquals(listOf("F1()", "F2()"), run(o, 6L), "$o 次序（左先右后）")
         }
     }
 

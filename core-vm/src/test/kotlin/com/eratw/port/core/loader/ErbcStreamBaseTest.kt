@@ -12,6 +12,7 @@ import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.ProgramBase
 import com.eratw.port.core.code.SlotAddr
 import com.eratw.port.core.expr.IntLiteral
+import com.eratw.port.core.patch.CallSentinels
 import com.eratw.port.core.stmt.RendStmt
 import com.eratw.port.core.stmt.VoidArgument
 import org.junit.jupiter.api.io.TempDir
@@ -233,6 +234,68 @@ class ErbcStreamBaseTest {
     }
 
     // ==================================================================
+    // 6. `_CALL` 的 super 哨兵放行（RT2 superfix）：`CallSentinels` 两个设计值
+    //    是 Mod 包编译档的一等公民（容器直存 Program 字节，`.erbm` 的 Program
+    //    恒零基线 ⇒ 本节样题全走零基线口径），其余一切负值照拒；放行/拒绝在
+    //    全读档与映射档两路必须同判同句（镜像对拍）。
+    // ==================================================================
+
+    @Test
+    fun `零基线产物_CALL_a为CALL_SUPER_SENTINEL 两路装载放行且下标原样保留`(@TempDir dir: Path) {
+        val bytes = ErbcWriter.encode(zeroBaseCallProgram(CallSentinels.CALL_SUPER_SENTINEL))
+        val f = dir.resolve("mod-call-super.erbc")
+        Files.write(f, bytes)
+
+        val heap = ErbcReader.decode(bytes)
+        val mapped = loadMapped(f, ProgramBase.NONE)
+        assertProgramsIdentical(heap, mapped, "CALL_SUPER 哨兵：映射档 vs 全读档")
+        val callPc = heap.functions[0].entryPc
+        assertEquals(CallSentinels.CALL_SUPER_SENTINEL, heap.a(callPc), "全读档 _CALL a 必须原样保留哨兵值")
+        assertEquals(CallSentinels.CALL_SUPER_SENTINEL, mapped.a(callPc), "映射档 _CALL a 必须原样保留哨兵值")
+    }
+
+    @Test
+    fun `零基线产物_CALL_a为TRY_CALL_SUPER_SENTINEL 两路装载放行且下标原样保留`(@TempDir dir: Path) {
+        val bytes = ErbcWriter.encode(zeroBaseCallProgram(CallSentinels.TRY_CALL_SUPER_SENTINEL))
+        val f = dir.resolve("mod-call-try-super.erbc")
+        Files.write(f, bytes)
+
+        val heap = ErbcReader.decode(bytes)
+        val mapped = loadMapped(f, ProgramBase.NONE)
+        assertProgramsIdentical(heap, mapped, "TRY_CALL_SUPER 哨兵：映射档 vs 全读档")
+        val callPc = heap.functions[0].entryPc
+        assertEquals(CallSentinels.TRY_CALL_SUPER_SENTINEL, heap.a(callPc), "全读档 _CALL a 必须原样保留哨兵值")
+        assertEquals(CallSentinels.TRY_CALL_SUPER_SENTINEL, mapped.a(callPc), "映射档 _CALL a 必须原样保留哨兵值")
+    }
+
+    @Test
+    fun `零基线产物_CALL其余负值两路装载照拒 异常文案逐字一致`(@TempDir dir: Path) {
+        // 负控钉死放行域不扩散：-1（外部导入哨兵形态）、-5（普通负下标）、
+        // Int.MIN_VALUE + 2（紧贴 TRY_CALL_SUPER_SENTINEL 的相邻负值）都必须照拒 ——
+        // 哨兵协议（ABI-4）只豁免两个精确设计值，其余负值仍是装载期判界拒绝。
+        for (target in intArrayOf(-1, -5, Int.MIN_VALUE + 2)) {
+            val bytes = ErbcWriter.encode(zeroBaseCallProgram(target))
+            // 每个负值单独落盘：映射装载的 mmap 段释放是延迟的（Windows 下同路径重写
+            // 会撞「用户映射区域打开的文件」），一值一文件不赌释放时机。
+            val f = dir.resolve("mod-call-neg-$target.erbc")
+            Files.write(f, bytes)
+
+            val heapError = assertFailsWith<ErbcDecodeException> { ErbcReader.decode(bytes) }
+            val message = heapError.message ?: ""
+            assertTrue(message.contains("_CALL 引用函数下标"), "a=$target 应报 _CALL 判界，实为: $message")
+            assertTrue(message.contains("$target"), "a=$target 消息应含实际下标，实为: $message")
+            assertTrue(message.contains("越界"), "a=$target 应报越界，实为: $message")
+            // 映射档同判同句（判据与 ErbcReader.validate 逐字同源：同一 pc、同一 functions
+            // 条数）；装载层收口会在句前加「路径 + 偏移」位置前缀，判界句本身逐字嵌入消息。
+            val mappedError = assertFailsWith<ErbcFormatException> { loadMapped(f, ProgramBase.NONE) }
+            assertTrue(
+                mappedError.message!!.contains(message),
+                "a=$target 映射档须带同句 _CALL 判界文案（等价性对拍），实为: ${mappedError.message}",
+            )
+        }
+    }
+
+    // ==================================================================
     // 样题与装置
     // ==================================================================
 
@@ -355,6 +418,20 @@ class ErbcStreamBaseTest {
             functionBase = counts.functions,
         )
         val main = b.declareFunction("mod_hook", b.here(), arity = 0, slotCount = 1)
+        b.emit(Opcode._CALL, callTarget, 0, SlotAddr.NONE, 1)
+        b.emit(Opcode._RET, SlotAddr.NONE, 0, 0, 2)
+        b.setFunctionSlots(main, 1)
+        return b.build(main)
+    }
+
+    /**
+     * 零基线单函数样题（`.erbm` 容器内 Program 的形态）：单函数 + `_CALL` + `_RET`，
+     * [callTarget] 原样进指令流。无段 7、无标签、无池引用，让失败/放行都只落在
+     * `_CALL` 判界本身 —— super 哨兵放行与其余负值拒绝共用这一个最小样题。
+     */
+    private fun zeroBaseCallProgram(callTarget: Int): Program {
+        val b = CodeBuilder()
+        val main = b.declareFunction("mod_x", b.here(), arity = 0, slotCount = 1)
         b.emit(Opcode._CALL, callTarget, 0, SlotAddr.NONE, 1)
         b.emit(Opcode._RET, SlotAddr.NONE, 0, 0, 2)
         b.setFunctionSlots(main, 1)

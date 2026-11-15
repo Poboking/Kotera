@@ -169,8 +169,18 @@ object CellWidth {
      *   **显式 `width` 也不生效**（原版 `return` 在整段尺寸计算之前），这里计
      *   [displayCells] 的格数。宿主**未接线**（[imageSizeOf] 为 null）时无法判 miss，
      *   保持旧读数（显式 `width` 计图形格、缺 `width` 计 0），与 sink 行内游标同一口径；
+     * - `<img>` **缺帧**（尺寸命中而 [frameAvailableOf] 已接线且答 false —— 绘制时帧拿
+     *   不到）：同一条单出口、同一把 AltText 文本尺（MODERN-R12-DIVW2；判据唯一名下见
+     *   [imgWidthPxOrNull]，render 展平消费同一判据）。[frameAvailableOf] 未接线（null）
+     *   时判不了这一面，保持图宽旧读数；
      * - `<shape type='space'>` 单参、`type='rect'>` 单参且 num>0：同 img 计格；
      * - `rect` 四参（x≥0 && w>0 && h>0）：占宽 = **w**（渲染按 w 落格，横向偏移不推进）；
+     *   **连续条带特例**：紧邻、x 折算为 0、y/h 折算值相同的一串四参 rect 按
+     *   「像素宽求和 → 折一次格」计量，扫描器 [rectBandRun] 是唯一实现（折行预算与
+     *   `LineBufferConsoleSink.inlineCursor` 共用），与 `render/adapter/HtmlRunFlatten.kt`
+     *   的 `appendRectBand`/`flushRectBands` 同一口径（0.2.46 玩家「战斗能力不显示升级
+     *   进度条」：`HTML_RECT_BAR` 把 180px 切成 180 个 `1px` 块，逐块各计 1 格会把
+     *   `Lv2 [条] Lv3` 折成三行）；
      * - 其余（未知 type、参数不合、rect 校验不过）：渲染落重建文案按文本画
      *   （`ConsoleErrorShapePart`，ConsoleShapePart.cs:71-74），这里按标签原文近似计文本格
      *   （重建文案与原文长度同阶）；这一支**不受** `graphicFontPx > 0` 门控 —— 错误形态
@@ -181,6 +191,7 @@ object CellWidth {
         s: String,
         graphicFontPx: Long = 0L,
         imageSizeOf: ((String) -> ImageSizePx?)? = null,
+        frameAvailableOf: ((String) -> Boolean)? = null,
     ): Int {
         var w = 0
         var i = 0
@@ -203,7 +214,19 @@ object CellWidth {
                 }
                 val tag = s.substring(i, end)
                 if (graphicFontPx > 0L) {
-                    w += htmlTagWidth(tag, graphicFontPx, imageSizeOf)
+                    // 连续四参 rect 条带（渐变进度条）：渲染侧把它们合成**一个**矩形，
+                    // 折行预算也必须只折一次格。逐块 graphicCells(1px) ⇒ 每块 1 格，
+                    // 180 块的条被算成 180 格，真机列宽 136 下整行被折成三段。
+                    // 扫描器是 [rectBandRun] 的唯一实现：行内游标（div 锚点/按钮列位）
+                    // 也走它，不许出现「折行说 20 格、锚点说 180 格」的第三把尺。
+                    val band = rectBandRun(s, i, graphicFontPx)
+                    if (band != null) {
+                        w += graphicCells(band.totalScriptPx, graphicFontPx)
+                        // 这些标签全是 shape（不会是 <div>），整批跳过。
+                        i = band.endIndex
+                        continue
+                    }
+                    w += htmlTagWidth(tag, graphicFontPx, imageSizeOf, frameAvailableOf)
                 } else if (isInvalidShapeTag(tag)) {
                     // headless 不折算图形，但错误形态 <shape> 原版落 ConsoleErrorShapePart
                     // （文本回落，ConsoleShapePart.cs:71-74 + ConsoleErrorShapePart.cs:28-37）：
@@ -307,6 +330,100 @@ object CellWidth {
     }
 
     /**
+     * 从 [start]（必须指向 `<`）起扫出的**一段连续可合并的四参 rect 条带**。
+     *
+     * 这是 core 侧条带判据的**唯一实现**：[visibleHtmlCells]（折行/制表预算）与
+     * `LineBufferConsoleSink.inlineCursor`（div 锚点、按钮列位、像素游标）都调它，
+     * 任何一侧另写一份扫描循环都会重新出现「两把尺」（0.2.46 进度条折散的病根）。
+     *
+     * 判据逐条对齐 `render/adapter/HtmlRunFlatten.kt` 的 `emitShape` 四参分支与
+     * `appendRectBand`：
+     * - **x 折算后必须恰为 0**（浮点，与 render 的 `x != 0f` 同式）：非零 x 在 render
+     *   会先 `flushRectBands()` 逐块单独落宽，这里也必须断开；
+     * - w/h 的原始 num > 0（与 render `w > 0f && h > 0f` 同形）；
+     * - **y/h 用折算后的脚本像素浮点值**作比对键，而不是原始 `(num, isPx)` 对：
+     *   render 的 `appendRectBand` 比的是 `pixelF` 后的**设备像素**，`param='0,100,…'`
+     *   与 `param='0,18px,…'` 在 18px 字号下是同一个 y，原始键不同会让「渲染合并、
+     *   core 断开」重新分叉；脚本像素与设备像素只差一个全条带相同的比例因子，
+     *   相等关系不变（≤1 设备像素的取整带是既有登记的不变量）。
+     * - 条带必须是**紧邻**的 shape 标签：中间夹任何文本或其它标签都断开（render 侧
+     *   `Scanner` / `openTag` 在遇到非条带内容时同样 `flushRectBands()`）。
+     *
+     * [totalScriptPx] 是各块脚本像素宽之和，调用方**只在整段末尾折一次格**
+     * （[graphicCells]），与 render `flushRectBands` 的 `total / cellPixelWidth → ceil` 同形。
+     */
+    internal class RectBandRun(
+        val endIndex: Int,
+        val totalScriptPx: Long,
+        val count: Int,
+    )
+
+    /** 一条可合并的四参 rect 块（折算后的 y/h 键 + 脚本像素宽）。 */
+    private class RectBandBlock(
+        val yKey: Float,
+        val hKey: Float,
+        val widthScriptPx: Long,
+    )
+
+    @Suppress("ReturnCount")
+    private fun rectBandBlock(tag: String, graphicFontPx: Long): RectBandBlock? {
+        if (!isShapeTag(tag)) return null
+        if ((tagAttr(tag, "type") ?: "").trim().lowercase() != "rect") return null
+        val params = (tagAttr(tag, "param") ?: "")
+            .split(',')
+            .map { parseMixedNum(it.trim()) }
+        if (params.size != 4 || params.any { it == null }) return null
+        val x = params[0]!!
+        val y = params[1]!!
+        val w = params[2]!!
+        val h = params[3]!!
+        // render 的 emitShape 判 `x >= 0f && w > 0f && h > 0f`，appendRectBand 又要求
+        // `x == 0f` 才进连续条带。浮点折算与 render 的 pixelF 同式，不能用整数除
+        // （`1`（百分比）整数除得 0 会被误判成可合并，render 的 0.18f 却会断开）。
+        if (graphicScriptPxFloat(x.first, x.second, graphicFontPx) != 0f) return null
+        if (w.first <= 0L || h.first <= 0L) return null
+        return RectBandBlock(
+            graphicScriptPxFloat(y.first, y.second, graphicFontPx),
+            graphicScriptPxFloat(h.first, h.second, graphicFontPx),
+            graphicScriptPx(w.first, w.second, graphicFontPx),
+        )
+    }
+
+    /**
+     * 扫一段紧邻的连续四参 rect 条带；[start] 不是可合并块的起点时返回 null。
+     * [graphicFontPx] <= 0（headless 不折算图形）恒返回 null，与既有读数一致。
+     */
+    @Suppress("CyclomaticComplexMethod", "ReturnCount")
+    internal fun rectBandRun(s: String, start: Int, graphicFontPx: Long): RectBandRun? {
+        if (graphicFontPx <= 0L || start >= s.length || s[start] != '<') return null
+        val firstEnd = htmlTagEnd(s, start)
+        if (firstEnd <= start || s[firstEnd - 1] != '>') return null
+        val first = rectBandBlock(s.substring(start, firstEnd), graphicFontPx) ?: return null
+        var total = first.widthScriptPx
+        var cursor = firstEnd
+        var count = 1
+        while (count < MAX_RECT_BANDS && cursor < s.length && s[cursor] == '<') {
+            val nextEnd = htmlTagEnd(s, cursor)
+            if (nextEnd <= cursor || s[nextEnd - 1] != '>') break
+            val next = rectBandBlock(s.substring(cursor, nextEnd), graphicFontPx) ?: break
+            if (next.yKey != first.yKey || next.hKey != first.hKey) break
+            total += next.widthScriptPx
+            cursor = nextEnd
+            count++
+        }
+        return RectBandRun(cursor, total, count)
+    }
+
+    /** [graphicScriptPx] 的浮点版：条带 y/h 的合并判据与 render 的 `pixelF` 同式。 */
+    private fun graphicScriptPxFloat(num: Long, isPx: Boolean, scriptFontPx: Long): Float =
+        if (isPx) num.toFloat() else scriptFontPx.toFloat() * num / PERCENT_DIVISOR
+
+    /** 条带合并上限，与 `HtmlRunFlatten.MAX_RECT_BANDS` 同值。 */
+    private const val PERCENT_DIVISOR = 100f
+
+    private const val MAX_RECT_BANDS = 4096
+
+    /**
      * 单个标签对宽度的贡献（[visibleHtmlCells] 的图形扫描支）。
      * 普通标签 0；`<img>` / `<shape>` 按类文档的逐形模型。
      */
@@ -314,12 +431,14 @@ object CellWidth {
         tag: String,
         graphicFontPx: Long,
         imageSizeOf: ((String) -> ImageSizePx?)?,
+        frameAvailableOf: ((String) -> Boolean)?,
     ): Int {
-        val px = graphicWidthPxOrNull(tag, graphicFontPx, imageSizeOf)
+        val px = graphicWidthPxOrNull(tag, graphicFontPx, imageSizeOf, frameAvailableOf)
         if (px != null) return graphicCells(px, graphicFontPx)
         // 原版单出口（`ConsoleImagePart.cs:60-65`）：图元取不到 ⇒ `Text = AltText`，宽度按
         // 文本度量（`:104-115`）——**连显式 `width` 也不生效**（那个 `return` 在整段尺寸计算
-        // 之前）。触发面 = 宿主已接线且查表未命中 / 基图高 ≤ 0；未接线时
+        // 之前）。触发面 = 宿主已接线且查表未命中 / 基图高 ≤ 0（miss 面）+ 尺寸命中而
+        // [frameAvailableOf] 答 false（缺帧面，MODERN-R12-DIVW2）；未接线时
         // [imgWidthPxOrNull] 仍按旧口径给数，不会落到这里。
         if (isImgTag(tag)) return imgAltText(tag, graphicFontPx)?.let { displayCells(it) } ?: 0
         // 落不到图形形态的 `<shape>`：渲染画重建文案（按文本），格走 invalidShapeCells
@@ -344,12 +463,13 @@ object CellWidth {
         tag: String,
         graphicFontPx: Long,
         imageSizeOf: ((String) -> ImageSizePx?)?,
+        frameAvailableOf: ((String) -> Boolean)? = null,
     ): Long? {
         if (graphicFontPx <= 0L) return null
         val isImg = tagStartsWith(tag, "img")
         val isShape = isShapeTag(tag)
         if (!isImg && !isShape) return null
-        if (isImg) return imgWidthPxOrNull(tag, graphicFontPx, imageSizeOf)
+        if (isImg) return imgWidthPxOrNull(tag, graphicFontPx, imageSizeOf, frameAvailableOf)
         // <shape>：type + param 的形态判据唯一取自 shapeGraphicNum（与折行、行内游标同一份）。
         val num = shapeGraphicNum(tag) ?: return null
         return graphicScriptPx(num.first, num.second, graphicFontPx)
@@ -361,14 +481,24 @@ object CellWidth {
      * 查得到时再按显式 `width`（[graphicScriptPx]）或「高 × 基图纵横比」推宽
      * （`:66-82`：`height` 缺省/0 → `FontSize`，px 原值、百分比 `FontSize*num/100` 整除）。
      *
-     * 返回值约定：数字 = 图形宽；**null = 图元 miss**（宿主已接线但查表未命中，或登记的
-     * 基图高 ≤ 0）—— 调用方落原版单出口。宿主**未接线**（[imageSizeOf] 为 null）时无法
-     * 判 miss，保持旧读数：显式 `width` 给图形宽、缺 `width` 给 0。
+     * 返回值约定：数字 = 图形宽；**null = 落原版单出口**（调用方按 AltText 文本量宽，
+     * `:104-115`）——两种触发面：
+     * - **图元 miss**（宿主已接线但查表未命中，或登记的基图高 ≤ 0；C2/size-miss 判据）；
+     * - **缺帧**（MODERN-R12-DIVW2）：尺寸命中而 [frameAvailableOf] 已接线且对 `src` 答
+     *   false —— 绘制时帧拿不到（`ConsoleImagePart.cs:168` 的 `aSprite != null &&
+     *   aSprite.IsCreated` 守卫不成立那一支：帧表空 / 缓冲未建 / 位图解不出），画侧 R9-B
+     *   已回落 AltText，量侧自此同尺。**这是宽度判据的唯一名下文档**：render 展平
+     *   （`HtmlRunFlatten.emitImage`）消费同一判据（尺寸源 `frameAvailable` 缺省 true =
+     *   未接线），不许两处各写一份。
+     *
+     * 宿主**未接线**（[imageSizeOf] 为 null）时无法判 miss、[frameAvailableOf] 为 null 时
+     * 无法判缺帧 —— 都保持旧读数：显式 `width` 给图形宽、缺 `width` 给 0。
      */
     private fun imgWidthPxOrNull(
         tag: String,
         graphicFontPx: Long,
         imageSizeOf: ((String) -> ImageSizePx?)?,
+        frameAvailableOf: ((String) -> Boolean)?,
     ): Long? {
         val width = tagAttr(tag, "width")?.let { parseMixedNum(it) }
         val src = tagAttr(tag, "src")
@@ -376,6 +506,11 @@ object CellWidth {
             val size = imageSizeOf.invoke(src)
             // 原版单出口：查表在尺寸计算**之前**，miss 时 width/height 一概不看。
             if (size == null || size.heightPx <= 0) return null
+            // 缺帧面（MODERN-R12-DIVW2）：尺寸表命中而绘制时帧拿不到（帧表空 / 缓冲未建 /
+            // 位图解不出 —— 与绘制侧 R9-B 回落的判定同源），同一条单出口：宽度按 AltText
+            // 文本度量、显式 width/height 不生效。帧查询未接线（null）判不了这一面，
+            // 保持图宽旧读数 —— 与 imageSizeOf 未接线时同一纪律。
+            if (frameAvailableOf != null && !frameAvailableOf.invoke(src)) return null
             if (width != null && width.first != 0L) {
                 // 负宽**取绝对值**：原版 `ConsoleImagePart.cs:83-87` 先把 destRect 归一到
                 // `(X=|W|, Width=-|W|)`，节点的 `Width` 因此是正数 —— 负号是「镜像绘制」信息，

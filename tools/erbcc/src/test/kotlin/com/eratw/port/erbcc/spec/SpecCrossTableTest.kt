@@ -448,12 +448,14 @@ class SpecCrossTableTest {
     @Test
     fun `builtin args 的元数与 BuiltinRegistry 一致`() {
         val yaml = parseBuiltins()
-        // 4.981：271（1.824 口径）+ 28 条 fork 新增 = 299（builtin-functions.yaml:16 的 summary.total）。
-        assertEquals(300, yaml.size, "builtin-functions.yaml 条目数（summary.total）")
-        assertEquals(297, Builtins.registry.size(), "注册表条目数")
+        // 4.981：271（1.824 口径）+ 28 条 fork 新增 = 299（builtin-functions.yaml:16 的 summary.total）；
+        // RT2 移植侧 entity 族随 M4-2/M4-4/M4-5 逐条入表（23 + 1 = 24）⇒ 324；
+        // 2026-11-14 语料换代 261111：补蛇版数学扩展 ROUND（Creator.Method.cs:4544-4577）⇒ 325。
+        assertEquals(325, yaml.size, "builtin-functions.yaml 条目数（summary.total）")
+        assertEquals(322, Builtins.registry.size(), "注册表条目数") // 2026-11-14 语料换代：+ROUND（BuiltinsTest 同口径）
 
         val yamlNames = yaml.map { it.name }.toSet()
-        assertEquals(300, yamlNames.size, "builtin-functions.yaml 有重名")
+        assertEquals(325, yamlNames.size, "builtin-functions.yaml 有重名")
         val missing = yamlNames - Builtins.registry.names()
         val extra = Builtins.registry.names() - yamlNames
         assertEquals(

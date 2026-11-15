@@ -1,5 +1,10 @@
 package com.eratw.port.vmdbg
 
+import com.eratw.port.core.data.save.SaveFormat
+import com.eratw.port.core.snapshot.RuntimeSnapshot
+import com.eratw.port.core.snapshot.RuntimeSnapshot.Value
+import com.eratw.port.core.snapshot.RuntimeSnapshotDiff
+import com.eratw.port.core.snapshot.RuntimeSnapshotSections
 import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
@@ -43,6 +48,7 @@ object CmdSnapAnalyze {
     fun runValidate(a: Args, out: PrintStream): Int {
         val main = mainPath(a, 2)
         val bytes = readMain(main, out) ?: return EXIT_MISSING
+        if (RuntimeSnapshot.isSnapshot(bytes)) return runV1Validate(main, bytes, out)
         val probe = SnapSidecar.detectContainer(bytes)
         val sidePath = CmdSnap.sidecarPath(main)
         val side = readSidecar(sidePath)
@@ -92,6 +98,7 @@ object CmdSnapAnalyze {
     fun runExpand(a: Args, out: PrintStream): Int {
         val main = mainPath(a, 2)
         val bytes = readMain(main, out) ?: return EXIT_MISSING
+        if (RuntimeSnapshot.isSnapshot(bytes)) return runV1Expand(a, main, bytes, out)
         val probe = SnapSidecar.detectContainer(bytes)
         val sidePath = CmdSnap.sidecarPath(main)
         val side = readSidecar(sidePath)
@@ -144,6 +151,10 @@ object CmdSnapAnalyze {
         val bMainPath = Path.of(bRaw).toAbsolutePath().normalize()
         val aBytes = readMain(aMainPath, out) ?: return EXIT_MISSING
         val bBytes = readMain(bMainPath, out) ?: return EXIT_MISSING
+
+        if (RuntimeSnapshot.isSnapshot(aBytes) && RuntimeSnapshot.isSnapshot(bBytes)) {
+            return runV1Diff(aMainPath, aBytes, bMainPath, bBytes, out)
+        }
 
         val aSide = readSidecar(CmdSnap.sidecarPath(aMainPath))
         val bSide = readSidecar(CmdSnap.sidecarPath(bMainPath))
@@ -228,6 +239,164 @@ object CmdSnapAnalyze {
         lines += sidecarLine
         lines.addAll(extras)
         return lines
+    }
+
+    // ------------------------------------------------------------------
+    // v1 容器分支（契约 S1 / S2）
+    //
+    // 分流点只在「读到主文件字节之后」：命不中 v1 魔数的字节继续走上面的 v0
+    // sidecar 路径，那一段源码与输出逐字未动。命中的走容器解码，坏档一律折成
+    // status=INVALID 加退出码 3，绝不把解码异常抛到 CLI 之外。
+    // ------------------------------------------------------------------
+
+    private fun runV1Validate(main: Path, bytes: ByteArray, out: PrintStream): Int {
+        val facts = ArrayList<String>()
+        facts += "main=$main"
+        facts += "mainBytes=${bytes.size}"
+        facts += "mainSha256=${SnapSidecar.sha256Hex(bytes)}"
+        facts += "container=rtsnap1"
+        facts += "version=${RuntimeSnapshot.VERSION}"
+        return try {
+            val snap = RuntimeSnapshot.decode(bytes)
+            facts += "buildStamp=${flatten(snap.header.buildStamp)}"
+            facts += "createdAt=${flatten(snap.header.createdAt)}"
+            facts += "saveIdentity=${flatten(snap.header.saveIdentity)}"
+            facts += "truncated=${snap.truncated}"
+            facts += "sections=${snap.sectionNames().joinToString(",")}"
+            for (section in snap.sections) facts += "section.${section.name}.fields=${section.fields.size}"
+            for (known in RuntimeSnapshotSections.KNOWN_SECTIONS) {
+                if (snap.section(known) == null) facts += "section.$known=absent"
+            }
+            out.println("status=PASS")
+            for (line in facts) out.println(line)
+            EXIT_PASS
+        } catch (e: RuntimeSnapshot.SnapshotFormatException) {
+            out.println("status=INVALID")
+            for (line in facts) out.println(line)
+            out.println("problem=${flatten(e.message ?: "快照不可解析")}")
+            EXIT_INVALID
+        }
+    }
+
+    private fun runV1Expand(a: Args, main: Path, bytes: ByteArray, out: PrintStream): Int {
+        val lines = ArrayList<String>()
+        return try {
+            val snap = RuntimeSnapshot.decode(bytes)
+            lines += "status=PASS"
+            lines += "container=rtsnap1"
+            lines += "version=${RuntimeSnapshot.VERSION}"
+            lines += "main=$main"
+            lines += "mainBytes=${bytes.size}"
+            lines += "mainSha256=${SnapSidecar.sha256Hex(bytes)}"
+            lines += "buildStamp=${flatten(snap.header.buildStamp)}"
+            lines += "createdAt=${flatten(snap.header.createdAt)}"
+            lines += "saveIdentity=${flatten(snap.header.saveIdentity)}"
+            lines += "truncated=${snap.truncated}"
+            for ((key, value) in snap.header.projectIdentity) lines += "project.$key=${flatten(value)}"
+            for ((key, value) in snap.header.extra) lines += "header.$key=${flatten(value)}"
+            lines += "sections=${snap.sectionNames().joinToString(",")}"
+            for (section in snap.sections) {
+                lines += "--- section ${section.name} (${section.fields.size} fields) ---"
+                for ((key, value) in section.fields) {
+                    lines += "${section.name}.$key=${renderValue(value)}"
+                    // 变量节按存档编码器展开：只探存档头，字节块不整段倒到屏上。
+                    if (section.name == RuntimeSnapshotSections.VARS && key == "bytes" && value is Value.Blob) {
+                        val head = runCatching { SaveFormat.peek(value.bytes) }.getOrNull()
+                        if (head != null) {
+                            lines += "${section.name}.bytes.saveHeader=binary=${head.binary} gzip=${head.gzip} " +
+                                "version=${head.version} fileType=${head.fileType} uniqueCode=${head.uniqueCode} " +
+                                "scriptVersion=${head.scriptVersion} text=${flatten(head.text)}"
+                        }
+                    }
+                }
+            }
+            for (known in RuntimeSnapshotSections.KNOWN_SECTIONS) {
+                if (snap.section(known) == null) lines += "section.$known=absent"
+            }
+            writeExpandOut(a, lines, out)
+            EXIT_PASS
+        } catch (e: RuntimeSnapshot.SnapshotFormatException) {
+            lines.clear()
+            lines += "status=INVALID"
+            lines += "container=rtsnap1"
+            lines += "main=$main"
+            lines += "problem=${flatten(e.message ?: "快照不可解析")}"
+            writeExpandOut(a, lines, out)
+            EXIT_INVALID
+        }
+    }
+
+    private fun runV1Diff(
+        aMain: Path,
+        aBytes: ByteArray,
+        bMain: Path,
+        bBytes: ByteArray,
+        out: PrintStream,
+    ): Int {
+        val a = try {
+            RuntimeSnapshot.decode(aBytes)
+        } catch (e: RuntimeSnapshot.SnapshotFormatException) {
+            out.println("status=INVALID")
+            out.println("main.a=$aMain")
+            out.println("problem.a=${flatten(e.message ?: "快照不可解析")}")
+            return EXIT_INVALID
+        }
+        val b = try {
+            RuntimeSnapshot.decode(bBytes)
+        } catch (e: RuntimeSnapshot.SnapshotFormatException) {
+            out.println("status=INVALID")
+            out.println("main.b=$bMain")
+            out.println("problem.b=${flatten(e.message ?: "快照不可解析")}")
+            return EXIT_INVALID
+        }
+        val result = RuntimeSnapshotDiff.diff(a, b)
+        out.println("status=PASS")
+        out.println("container=rtsnap1")
+        out.println("main.a=$aMain")
+        out.println("main.b=$bMain")
+        if (result.same) {
+            out.println("一致")
+        } else {
+            val first = result.first!!
+            out.println("first.section=${first.section}")
+            out.println("first.path=${first.path}")
+            out.println("first.a=${flatten(first.a)}")
+            out.println("first.b=${flatten(first.b)}")
+            for ((index, d) in result.divergences.withIndex()) {
+                out.println("diff[$index] section=${d.section} path=${d.path} a=${flatten(d.a)} b=${flatten(d.b)}")
+            }
+        }
+        out.println("same=${result.same}")
+        return EXIT_PASS
+    }
+
+    /** v1 字段值的行式展示：字节块只给长度与摘要，文本与列表给可定位短串。 */
+    private fun renderValue(value: Value): String = when (value) {
+        is Value.Text -> flatten(value.value)
+        is Value.Int64 -> value.value.toString()
+        is Value.Bool -> value.value.toString()
+        is Value.TextList -> "textList(len=${value.items.size})[" + value.items.joinToString("|") { flatten(it) } + "]"
+        is Value.IntList -> "intList(len=${value.items.size})[" + value.items.joinToString(",") + "]"
+        is Value.Blob -> "bytes=${value.bytes.size} sha256=${SnapSidecar.sha256Hex(value.bytes).take(16)}…"
+    }
+
+    /** 行式输出里把回车折成空格、换行折成字面转义，避免一条诊断被折成多行。 */
+    private fun flatten(raw: String): String =
+        raw.replace("\r", " ").replace("\n", "\\n").replace("\t", " ")
+
+    /** expand 的 --out 落盘（与 v0 同口径：首行状态加单行回执）。 */
+    private fun writeExpandOut(a: Args, lines: List<String>, out: PrintStream) {
+        val status = lines.first()
+        val text = lines.joinToString("\n")
+        val rawOut = a.value("--out")
+        if (rawOut == null) {
+            out.println(text)
+        } else {
+            val target = Path.of(rawOut).toAbsolutePath().normalize()
+            target.parent?.let { Files.createDirectories(it) }
+            Files.writeString(target, text + "\n", Charsets.UTF_8)
+            out.println("$status out=$target")
+        }
     }
 
     private fun statusOf(invalid: Boolean): String = if (invalid) "INVALID" else "PASS"

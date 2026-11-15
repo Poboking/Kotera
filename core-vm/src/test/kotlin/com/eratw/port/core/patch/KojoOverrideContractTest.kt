@@ -119,7 +119,7 @@ class KojoOverrideContractTest {
     @Test
     fun `同名覆盖后 base 段逐指令不变而 dispatch 导向覆盖者`() {
         val base = buildBase()
-        val linked = ModuleLinker.link(base, baseMetas, listOf(module()), ResolverPolicy.MODERN, sigOf)
+        val linked = ModuleLinker.link(LinkInputs(base, baseMetas, listOf(module()), ResolverPolicy.MODERN, sigOf))
 
         for (pc in 0 until base.instructionCount) {
             assertEquals(base.op(pc), linked.program.op(pc), "base pc=$pc 的 op")
@@ -138,7 +138,7 @@ class KojoOverrideContractTest {
     @Test
     fun `CALL SUPER 回填前一实现并置 DIRECT 位`() {
         val base = buildBase()
-        val linked = ModuleLinker.link(base, baseMetas, listOf(module()), ResolverPolicy.MODERN, sigOf)
+        val linked = ModuleLinker.link(LinkInputs(base, baseMetas, listOf(module()), ResolverPolicy.MODERN, sigOf))
         val callPc = (base.instructionCount until linked.program.instructionCount)
             .first { linked.program.op(it) == Opcode._CALL }
         assertEquals(0, linked.program.a(callPc), "SUPER 的目标 = base 派发入口的绝对下标")
@@ -163,7 +163,7 @@ class KojoOverrideContractTest {
         )
         // 实参求值指令在 _CALL 之前，先按模块自身指令流定位调用点。
         val modCallPc = (0 until m.program.instructionCount).first { m.program.op(it) == Opcode._CALL }
-        val linked = ModuleLinker.link(base, baseMetas, listOf(m), ResolverPolicy.MODERN, sigOf)
+        val linked = ModuleLinker.link(LinkInputs(base, baseMetas, listOf(m), ResolverPolicy.MODERN, sigOf))
         val pc = base.instructionCount + modCallPc
         assertEquals(Opcode._NOP, linked.program.op(pc), "无 super 的 TRYCALL SUPER 必须折 NOP")
         assertEquals(0, linked.program.a(pc), "NOP 不得留下哨兵")
@@ -179,9 +179,11 @@ class KojoOverrideContractTest {
     fun `MODERN 未声明覆盖即拒`() {
         val ex = assertFailsWith<SymbolConflictException> {
             ModuleLinker.link(
-                buildBase(), baseMetas,
-                listOf(module(override = emptySet())),
-                ResolverPolicy.MODERN, sigOf,
+                LinkInputs(
+                    buildBase(), baseMetas,
+                    listOf(module(override = emptySet())),
+                    ResolverPolicy.MODERN, sigOf,
+                ),
             )
         }
         assertTrue(ex.message!!.contains("KOJO_MESSAGE_SEND"), "冲突报告要点名符号，实际: ${ex.message}")
@@ -191,10 +193,12 @@ class KojoOverrideContractTest {
     fun `签名不可验证即拒`() {
         assertFailsWith<OverrideSignatureException> {
             ModuleLinker.link(
-                buildBase(), baseMetas,
-                listOf(module()),
-                ResolverPolicy.MODERN,
-                { "" },   // base 侧未导出签名 ⇒ fail-closed
+                LinkInputs(
+                    buildBase(), baseMetas,
+                    listOf(module()),
+                    ResolverPolicy.MODERN,
+                    { "" },   // base 侧未导出签名 ⇒ fail-closed
+                ),
             )
         }
     }

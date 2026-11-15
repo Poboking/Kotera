@@ -400,9 +400,10 @@ class SymbolsTest {
         val eventDupGame = dupKeysGame.count { it.value.first().isEvent }
 
         // 全量语料基线（根自适应，corpusroot 波 2026-11-05）：按当前根档案取列。
-        // 4.981 列（dev-4.981 验收语料，2026-11-01 重落）：@ 标签 117_055、去重名 117_025、
-        // 重名组 7（EVENTEND 为 4.981 新增组）；4.980 列（specs/loader.md 附录 D.3 原基线）：
-        // 110_066 / 110_042 / 6 组。列值都钉死具体数，未登记的根 ⇒ detect 判红。
+        // 4.981 列（2026-11-14 L34 重测：同一 NOW_VERSION 下语料加了口上包 ⇒ ERB/ERH 4,324 文件）：
+        // @ 标签 118_527、去重名 118_497、重名组 7（EVENTEND 为 4.981 新增组）；
+        // 4.980 列（specs/loader.md 附录 D.3 原基线）：110_066 / 110_042 / 6 组。
+        // 列值都钉死具体数，未登记的根 ⇒ detect 判红。
         val profile = ErbccCorpusProfile.detect(corpus)
         assertEquals(profile.labelsTotal, totalGame, "@标签定义总数（不含 GOLDEN 复制件，${profile.name} 列）")
         assertEquals(profile.labelsUnique, uniqueGame, "去重名字数（${profile.name} 列）")

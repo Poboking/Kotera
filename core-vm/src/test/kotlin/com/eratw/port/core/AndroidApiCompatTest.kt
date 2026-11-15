@@ -12,7 +12,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * 平台 API 兼容闸（2026-10-22 死循环事件复盘方案 #1，见 `docs/eratw-死循环事件复盘-2026-10-22.md` §5）。
+ * 平台 API 兼容闸（2026-10-22 死循环事件复盘方案 #1，见 `docs/archive/eratw-死循环事件复盘-2026-10-22.md` §5）。
  *
  * ## 抓什么
  *

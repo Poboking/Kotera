@@ -19,9 +19,13 @@ import com.eratw.port.core.save.RootedSaveFileIo
 import com.eratw.port.core.save.SaveFileIo
 import com.eratw.port.core.save.SaveFolderIo
 import com.eratw.port.core.sem.SystemOps
+import com.eratw.port.core.sql.SqlDriver
 import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
+
+/** 纳秒 → 毫秒的整数除（装配期分段计时用；命名常量避免裸魔数）。 */
+private const val NS_PER_MS = 1_000_000L
 
 /**
  * 会话装配（CONTRACT-DBG1 路2；所有子命令共用）。
@@ -51,6 +55,20 @@ import java.nio.file.Path
  *   `call` 的「控制台尾 10 行」不必等帧闸放行。只影响发布时机，不改行内容。
  * - `systemOps` 显式传 [DeferredSandboxSystemOps]（存档沙箱，见其 KDoc）——
  *   **语料只读铁律的落地点，所有子命令共用，不得省**。
+ * - `sqlDriver` = `DesktopSqliteHost.create(gameRoot, sandboxDir.resolve("sql"))`
+ *   （CONTRACT-SQLITE-MIGRATION §3/§4 W4）：读根 = 游戏根（seed）、写根 = 沙箱的 `sql/` 子树，
+ *   与存档沙箱同一条「语料只读」口径 —— 所有 SQLite 落盘只进临时目录，语料根一个字节都不动。
+ *   路径解析 / 出根拒绝 / seed 首次拷贝由 sqlite-adapter 单点负责，本文件不重复判路径。
+ * - `--sandbox <目录>`（可选）：复用**固定**沙箱而不是每次 `createTempDirectory`。
+ *   生产 GameHost 的写根是持久 `gameRoot`，第二会话读回同一库；桌面调试要验证
+ *   「首次建库 / 二次会话不重建」就必须有同一个持久写根。该目录必须在 `--work` 下，
+ *   否则一次误传 `--sandbox <游戏根>` 就能把语料写脏。
+ * - `--pre "FN1;FN2"` / `--addchara <no[,no]>` / `--sets "NAME[i,j]=V;..."`：
+ *   调用/轨迹前的**真实状态与启动链注入**。`--pre` 走 `runtime.callFunction`（与 ERB
+ *   `CALL` 同一条入口，SQL_CONNECT 连接不跨进程，真启动链必须同会话先跑）；
+ *   `--addchara` 逐号走 [com.eratw.port.core.vars.VariableStore.addCharacter]（与 ERB
+ *   `ADDCHARA` 语句同一条实现，StatementExecutor.kt:853）；`--sets` 走 `CmdSet` 的公开
+ *   写单点。三者都只经现有引擎 API，不造测试专用状态通道。
  *
  * ## 参数来源
  *
@@ -84,6 +102,73 @@ object Assembler {
     )
 
     /**
+     * 路径上下文（`assemble` 与 `sql` 共用；`sql` 只读库、不需要装 50 MB 产物）。
+     *
+     * [sandboxDir] 是存档/内存库的写根；[sqlDir] 是其中 `sql/` 子树（SQLite 写根）。
+     */
+    class Context(val gameRoot: Path, val workDir: Path, val sandboxDir: Path) {
+        val sqlDir: Path get() = sandboxDir.resolve("sql")
+    }
+
+    /**
+     * 解析 `--game` / `--work` / `--sandbox` 并把沙箱钉在 `--work` 内。
+     *
+     * `--sandbox` 缺省 = `<work>/save-sandbox-<随机>`（每次进程独立）；显式给定时复用同一目录，
+     * 用于验证「第二次会话读回同一库」。出 `--work` 根一律拒 —— 只读语料铁律不能靠调用方自觉。
+     */
+    fun resolvePaths(a: Args): Context {
+        val gameRoot = resolveGameRoot(a)
+        val workDir = ensureWorkDir(a)
+        return Context(gameRoot, workDir, resolveSandbox(a, workDir))
+    }
+
+    /** `--game` / `ERATW_GAMEDIR` → 存在的游戏根。 */
+    private fun resolveGameRoot(a: Args): Path {
+        val raw = a.value("--game")
+            ?: System.getenv("ERATW_GAMEDIR")
+            ?: throw CliError("缺 --game <游戏根>，且环境变量 ERATW_GAMEDIR 未设置")
+        val root = Path.of(raw).toAbsolutePath().normalize()
+        if (!Files.isDirectory(root)) throw CliError("--game 不是目录: $root")
+        return root
+    }
+
+    /** `--work`（缺省系统临时目录）→ 已建好的状态目录。 */
+    private fun ensureWorkDir(a: Args): Path {
+        val dir = Path.of(a.valueOr("--work", defaultWorkDir())).toAbsolutePath().normalize()
+        try {
+            Files.createDirectories(dir)
+        } catch (e: Exception) {
+            throw CliError("状态目录建不出来: $dir（$e）", e)
+        }
+        return dir
+    }
+
+    /** `--sandbox` 显式复用 / 缺省临时沙箱；显式路径必须落在 [workDir] 内。 */
+    private fun resolveSandbox(a: Args, workDir: Path): Path {
+        val raw = a.value("--sandbox") ?: return createTempSandbox(workDir)
+        val sandbox = Path.of(raw).toAbsolutePath().normalize()
+        if (sandbox == workDir || !sandbox.startsWith(workDir)) {
+            throw CliError("--sandbox 必须是 --work 目录下的子目录: $sandbox（work=$workDir）")
+        }
+        return ensureSandboxDir(sandbox)
+    }
+
+    private fun createTempSandbox(workDir: Path): Path = try {
+        Files.createTempDirectory(workDir, "save-sandbox-")
+    } catch (e: Exception) {
+        throw CliError("存档沙箱目录建不出来: $workDir（$e）", e)
+    }
+
+    private fun ensureSandboxDir(sandbox: Path): Path {
+        try {
+            Files.createDirectories(sandbox)
+        } catch (e: Exception) {
+            throw CliError("存档沙箱目录建不出来: $sandbox（$e）", e)
+        }
+        return sandbox
+    }
+
+    /**
      * 装配会话。任何文件层失败折成 [CliError]（退出码 1，不带堆栈）。
      *
      * 存档沙箱目录 = `<work>/save-sandbox-<进程毫秒>-<随机>`：每个进程一个，sweep 与
@@ -96,89 +181,36 @@ object Assembler {
      *   就是缺省实例，explore 把同一 [WallBudget] 挂到两处（见 ExploreDriver.runEpisode）。
      * @param out `--load-precheck` 那行的落点（子命令的 stdout）；null = 写 `System.out`。
      *   只有 `--load-precheck` 打开时才会写，其余路径一个字节都不多。
+     * @param observers 只观测回调组（T1 探针用）：装载分段 / SQL 驱动包装 / 装配分段 /
+     *   会话构造内部分段。四项缺省全 null ⇒ 与改前逐字相同（不挂回调、不包驱动、不回调）。
+     *   观察者不得在回调里改状态。
      */
-    fun assemble(a: Args, sinkOverride: InputSink? = null, out: PrintStream? = null): Assembled {
-        val erbcRaw = a.value("--erbc")
-            ?: System.getenv("ERATW_ERBC_DIR")
-            ?: throw CliError("缺 --erbc <erbc.v1 目录>，且环境变量 ERATW_ERBC_DIR 未设置")
-        val gameRaw = a.value("--game")
-            ?: System.getenv("ERATW_GAMEDIR")
-            ?: throw CliError("缺 --game <游戏根>，且环境变量 ERATW_GAMEDIR 未设置")
-        val erbcDir = Path.of(erbcRaw).toAbsolutePath().normalize()
-        val gameRoot = Path.of(gameRaw).toAbsolutePath().normalize()
-        if (!Files.isDirectory(erbcDir)) throw CliError("--erbc 不是目录: $erbcDir")
-        if (!Files.isDirectory(gameRoot)) throw CliError("--game 不是目录: $gameRoot")
-        val programPath = erbcDir.resolve("program.erbc")
-        val metaPath = erbcDir.resolve("program.meta")
-        if (!Files.isRegularFile(programPath)) throw CliError("产物缺失: $programPath")
-        if (!Files.isRegularFile(metaPath)) throw CliError("侧车缺失: $metaPath（正式产物必须带 program.meta）")
-
-        val workDir = Path.of(a.valueOr("--work", defaultWorkDir())).toAbsolutePath().normalize()
-        try {
-            Files.createDirectories(workDir)
-        } catch (e: Exception) {
-            throw CliError("状态目录建不出来: $workDir（$e）", e)
-        }
-        val sandboxDir = try {
-            Files.createTempDirectory(workDir, "save-sandbox-")
-        } catch (e: Exception) {
-            throw CliError("存档沙箱目录建不出来: $workDir（$e）", e)
-        }
+    fun assemble(
+        a: Args,
+        sinkOverride: InputSink? = null,
+        out: PrintStream? = null,
+        observers: Observers = Observers(),
+    ): Assembled {
+        val erbcDir = Wiring.resolveErbcDir(a)
+        val (programPath, metaPath) = Wiring.artifactFiles(erbcDir)
+        val ctx = resolvePaths(a)
+        val gameRoot = ctx.gameRoot
+        val sandboxDir = ctx.sandboxDir
 
         // 产品兼容装载档 + 堆预检（obs-compat512）：两个开关缺省关，关着时下面每一行与改前逐字相同。
         val compatLoad = a.flag("--compat-load")
         val loadPrecheck = a.flag("--load-precheck")
-        if (loadPrecheck) {
-            // 装载前堆预检：与宿主同一条判据（GameHost.kt:1816 的 ProgramLoader.estimateHeap），
-            // 只读段表 + 侧车大小，产物正文一个字节都不进堆。读数前不清垃圾 —— 这里的
-            // 「上限」是硬阈值（maxMemory），不是余量判据；余量见 maxMemoryBytes - used。
-            val est = try {
-                ProgramLoader.estimateHeap(programPath, metaPath)
-            } catch (e: OutOfMemoryError) {
-                throw CliError("堆预检失败（堆 OOM）: ${e.message}", e)
-            } catch (e: Exception) {
-                throw CliError("堆预检失败: $programPath（${e.message}）", e)
-            }
-            val sinkOut = out ?: System.out
-            // 一行 key=value：既能 grep，也自证挡位（--xmx 512m 时 maxMemoryBytes=536870912）。
-            sinkOut.println(
-                "loadPrecheck: requiredBytes=" + est.requiredBytes +
-                    " requiredMiB=" + est.requiredMiB +
-                    " maxMemoryBytes=" + est.maxMemoryBytes +
-                    " maxMemoryMiB=" + est.maxMemoryMiB +
-                    " sufficient=" + est.sufficient +
-                    " artifactBytes=" + est.artifactBytes +
-                    " metaBytes=" + est.metaBytes +
-                    " instructions=" + est.instructionCount +
-                    " compat=" + compatLoad,
-            )
-            sinkOut.flush()
-        }
-        // 兼容档的 mark：产品侧 compat 档逢段必收（GameHost.kt:2149-2152）；收不收在那边是
-        // LoadGcPolicy.collectAtSeam 恒真的判式（LoadTrace.kt:128-131），等价于无条件 gc()。
-        // 非兼容档恒 null ⇒ loadMapped 走单参形态，解码链一个回调都不挂。
-        val compatMark: LoadStageMark? = if (compatLoad) {
-            LoadStageMark { Runtime.getRuntime().gc() }
-        } else {
-            null
-        }
-        val program = try {
-            ProgramLoader.loadMapped(programPath, compat = compatLoad, mark = compatMark)
-        } catch (e: OutOfMemoryError) {
-            // 缺省档/无开关路径照旧让 OOM 穿出去（与改前逐字相同）；开了新开关才折成可读的
-            // 「死在装载层」口径——本路要的就是这条读数，不许把 OOM 吞成「跑完了」。
-            if (!compatLoad && !loadPrecheck) throw e
-            throw CliError("产物装载失败（堆 OOM，compat=$compatLoad precheck=$loadPrecheck）: ${e.message}", e)
-        } catch (e: Exception) {
-            throw CliError("产物装载失败: $programPath（${e.message}）", e)
-        }
+        if (loadPrecheck) Wiring.printPrecheck(out, programPath, metaPath, compatLoad)
+        // 兼容档 mark（逢段 GC）与观察者 mark 合并；两者都缺 = null（不挂任何回调）。
+        val mark = mergeLoadMark(compatLoad, observers.loadMark)
+        val tLoad = System.nanoTime()
+        val program = Wiring.loadProgram(programPath, compatLoad, loadPrecheck, mark)
+        emitPhase(observers.phaseMark, "loadMapped.total", tLoad)
         // 侧车交界（产品同款 forceGc("meta") 口径，GameHost.kt:2198）：49 MB 文本解析前收干净。
         if (compatLoad) Runtime.getRuntime().gc()
-        val metadata = try {
-            BootMetadata.read(metaPath)
-        } catch (e: Exception) {
-            throw CliError("侧车读取失败: $metaPath（${e.message}）", e)
-        }
+        val tMeta = System.nanoTime()
+        val metadata = Wiring.readMetadata(metaPath)
+        emitPhase(observers.phaseMark, "BootMetadata.read", tMeta)
 
         // 存档沙箱接线：DeferredSandboxSystemOps 在首次存档语句执行时才建真 FileSystemOps
         // （要引用会话的 store/saveConfig，而两者都在 GameSession 构造期才存在，
@@ -189,40 +221,217 @@ object Assembler {
         val systemOps = DeferredSandboxSystemOps(gameRoot, sandboxDir) {
             requireNotNull(session) { "会话尚未装配完成（存档语句不可能在装配期被调用）" }
         }
-        val steps = a.longOr("--steps", -1L)
-        // 步数闸缺省按子命令分流：sweep 规格 = 2,000,000/函数；call/trace = 装置缺省 20,000,000
-        //（与产品 GameSession.DEFAULT_MAX_STEPS_PER_RUN 同口径，GameSession.kt:718）。
-        val defaultSteps =
-            if (a.positional.firstOrNull() == "sweep") Cli.DEFAULT_SWEEP_STEPS else Cli.DEFAULT_CALL_STEPS
-        // 单段落墙钟闸（obs-midhang 新旋钮 `--step-wall-ms`）：VM 里「相邻两次让出之间」的墙钟上限，
-        // 口径 = GameSession.maxRunMillis（VmConfig.maxRunMillis，检查点每 65536 条指令一次）。
-        // 缺省 0 = 关闭 ⇒ 与既有子命令逐字同行为；只给装置/诊断显式启用（生产恒 0）。
-        val stepWallMs = a.longOr("--step-wall-ms", 0L)
-        if (stepWallMs < 0) throw CliError("--step-wall-ms 不得为负: $stepWallMs")
+        val limits = Wiring.sessionLimits(a)
+        val sqlDir = sandboxDir.resolve("sql")
+        val tSqlDriver = System.nanoTime()
+        val sqlDriver = Wiring.createSqlDriver(gameRoot, sqlDir, observers.sqlDriverWrapper)
+        emitPhase(observers.phaseMark, "sqlDriver.create", tSqlDriver)
         // 会话交界（产品同款 forceGc("session") 口径，GameHost.kt:2208）：会话装配是本链
         // 第二大分配，兼容档在它前面把侧车解析的短命串收干净。
         if (compatLoad) Runtime.getRuntime().gc()
-        val s = try {
-            GameSession(
+        val tSession = System.nanoTime()
+        val s = Wiring.createSession(
+            Wiring.SessionInputs(
                 gameRoot = gameRoot,
                 program = program,
                 metadata = metadata,
-                maxStepsPerRun = if (steps > 0) steps else defaultSteps,
-                maxRunMillis = stepWallMs,
-                randSeed = Cli.RAND_SEED,
+                maxSteps = limits.maxSteps,
+                stepWallMs = limits.stepWallMs,
                 systemOps = systemOps,
-                frameGateEnabled = false,
-                inputSinkOverride = effectiveSink,
-            )
-        } catch (e: Exception) {
-            throw CliError("会话装配失败: ${e.message}", e)
-        }
+                sink = effectiveSink,
+                sessionStageMark = observers.sessionStageMark,
+                sqlDriver = sqlDriver,
+            ),
+        )
+        emitPhase(observers.phaseMark, "GameSession.assemble", tSession)
         session = s
         // AWAIT 族的墙钟兜底：AWAIT 是让出边界（重置步数闸，StatementExecutor.kt:1022）、
         // 又不经输入 sink —— 不挂这里，`AWAIT` 空转循环就是第三类无界点。call/trace 不装
         // WallBudget（sink.budget 为 null ⇒ 全部空操作），行为与缺省 NoopTimerSink 等价。
         s.runtime.execContext.timer = WallTimerSink(sink)
         return Assembled(s, program, metadata, sink, sandboxDir)
+    }
+
+    /** 只观测回调组（T1 探针用）：四项缺省全 null ⇒ 与改前逐字相同（不挂回调、不包驱动）。 */
+    data class Observers(
+        val loadMark: LoadStageMark? = null,
+        val sqlDriverWrapper: ((SqlDriver) -> SqlDriver)? = null,
+        val phaseMark: ((String, Long) -> Unit)? = null,
+        val sessionStageMark: ((String) -> Unit)? = null,
+    )
+
+    private fun emitPhase(mark: ((String, Long) -> Unit)?, name: String, startNs: Long) {
+        if (mark != null) mark(name, (System.nanoTime() - startNs) / NS_PER_MS)
+    }
+
+    /** 兼容档的 mark（产品侧逢段必收，GameHost.kt:2149-2152）与观察者 mark 合并；都缺 = null。 */
+    private fun mergeLoadMark(compatLoad: Boolean, loadMark: LoadStageMark?): LoadStageMark? {
+        val compatMark: LoadStageMark? = if (compatLoad) LoadStageMark { Runtime.getRuntime().gc() } else null
+        return when {
+            compatMark == null -> loadMark
+            loadMark == null -> compatMark
+            else -> LoadStageMark { stage ->
+                compatMark.onStage(stage)
+                loadMark.onStage(stage)
+            }
+        }
+    }
+
+    /**
+     * 装配链的纯函数 helper（装载 / 侧车 / 驱动 / 会话四段的失败折损与构造）。
+     * 单独成对象只为把 [Assembler] 的成员函数数留在 detekt 阈值内；无状态，全部纯转发。
+     */
+    private object Wiring {
+
+    /** `--erbc` / `ERATW_ERBC_DIR` → 存在的 erbc.v1 目录。 */
+    fun resolveErbcDir(a: Args): Path {
+        val raw = a.value("--erbc")
+            ?: System.getenv("ERATW_ERBC_DIR")
+            ?: throw CliError("缺 --erbc <erbc.v1 目录>，且环境变量 ERATW_ERBC_DIR 未设置")
+        val dir = Path.of(raw).toAbsolutePath().normalize()
+        if (!Files.isDirectory(dir)) throw CliError("--erbc 不是目录: $dir")
+        return dir
+    }
+
+    /** erbc.v1 目录下的产物 / 侧车文件（正式产物必须带 program.meta）。 */
+    fun artifactFiles(erbcDir: Path): Pair<Path, Path> {
+        val programPath = erbcDir.resolve("program.erbc")
+        val metaPath = erbcDir.resolve("program.meta")
+        if (!Files.isRegularFile(programPath)) throw CliError("产物缺失: $programPath")
+        if (!Files.isRegularFile(metaPath)) {
+            throw CliError("侧车缺失: $metaPath（正式产物必须带 program.meta）")
+        }
+        return programPath to metaPath
+    }
+
+    /** `--load-precheck`：装载前打一行堆预检（只读段表 + 侧车大小，产物正文一个字节都不进堆）。 */
+    fun printPrecheck(out: PrintStream?, programPath: Path, metaPath: Path, compatLoad: Boolean) {
+        // 与宿主同一条判据（GameHost.kt:1816 的 ProgramLoader.estimateHeap）；
+        // 读数前不清垃圾 —— 这里的「上限」是硬阈值（maxMemory），余量见 maxMemoryBytes - used。
+        val est = runCatching {
+            ProgramLoader.estimateHeap(programPath, metaPath)
+        }.getOrElse { e ->
+            throw precheckFailure(programPath, e)
+        }
+        val sinkOut = out ?: System.out
+        // 一行 key=value：既能 grep，也自证挡位（--xmx 512m 时 maxMemoryBytes=536870912）。
+        sinkOut.println(
+            "loadPrecheck: requiredBytes=" + est.requiredBytes +
+                " requiredMiB=" + est.requiredMiB +
+                " maxMemoryBytes=" + est.maxMemoryBytes +
+                " maxMemoryMiB=" + est.maxMemoryMiB +
+                " sufficient=" + est.sufficient +
+                " artifactBytes=" + est.artifactBytes +
+                " metaBytes=" + est.metaBytes +
+                " instructions=" + est.instructionCount +
+                " compat=" + compatLoad,
+        )
+        sinkOut.flush()
+    }
+
+    /** 预检的异常折成 CliError（堆 OOM 有独立文案；非 Throwable 边界的错误原样穿出）。 */
+    private fun precheckFailure(programPath: Path, e: Throwable): Throwable = when {
+        e is OutOfMemoryError -> CliError("堆预检失败（堆 OOM）: ${e.message}", e)
+        e is Exception -> CliError("堆预检失败: $programPath（${e.message}）", e)
+        else -> e
+    }
+
+    /** 兼容档的 mark 与观察者 mark 的合并在 [Assembler.mergeLoadMark]（本对象保持 ≤10 个函数）。 */
+
+    /** 产物装载：缺省档让 OOM 穿出去（与改前逐字相同），开了观测开关才折成可读的装载层失败。 */
+    fun loadProgram(
+        programPath: Path,
+        compatLoad: Boolean,
+        loadPrecheck: Boolean,
+        mark: LoadStageMark?,
+    ): Program = runCatching {
+        ProgramLoader.loadMapped(programPath, compat = compatLoad, mark = mark)
+    }.getOrElse { e ->
+        if (e is Exception || e is OutOfMemoryError) throw toLoadError(programPath, e, compatLoad, loadPrecheck)
+        throw e
+    }
+
+    private fun toLoadError(
+        programPath: Path,
+        e: Throwable,
+        compatLoad: Boolean,
+        loadPrecheck: Boolean,
+    ): Throwable = when {
+        e !is OutOfMemoryError -> CliError("产物装载失败: $programPath（${e.message}）", e)
+        !compatLoad && !loadPrecheck -> e
+        else -> CliError("产物装载失败（堆 OOM，compat=$compatLoad precheck=$loadPrecheck）: ${e.message}", e)
+    }
+
+    fun readMetadata(metaPath: Path): BootMetadata = runCatching {
+        BootMetadata.read(metaPath)
+    }.getOrElse { e ->
+        if (e is Exception) throw CliError("侧车读取失败: $metaPath（${e.message}）", e)
+        throw e
+    }
+
+    /**
+     * SQLite 驱动接线（CONTRACT-SQLITE-MIGRATION §3/§4，W4）：必须在 GameSession 构造前建好，
+     * 会话把同一个实例喂给内置宿主（GameSession.kt:953/:1374）。读根 = 游戏根（只读 seed，
+     * [DesktopSqliteHost.create] 不复制 seed），写根 = 沙箱 `sql/`（A1 首次打开时从 seed 拷种
+     * 到 target，之后只读写 target）；路径解析、出根拒绝与拷种全部由 sqlite-adapter 单点负责。
+     */
+    fun createSqlDriver(
+        gameRoot: Path,
+        sqlDir: Path,
+        wrapper: ((SqlDriver) -> SqlDriver)?,
+    ): SqlDriver = runCatching {
+        val created = DesktopSqliteHost.create(gameRoot, sqlDir)
+        wrapper?.invoke(created) ?: created
+    }.getOrElse { e ->
+        if (e is Exception) throw CliError("SQLite 驱动建不出来: $sqlDir（${e.message}）", e)
+        throw e
+    }
+
+    /** 步数闸 / 单段落墙钟闸（`--step-wall-ms` 缺省 0 = 关闭，与既有子命令逐字同行为）。 */
+    class Limits(val maxSteps: Long, val stepWallMs: Long)
+
+    fun sessionLimits(a: Args): Limits {
+        val steps = a.longOr("--steps", -1L)
+        // 步数闸缺省按子命令分流：sweep 规格 = 2,000,000/函数；call/trace = 20,000,000
+        //（与产品 GameSession.DEFAULT_MAX_STEPS_PER_RUN 同口径，GameSession.kt:718）。
+        val defaultSteps =
+            if (a.positional.firstOrNull() == "sweep") Cli.DEFAULT_SWEEP_STEPS else Cli.DEFAULT_CALL_STEPS
+        val stepWallMs = a.longOr("--step-wall-ms", 0L)
+        if (stepWallMs < 0) throw CliError("--step-wall-ms 不得为负: $stepWallMs")
+        return Limits(if (steps > 0) steps else defaultSteps, stepWallMs)
+    }
+
+    data class SessionInputs(
+        val gameRoot: Path,
+        val program: Program,
+        val metadata: BootMetadata,
+        val maxSteps: Long,
+        val stepWallMs: Long,
+        val systemOps: SystemOps,
+        val sink: InputSink,
+        val sessionStageMark: ((String) -> Unit)?,
+        val sqlDriver: SqlDriver,
+    )
+
+    /** 会话构造（观察者 stageMark 直通 GameSession；null = 构造路径逐字不变）。 */
+    fun createSession(inp: SessionInputs): GameSession = runCatching {
+        GameSession(
+            gameRoot = inp.gameRoot,
+            program = inp.program,
+            metadata = inp.metadata,
+            maxStepsPerRun = inp.maxSteps,
+            maxRunMillis = inp.stepWallMs,
+            randSeed = Cli.RAND_SEED,
+            systemOps = inp.systemOps,
+            frameGateEnabled = false,
+            inputSinkOverride = inp.sink,
+            stageMark = inp.sessionStageMark,
+            sqlDriver = inp.sqlDriver,
+        )
+    }.getOrElse { e ->
+        if (e is Exception) throw CliError("会话装配失败: ${e.message}", e)
+        throw e
+    }
     }
 
     /** `--work` 缺省：系统临时目录下的固定名（跨进程持久，`where` 才读得到 `call` 的现场）。 */

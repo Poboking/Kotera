@@ -92,16 +92,23 @@ class OperatorErrorTextTest {
      * `core/code/Vm.kt` 的 `_STK_*` / 寄存器支。两路各自抄一份字符串，就等于给
      * 「某一路被顺手改对、另一路仍是旧串」留口子（`ProcessRuntime.intToStrArgValue`
      * 当年就是因为这个收成单一真源的）。这里用源码级断言钉住「两路都取常量」。
+     *
+     * 2026-11-12 例外：4.981 `SafeArithmetic.cs:67-84` 把**整数**零除改成钳制返回 0 + 警告，
+     * `Vm.kt` 的四条整数通道不再抛 `DivideByZero`，因此不再引用 `DIVIDE_BY_ZERO_TEXT`。
+     * 该文案现在只剩 Expr.kt 的**浮点**除零硬错（`OperatorMethod.cs:987` / `:1137`；
+     * `SafeFloatDivide` 是未接线死代码）。为过闸在 Vm.kt 留一个假引用属于造补丁，不做。
      */
     @Test
     fun `表达式与字节码两条通道都引用同一份文案常量`() {
         val expr = readMainSource("expr/Expr.kt")
         val vm = readMainSource("code/Vm.kt")
         for ((name, src) in listOf("Expr.kt" to expr, "Vm.kt" to vm)) {
-            assertTrue(src.contains("DIVIDE_BY_ZERO_TEXT"), "$name 必须引用 DIVIDE_BY_ZERO_TEXT（单一真源）")
             assertTrue(src.contains("MULTIPLY_NEGATIVE_TO_STR_TEMPLATE"), "$name 必须引用负值乘字符串模板")
             assertTrue(src.contains("MULTIPLY_10K_TO_STR_TEMPLATE"), "$name 必须引用 10000 上限模板")
         }
+        assertTrue(expr.contains("DIVIDE_BY_ZERO_TEXT"), "Expr.kt 浮点除零仍取官方常量")
+        assertFalse(vm.contains("DIVIDE_BY_ZERO_TEXT"), "Vm.kt 整数零除已钳制，不许留旧抛点或只为过闸的假引用")
+        assertTrue(vm.contains("zeroDivideWarning"), "Vm.kt 四条整数通道改取 4.981 钳制告警文案")
     }
 
     /**

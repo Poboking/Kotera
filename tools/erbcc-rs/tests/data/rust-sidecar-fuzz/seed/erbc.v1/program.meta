@@ -1,4 +1,4 @@
-format-version 1
+format-version 3
 engine "erbcc 0.1.0-SNAPSHOT"
 program-sha256 "924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe9"
 labels 3
@@ -22,7 +22,7 @@ global-dim "SC_GLOBALS.ERH" 1 "#DIMS SC_G_STR"
 global-dim "SC_GLOBALS.ERH" 2 "#DIM CONST SC_G_CONST = 42"
 global-dim "SC_GLOBALS.ERH" 3 "#DIMS CONST SC_G_SC = \"SC-STR-CONST\""
 private-dims 1
-private-dim "SC_ALPHA" "SC_LOCAL" 0 0 0 0 0 0 1 1 2 - -
+private-dim "SC_ALPHA" "SC_LOCAL" 0 0 0 0 0 0 1 1 0 2 - -
 dim-config 0
 macros 1
 macro "SC_G_MACRO" "7"

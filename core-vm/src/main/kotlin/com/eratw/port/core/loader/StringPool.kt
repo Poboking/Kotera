@@ -45,8 +45,32 @@ class StringPool(initialCapacity: Int = 1 shl 12) {
     private var hits: Long = 0
     private var savedBytes: Long = 0
 
-    /** 表内不同内容数。 */
+    /**
+     * 运行期去重表上界（已武装后生效）；[Int.MAX_VALUE] = 未武装（装载趟按旧口径无界）。
+     *
+     * 为什么要有这一条：去重表把**每个不同内容的代表实例**钉在开放寻址表里，永不归还 ——
+     * 装载趟去重的对象是语料固定面（几万条），运行期去重的对象是「玩到过的全部文本」，
+     * 随游玩覆盖面无界增长（2026-11-14 桌面 soak512 实测 25 分钟爬到 ~1M 条 / 96 MiB `byte[]`），
+     * 512 MiB 挡位上就是 OOM 缺口的主力之一。上界触发时**整表重置**：表里的代表实例
+     * 只要还被语句/片持有就照常活着（归一不改变任何引用者持有的实例），丢掉的只是
+     * 「跨代去重」这一层收益 —— 内容相等语义逐字不变。
+     */
+    private var runtimeDistinctBudget: Int = Int.MAX_VALUE
+
+    /** 运行期整表重置次数（诊断/单测读数；装载趟不计）。 */
+    var runtimeDistinctResets: Int = 0
+        private set
+
+    /** 表内不同内容数（重置后从 0 重新累计）。 */
     val distinct: Int get() = size
+
+    /**
+     * 装载收尾武装：之后去重表条数超过 [maxDistinct] 就整表重置。
+     * 只许在装载趟结束后调（`Program.armRuntimeCodeCacheBudgets`）；对未武装实例零影响。
+     */
+    fun armRuntimeDistinctBudget(maxDistinct: Int) {
+        runtimeDistinctBudget = maxDistinct
+    }
 
     /** 返回与 [s] 内容相等的代表实例（可能就是 [s] 自己）。 */
     fun intern(s: String): String {
@@ -58,6 +82,7 @@ class StringPool(initialCapacity: Int = 1 shl 12) {
             if (cur == null) {
                 table[i] = s
                 size++
+                if (size > runtimeDistinctBudget) resetTableForRuntime()
                 return s
             }
             if (cur === s || cur == s) {
@@ -67,6 +92,14 @@ class StringPool(initialCapacity: Int = 1 shl 12) {
             }
             i = (i + 1) and mask
         }
+    }
+
+    /** 运行期上界触发：整表重置（代表实例归引用者所有，表壳换成小容量新表）。 */
+    private fun resetTableForRuntime() {
+        table = arrayOfNulls(poolCapacity(INITIAL_TABLE_CAPACITY))
+        mask = table.size - 1
+        size = 0
+        runtimeDistinctResets++
     }
 
     /** 当前读数快照（只读，可反复取）。 */
@@ -95,6 +128,9 @@ class StringPool(initialCapacity: Int = 1 shl 12) {
          * 再按 2 B/字符 计正文（语料为日文，UTF-16 口径；拉丁串会高估）。粗估，不做精确测量。
          */
         const val ESTIMATED_STRING_BYTES = 40L
+
+        /** 运行期整表重置后的新表容量（与构造缺省同值；重置不是扩容反向，只还驻留不还语义）。 */
+        const val INITIAL_TABLE_CAPACITY = 1 shl 12
     }
 }
 

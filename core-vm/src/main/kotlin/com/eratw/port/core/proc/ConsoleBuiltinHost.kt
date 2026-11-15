@@ -8,17 +8,20 @@ import com.eratw.port.core.fn.BuiltinHost
 import com.eratw.port.core.fn.ConsolePrintedLine
 import com.eratw.port.core.fn.ConsoleStyleSnapshot
 import com.eratw.port.core.fn.DirectoryProbeFileOps
+import com.eratw.port.core.fn.EntityRuntime
 import com.eratw.port.core.fn.IdleInputState
 import com.eratw.port.core.fn.InputState
 import com.eratw.port.core.fn.TextBoxHost
 import com.eratw.port.core.fn.TextMeasureRequest
 import com.eratw.port.core.fn.consolePrintedLines
 import com.eratw.port.core.fn.consoleStyleOf
+import com.eratw.port.core.fn.entityRuntimeOf
 import com.eratw.port.core.host.BinaryFileOps
 import com.eratw.port.core.host.ConsoleSink
 import com.eratw.port.core.host.FileOps
 import com.eratw.port.core.host.GlyphMaskHostProvider
 import com.eratw.port.core.host.LineBufferConsoleSink
+import com.eratw.port.core.sql.SqlDriver
 import java.nio.file.Path
 
 /**
@@ -112,6 +115,7 @@ import java.nio.file.Path
  *   每次现读控件尺寸的语义（EmueraConsole.cs:232/234）。生产装配点 =
  *   [GameSession] 的 `screenState`（同一实例，不复制）。
  */
+@Suppress("LongParameterList")
 class ConsoleBuiltinHost(
     root: Path,
     private val console: ConsoleSink? = null,
@@ -155,6 +159,14 @@ class ConsoleBuiltinHost(
      * [printCPerLine] / [printCLength] 同一模式，注入值即读数。
      */
     override val windowWidthScriptPx: Long = 0L,
+    /**
+     * SQLite 驱动注入位（`CONTRACT-SQLITE-MIGRATION` §1/§4）。**必须压过
+     * `BuiltinHost by delegate`**（同 [consoleSink] 的委托陷阱）：不覆写就会把接口成员转发给
+     * [delegate]，本类的注入永远不生效。null（缺省）= 回落到 [delegate] 的注入（生产
+     * [GameSession] 给 rooted 与 Console 喂**同一个实例**，两条路径同源，不复制驱动）；
+     * delegate 也没有 = 宿主未接线 ⇒ `SQL_*` 按契约抛 CodeEE，禁止静默建内存库。
+     */
+    sqlDriver: SqlDriver? = null,
 ) : BuiltinHost by delegate, ConfigChainSource by delegate, GlyphMaskHostProvider by delegate {
 
     /**
@@ -169,6 +181,22 @@ class ConsoleBuiltinHost(
 
     /** 见 [injectedClientWidth]。 */
     private val injectedClientHeight: Long = clientHeight
+
+    /**
+     * [sqlDriver] 的注入值（构造参数另存一份，理由同 [injectedClientWidth]：同名属性的 getter
+     * 里裸写 `sqlDriver` 会解析到属性自己）。
+     */
+    private val injectedSqlDriver: SqlDriver? = sqlDriver
+
+    /**
+     * SQLite 驱动出口：本类注入值优先，否则回落 [delegate]（[RootedBuiltinHost.sqlDriver]）。
+     *
+     * 必须显式覆写：`BuiltinHost by delegate` 会把接口成员转给委托对象（同 [consoleSink] /
+     * [measureTextRun] 的委托陷阱），不覆写则 [sqlDriver] 参数永远不生效。回落是为了
+     * 「只给 rooted 喂驱动」的既有装配形态也看得见；两条路径在生产里是同一实例
+     * （[GameSession] 两处都传），不存在第二套驱动。
+     */
+    override val sqlDriver: SqlDriver? get() = injectedSqlDriver ?: delegate.sqlDriver
 
     /**
      * `CLIENTWIDTH()` 的读数（原版 = `EmueraConsole.ClientWidth => window.MainPicBox.Width`，
@@ -309,6 +337,11 @@ class ConsoleBuiltinHost(
             defFont,
             graphicFontPx = scriptPx,
             imageSizeOf = sink?.imageSizeOf,
+            // 缺帧面判据（MODERN-R12-WIRE）：与列坐标的图形尺同取 **sink 自持的那一份** ——
+            // sink 折行/行内游标用的就是它（LineBufferConsoleSink.frameAvailableOf，GameSession
+            // 喂宿主帧源），回读列坐标换任何别的源都会与屏上错位。sink 未接线（null，headless /
+            // 自定义实现）= 旧读数，图宽口径照旧。
+            frameAvailableOf = sink?.frameAvailableOf,
             fontSize = if (scriptPx > 0) scriptPx else fontSize,
             focusColor = sink?.focusColor ?: LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
         )
@@ -341,6 +374,24 @@ class ConsoleBuiltinHost(
      * 钉位不丢 —— 缺了那条委托才会退回这张值快照。
      */
     override val configOverrides: Map<String, String> get() = delegate.configOverrides
+
+    // ---- W1-ENTRT：ENTITY_* 运行时读缝（CONTRACT-RT2-ENTRT 判据 1）----
+
+    /**
+     * 显式覆写（`BuiltinHost by delegate` 的委托陷阱，同 [consoleSink] 一族：不覆写就会
+     * 转发给委托对象、永远读到缺省 null）：真源 = 会话级 aux 槽，生产写侧 = app 的
+     * `ModRuntimeAssembly.attach` 开态尾段回填，本 getter 经 [entityRuntimeOf] 现读。
+     * [audioStore] 与 attach 收到的 `store` 是 GameSession 装配的同一实例（GameSession
+     * 内建宿主构造段 `audioStore = store`），所以本读数与求值语境装饰器
+     * （Builtins.kt 的 AuxMacroHost）读到的是同一份装配产物，不出现第二套读数。
+     *
+     * 读侧不建槽：关态（总闸第一查短路，槽从未写）与 attach 前（时序边界，槽尚缺席）
+     * 都落 null = 未装配语义逐位不变（裁定 3 的 CodeEE 组 / 合法旁路组原样生效）。
+     * 单线程装配序：attach 在会话启动路径（GameHost 装载段）先行完成，此后才有 ERB
+     * 求值（VM 单线程，ADR-003）；本 getter 只读，无并发写面。
+     */
+    override val entityRuntime: EntityRuntime?
+        get() = audioStore?.let { entityRuntimeOf(it.aux) }
 
     // ---- M11-A L1 独有余项：HOST-03 音频四件套（跳过态与显示行两面已由上游 Q1 落地）----
 

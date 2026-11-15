@@ -517,6 +517,9 @@ class ProgramMmapReleaseTest {
 
         override fun statementAt(index: Int): Statement = throw AssertionError("本用例不取语句")
 
+        override fun scanStatementHeaders(visit: (codeName: String, line: Int) -> Unit) =
+            throw AssertionError("本用例不扫语句头")
+
         override fun releaseRaws() = Unit
 
         override fun seedInterning(roots: List<Expr?>): ArgInterner.Stats = ArgInterner.Stats(0, 0, 0, 0, 0L)

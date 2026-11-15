@@ -64,28 +64,32 @@ class EntityKernel(
         }
         fieldTypes = seenFields
         val rel = HashMap<String, RelationshipSchema>()
-        val inv = HashMap<String, String>()
         for (r in relationshipSchemas) {
             val key = r.name.uppercase(Locale.ROOT)
             require(rel.put(key, r) == null) { "关系类型 $key 重复（声明事务应已拦）" }
-            if (r.autoInverse) {
-                val invKey = r.inverseName!!.uppercase(Locale.ROOT)
-                // 反向类型自动注册为**派生 schema**（directed、无再折返；去重/级联继承主
-                // schema），公开入口 addRelation/removeRelation/hasRelation 对它可写可查
-                // —— 否则 inverseName 只活在 writeEdge 内部，公开面查表即拒。
-                // 用户显式声明了同名 schema 时保留用户版（无折返死循环风险：autoInverse
-                // 只在 addRelation 写一层、writeEdge 不递归）。
-                rel.putIfAbsent(
-                    invKey,
-                    RelationshipSchema(
-                        name = r.inverseName!!,
-                        directed = true,
-                        dedupeEdges = r.dedupeEdges,
-                        cascadeOnDestroy = r.cascadeOnDestroy,
-                    ),
-                )
-                inv[key] = invKey
-            }
+        }
+        val inv = HashMap<String, String>()
+        // 派生反向 schema 只在**全部显式声明收齐之后**才补：声明事务不保证 master 与它的
+        // inverseName 谁先谁后（DeclarationRegistry 按 manifest 顺序进表，只做「反向边类型必须
+        // 已声明」的硬闸），同一趟循环里边插 master 的派生边、边读下一条显式声明，就会把
+        // 「master 在前、显式反向声明在后」这份合法 manifest 误判成重复类型。
+        // 显式声明了同名 schema 时保留用户版（无折返死循环风险：autoInverse 只在 addRelation
+        // 写一层、writeEdge 不递归）；反向类型自动注册为**派生 schema**（directed、无再折返；
+        // 去重/级联继承主 schema），公开入口 addRelation/removeRelation/hasRelation 对它可写可查
+        // —— 否则 inverseName 只活在 writeEdge 内部，公开面查表即拒。
+        for (r in relationshipSchemas) {
+            if (!r.autoInverse) continue
+            val invKey = r.inverseName!!.uppercase(Locale.ROOT)
+            rel.putIfAbsent(
+                invKey,
+                RelationshipSchema(
+                    name = r.inverseName!!,
+                    directed = true,
+                    dedupeEdges = r.dedupeEdges,
+                    cascadeOnDestroy = r.cascadeOnDestroy,
+                ),
+            )
+            inv[r.name.uppercase(Locale.ROOT)] = invKey
         }
         relationSchemas = rel
         inverseOf = inv
@@ -212,9 +216,14 @@ class EntityKernel(
     private fun slotOf(id: Long): Int? {
         if (!EntityIdCodec.isWellFormed(id) || EntityIdCodec.isNull(id)) return null
         val slot = EntityIdCodec.handleSlotOf(id)
-        if (slot >= liveCapacityHighWater) return null
+        // handleSlot 按无符号 32 位解释：负 Int 是 ≥2^31 的槽位，实际容量到不了，
+        // 必须在数组寻址前拒绝（否则 states[负数] 抛 AIOOBE，而不是按不存在处理）。
+        if (slot < 0 || slot >= liveCapacityHighWater) return null
         if (states[slot] == 0) return null
-        if (generations[slot] != EntityIdCodec.generationOf(id)) return null
+        // 全位域比对 pkg + generation + slot：只比 slot/generation 会把「同槽位
+        // 其它包段」的 id 误认成存活实体（EntityContracts.kt:150/167 的 resolveAlive
+        // 判据；EntityIdCodec.matches 是唯一编码同一性实现）。
+        if (!EntityIdCodec.matches(id, pkgBySlot[slot], generations[slot], slot)) return null
         return slot
     }
 

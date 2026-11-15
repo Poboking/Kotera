@@ -1,5 +1,6 @@
 package com.eratw.port.core.fn
 
+import com.eratw.port.core.compat.StringCompareDialect
 import com.eratw.port.core.config.ConfigChainLoad
 import com.eratw.port.core.config.ConfigChainSource
 import com.eratw.port.core.config.ConfigDebugLoad
@@ -22,6 +23,7 @@ import com.eratw.port.core.host.SPRITE_SLOT
 import com.eratw.port.core.host.SpritePool
 import com.eratw.port.core.lexer.lexerMacroNamesOf
 import com.eratw.port.core.lexer.lexerMacrosOf
+import com.eratw.port.core.sql.SqlDriver
 import com.eratw.port.core.sql.registerSqlMethods
 import com.eratw.port.core.vars.VariableStore
 import java.time.ZoneId
@@ -281,6 +283,20 @@ interface BuiltinHost {
      * 接口由 A9 新建（core/host/FileOps.kt），此处仅引用其 FQCN 与默认实现。
      */
     val fileOps: FileOps? get() = null
+
+    /**
+     * SQLite 驱动（SQL 内建函数族的数据面）。null = 宿主未接线 → `SQL_*` 抛 CodeEE，
+     * 不得静默创建内存库或把真实 SQL 降级成空结果。
+     *
+     * 这是 `BuiltinHost` 的**声明成员**而不是额外接口：Kotlin 的
+     * `BuiltinHost by delegate` 会自动转发本接口声明的成员；若另立
+     * `SqlDriverProvider`，`AuxMacroHost` / `UserFunctionWiring` 这类委托包装会看不到它。
+     * `ConsoleBuiltinHost` 是显式覆写点（它本来就有多枚注入属性）。
+     *
+     * 类型来自 core 自己的纯 JVM 端口（`core/sql/SqlDriver.kt`）；AndroidX/JDBC 适配器
+     * 在宿主侧，core 不感知具体实现。
+     */
+    val sqlDriver: SqlDriver? get() = null
 
     /**
      * 角色/变量存档目录（原版 `Program.DatDir`）。
@@ -567,6 +583,26 @@ interface BuiltinHost {
      */
     val audio: AudioHost? get() = null
 
+    /**
+     * 实体/角色扩展运行时（RT2 M4-2 + M4-4：ENTITY_* 族、ROSTER_GENERATION、
+     * MOD_IS_ACTIVE、HAS_SUPER 的唯一数据源）。接口定义见 EntityMethods.kt 的
+     * [EntityRuntime]。
+     *
+     * null = 宿主未装配（本缺省即此态）。装配缺失与合法旁路的语义分组（裁定 3）：
+     * - **CodeEE 组**：实体 CRUD/字段/关系/QUERY 族 + PROJECT/UNPROJECT ⇒
+     *   CodeEE「实体运行时未装配」（装配缺失不许伪装成语义读数）；
+     * - **合法旁路组**（「无投射/未装配」是事实）：MOD_IS_ACTIVE ⇒ 0、HAS_SUPER ⇒ 0、
+     *   ROSTER_GENERATION ⇒ 0、ENTITY_TO_CHARA ⇒ -1、CHARA_TO_ENTITY ⇒ 0。
+     *
+     * 生产装配（W1-ENTRT）= app 的 `ModRuntimeAssembly.attach` 开态把组装产物写进
+     * 会话级 aux 槽（EntityMethods.kt 的 [ENTITY_RUNTIME_SLOT]）；本接口缺省仍 null，
+     * 读缝两处现读该槽：[AuxMacroHost]（求值语境装饰器，委托显式给的优先）与
+     * `ConsoleBuiltinHost`（生产宿主直读）。关态 / attach 前槽缺席 ⇒ 任何宿主读到的
+     * 都是本缺省的 null，未装配语义逐位不变。包装宿主用 `by delegate` 时注意：
+     * 缺省属性同样会被委托结果遮蔽的陷阱见 [measureTextRun] 上方注释。
+     */
+    val entityRuntime: EntityRuntime? get() = null
+
     companion object {
         /** 无宿主时的最小实现（测试与纯函数场景）。 */
         val DEFAULT = object : BuiltinHost {}
@@ -735,6 +771,14 @@ interface BuiltinContext : EvalContext {
      * （:5713-5716）。
      */
     val currentScriptLine: Pair<String, Int>? get() = null
+
+    /**
+     * `ENUMFUNC*` 回落到内建名时的候选表（ENGC-3）。
+     *
+     * 缺省 = 全量注册表（无目标档，eraTW 零干扰）；显式目标档由 [BuiltinEvalContext]
+     * 覆写成 [EngineSurface.builtinNames]，与同一档的派发可见性同源。
+     */
+    val builtinNames: Collection<String> get() = Builtins.registry.names()
 }
 
 /**
@@ -986,6 +1030,10 @@ object Builtins {
         registerSaveMethods(r)
         // ---- W2-SQL：上游 fork 自加的 SQL 窄子集（原版 Emuera 无此族，占位名单里也没有）----
         registerSqlMethods(r)
+        // ---- RT2 M4-2 + M4-4：实体/角色内置函数族（ENTITY_* 全家 + ROSTER_GENERATION +
+        //   MOD_IS_ACTIVE + HAS_SUPER）。注册只许追加在既有顺序契约之后（contract §2.7），
+        //   装配缝 = BuiltinHost.entityRuntime（缺省 null，未装配语义分组见该缝 KDoc）。
+        registerEntityMethods(r)
         return r
     }
 }
@@ -1034,6 +1082,17 @@ private open class AuxMacroHost(
         get() = delegate.imageSizeOf ?: aux.peek<SpritePool>(SPRITE_SLOT)?.let { pool ->
             { name: String -> pool.find(name)?.let { ImagePixelSize(it.width, it.height) } }
         }
+
+    /**
+     * W1-ENTRT 的求值语境读缝（[BuiltinHost.entityRuntime] 的委托陷阱同样适用本装饰器，
+     * 故显式覆写）：委托显式给的优先（测试注入与自定义宿主原样生效），缺省时现读会话级
+     * aux 槽（[entityRuntimeOf]）——生产装配（`ModRuntimeAssembly.attach` 开态尾段回填）
+     * 不经构造参数、本类不新增可变状态，任何宿主形态（含 [BuiltinHost.DEFAULT]、E2E 装置）
+     * 都自动吃到同一份会话真源。槽缺席（关态 / attach 前）= 委托缺省的 null，
+     * 未装配语义逐位不变（裁定 3 分组原样生效）。
+     */
+    override val entityRuntime: EntityRuntime?
+        get() = delegate.entityRuntime ?: entityRuntimeOf(aux)
 }
 
 /**
@@ -1079,6 +1138,18 @@ open class BuiltinEvalContext(
      * 值形参会把第一行永久钉死。
      */
     private val currentScriptLineProvider: (() -> Pair<String, Int>?)? = null,
+    /**
+     * 目标引擎的函数面门控（ENGC-3）。null（缺省）= 不过滤 = eraTW 零干扰；
+     * 显式目标档由装配方传入 [EngineSurface]，`dispatchFor` / `resolveFunctionType` /
+     * `builtinNames` 三条读同一份可见性。
+     */
+    private val surface: EngineSurface? = null,
+    /**
+     * 字符串关系比较方言（ENGC-4）。缺省 [StringCompareDialect.FIXED] = 4.981 实跑口径
+     * （eraTW 零干扰）；显式目标档由 [com.eratw.port.core.proc.ProcessRuntime] 从
+     * [com.eratw.port.core.proc.RuntimeCompatibilityProfile.stringCompare] 下传。
+     */
+    override val stringCompareDialect: StringCompareDialect = StringCompareDialect.FIXED,
 ) : EvalContext by base, BuiltinContext {
 
     /**
@@ -1092,6 +1163,10 @@ open class BuiltinEvalContext(
     /** FN-05：现读 VM 的当前语句快照；未注入 = 保持 [BuiltinContext] 的 null 回落。 */
     override val currentScriptLine: Pair<String, Int>?
         get() = currentScriptLineProvider?.invoke()
+
+    /** ENGC-3：有目标档时枚举本档可见名，与派发门控同源；无档 = 全量注册表。 */
+    override val builtinNames: Collection<String>
+        get() = surface?.builtinNames() ?: Builtins.registry.names()
 
     override fun printSystemLine(message: String) = base.printSystemLine(message)
 
@@ -1114,10 +1189,18 @@ open class BuiltinEvalContext(
         return u
     }
 
-    /** 解析期 resolveFunction 的内建 + 用户函数合并视图。 */
+    /**
+     * 解析期 resolveFunction 的内建 + 用户函数合并视图。
+     *
+     * ENGC-3：有目标档时内建面按 [surface] 过滤（被裁名返回 null ⇒ 调用点报
+     * 「未定义的函数」同一条路径）；无档保持全量注册表。
+     */
     fun resolveFunctionType(name: String): OperandType? =
-        if (userFunctionTypes.isEmpty()) Builtins.registry.returnType(name)
-        else userFunctionTypes[userFuncKey(name)] ?: Builtins.registry.returnType(name)
+        if (userFunctionTypes.isEmpty()) builtinReturnType(name)
+        else userFunctionTypes[userFuncKey(name)] ?: builtinReturnType(name)
+
+    private fun builtinReturnType(name: String): OperandType? =
+        if (surface == null) Builtins.registry.returnType(name) else surface.builtinLookup(name)?.retType
 
     /**
      * 按名派发结果（PERF 2026-10-30）。优先级固定：用户 #FUNCTION 遮蔽同名内建
@@ -1152,15 +1235,23 @@ open class BuiltinEvalContext(
         val resolved: FnDispatch =
             if (userFunctions.isNotEmpty()) {
                 userFunctions[userFuncKey(name)]?.let { FnDispatch.UserFn(it) }
-                    ?: Builtins.registry[name]?.let { FnDispatch.BuiltinFn(it) }
+                    ?: builtinMethod(name)?.let { FnDispatch.BuiltinFn(it) }
                     ?: FnDispatch.Undefined
             } else {
                 // 空用户表：绝大多数语料走这条，名字归一与用户表查找整个跳过
-                Builtins.registry[name]?.let { FnDispatch.BuiltinFn(it) } ?: FnDispatch.Undefined
+                builtinMethod(name)?.let { FnDispatch.BuiltinFn(it) } ?: FnDispatch.Undefined
             }
         dispatchMemo[name] = resolved
         return resolved
     }
+
+    /**
+     * 内建查找的唯一入口（ENGC-3）：显式目标档按可见性过滤，null = 不过滤。
+     *
+     * **不能**写成「过滤失败就回落全量表」：那会把被裁名重新放出来（门控失效）。
+     */
+    private fun builtinMethod(name: String): BuiltinMethod? =
+        if (surface == null) Builtins.registry[name] else surface.builtinLookup(name)
 
     /**
      * 实参求值（PERF 2026-10-30）：替换 `argExprs.map { e -> e?.toValue(this) }`——

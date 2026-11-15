@@ -92,14 +92,19 @@ class ScopeLifecycleTest {
                   _CALL g, 0, R0
                   _RET
 
-                .func g arity=0 slots=1
-                  _DIV R0, R1, R2
+                .func g arity=0 slots=3
+                  _SET_INT R0, -9223372036854775808
+                  _SET_INT R1, -1
+                  _DIV R2, R0, R1
                   _RET
                 """.trimIndent(),
             ),
             host,
         )
 
+        // 探针从「整数零除」换成「MinValue / -1 除算溢出」：4.981 SafeArithmetic.cs:67-77
+        // 已把前者改成钳制返回 0、不再抛错；后者是同通道仍会抛的运行期 CodeEE，
+        // 「异常中途退出也要把作用域栈逐级回滚」这条验收面因此完整保留。
         assertFailsWith<CodeEE> { vm.run() }
         assertEquals(listOf("enter:0", "enter:1", "enter:2", "exit:2", "exit:1", "exit:0"), host.events)
         assertEquals(0, host.depth)

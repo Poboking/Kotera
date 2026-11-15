@@ -32,8 +32,41 @@ class RuntimeAux {
     @Suppress("UNCHECKED_CAST")
     fun <T : Any> peek(name: String): T? = slots[name] as T?
 
-    /** 清空全部槽（RESTART / 读档后重建运行时用）。 */
-    fun clear() = slots.clear()
+    /**
+     * 清空全部槽（RESTART / 读档后重建运行时用），并逐个关闭实现 [AutoCloseable] 的槽。
+     *
+     * 为什么 clear 必须真的 close（SQLite 迁移，CONTRACT-SQLITE-MIGRATION §2）：`"sql"` 槽里的
+     * `SqlSession` 持有真实 SQLite 连接 / 语句，原版在 `GlobalStatic.Reset()` 里调
+     * `SqlManager.CloseAll()`（自改说明 :258-259）；只丢引用不 close 会漏连接与文件句柄。
+     * 同一个容器还挂着 XML / Map / DT / 图形 / Sprite 池，凡是持有原生资源的槽都在这里收口。
+     *
+     * 次序刻意是**先摘表、再关闭**：close 实现里若重入 [clear] / [slot] / [peek]，看到的是空表，
+     * 不会二次关闭 —— [clear] 因此天然幂等（第二次没有槽可关）。
+     *
+     * 失败口径：**逐个都尝试**，非 [AutoCloseable] 槽只丢弃；普通失败留首个（其余以
+     * [Throwable.addSuppressed] 附在首个上），全部尝试完再抛。`OutOfMemoryError` 一律上抛
+     * （JVM 已给不出继续分配的保证），且优先于普通失败抛出 —— 不把 OOM 伪装成普通 close 失败。
+     */
+    @Suppress("TooGenericExceptionCaught")
+    fun clear() {
+        val closing = slots.values.toList()
+        slots.clear()
+        var failure: Throwable? = null
+        var oom: OutOfMemoryError? = null
+        for (value in closing) {
+            if (value !is AutoCloseable) continue
+            try {
+                value.close()
+            } catch (e: OutOfMemoryError) {
+                if (oom == null) oom = e
+            } catch (t: Throwable) {
+                val first = failure
+                if (first == null) failure = t else first.addSuppressed(t)
+            }
+        }
+        oom?.let { throw it }
+        failure?.let { throw it }
+    }
 
     fun slotNames(): Set<String> = slots.keys.toSet()
 }

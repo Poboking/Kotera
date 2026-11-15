@@ -1,12 +1,17 @@
 package com.eratw.port.core.proc
 
 import com.eratw.port.core.code.Program
+import com.eratw.port.core.compat.EngineProfileData
+import com.eratw.port.core.compat.NicknameKeywordPolicy
 import com.eratw.port.core.code.InfiniteLoopAlert
 import com.eratw.port.core.code.InfiniteLoopAnswer
 import com.eratw.port.core.code.VmConfig
 import com.eratw.port.core.config.ConfigKey
+import com.eratw.port.core.config.ConfigOverlay
 import com.eratw.port.core.config.ConfigStore
+import com.eratw.port.core.config.ConfigValue
 import com.eratw.port.core.config.EffectiveConfig
+import com.eratw.port.core.config.JsonSetting
 import com.eratw.port.core.config.parseBoolLiteral
 import com.eratw.port.core.data.csv.GameData
 import com.eratw.port.core.data.csv.GameDataLoader
@@ -15,6 +20,7 @@ import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.frontend.Symbols
 import com.eratw.port.core.fn.BuiltinHost
 import com.eratw.port.core.fn.ConfigMethods
+import com.eratw.port.core.fn.EngineSurface
 import com.eratw.port.core.fn.IdleInputState
 import com.eratw.port.core.fn.InputState
 import com.eratw.port.core.fn.TextMeasureRequest
@@ -30,6 +36,7 @@ import com.eratw.port.core.host.mouseStateOf
 import com.eratw.port.core.lexer.installLexerMacros
 import com.eratw.port.core.loader.BootMetadata
 import com.eratw.port.core.loader.ModPatchLoader
+import com.eratw.port.core.mod.ModChainRuntimePlan
 import com.eratw.port.core.save.EmSaveSets
 import com.eratw.port.core.save.FileSystemOps
 import com.eratw.port.core.save.RootedSaveFileIo
@@ -37,10 +44,13 @@ import com.eratw.port.core.save.SaveConfig
 import com.eratw.port.core.save.SaveFolderMigration
 import com.eratw.port.core.save.SaveWiring
 import com.eratw.port.core.sem.SemConfig
+import com.eratw.port.core.sql.SQL_AUX_SLOT
+import com.eratw.port.core.sql.SqlDriver
 import com.eratw.port.core.stmt.Statement
 import com.eratw.port.core.sem.SystemOps
 import com.eratw.port.core.vars.DimVarSizes
 import com.eratw.port.core.vars.GameBaseData
+import com.eratw.port.core.vars.ModCsvLoadContext
 import com.eratw.port.core.vars.VarConfig
 import com.eratw.port.core.vars.VariableRegistry
 import com.eratw.port.core.vars.VariableStore
@@ -67,7 +77,10 @@ import java.util.IdentityHashMap
  *    spec: `LexicalAnalyzer.cs:919-929` / `ErhLoader.cs:315-337`）；
  * 4. 私有 `#DIM`：[VariableStore.declareUserVar]`(spec, functionKey)`（被遮蔽定义不注册）；
  * 5. 内建函数宿主：[ConsoleBuiltinHost]（委托 [RootedBuiltinHost]：文件 IO / 时钟 / 存档槽探测 /
- *    三层配置链与 `_Replace.csv` 覆盖；写请求一律拒绝并计数，语料只读铁律）；
+ *    三层配置链与 `_Replace.csv` 覆盖；写请求一律拒绝并计数，语料只读铁律）。
+ *    `CONTRACT-RT2-CFG16C`：装载期快照（[bootViewMetrics]）在位时，**同一个** [RootedBuiltinHost]
+ *    也用快照构造（`configSnapshot`）—— 其 `configOverrides` / `moneyLabel` / `useSaveFolder` /
+ *    `applyChainTo` 不再自读盘，`fileOps` 一族的配置相关读数与 View/会话同源（逐条见构造点 KDoc）。
  * 6. [ProcessRuntime]；7. `installLabelTable` / `installDataSections`。
  *
  * 存档接线在 5 与 6 之间：[saveConfig] 从 [configStore] 按 [ConfigKey] 读出
@@ -146,7 +159,11 @@ import java.util.IdentityHashMap
  *   设置页落盘的 `emuera.config` 由这条链在**下一次**会话装配时吃到（原版
  *   `Program.cs:95` 只在进程启动装载一次，运行中不重读；设置页的「重启」入口即为此）。
  *   显式传入时**不**再叠 Replace（调用方给的条目表就是权威，TODO(verify)：那条接线不在本路文件面内）。
+ *   **取值优先级**（CONTRACT-RT2-CFG16B）：显式传入 > [bootViewMetrics] 的链后 store >
+ *   本类自建链。显式传入时**不**做 `WindowX` 回填（既有语义）；快照 store 由宿主回填过一次，
+ *   本类也不重复回填。
  */
+@Suppress("LongParameterList")
 class GameSession(
     val gameRoot: Path,
     val program: Program,
@@ -167,11 +184,43 @@ class GameSession(
      * 阈值取会话生效配置的 `InfiniteLoopAlertTime`（注册缺省 5000ms，置 0 关）。
      */
     maxRunMillis: Long = 0L,
+    /**
+     * **单调时钟注入位**（透传给 [com.eratw.port.core.code.VmConfig.monotonicMs]）。
+     *
+     * null（缺省）= 内置 `System.nanoTime()` 口径 ⇒ 装置 / golden / 纯测试逐条不变。
+     * 生产由 [com.eratw.port.android.GameHost] 注入一把「已扣掉后台累计」的尺，使
+     * [com.eratw.port.core.code.VmConfig.infiniteLoopAlertTimeMs] 与
+     * [com.eratw.port.core.code.VmConfig.maxRunMillis] 两条闸都只量「VM 真在跑」的时间
+     * （口径见 [com.eratw.port.core.code.VmConfig.monotonicMs]）。
+     *
+     * 为什么建在这里而不是 `ProcessRuntime` 上：`VmConfig` 是本类构造 `ProcessRuntime` 时
+     * 现拼的（见装配第 8 步），时钟与**阈值**必须来自同一处，否则又是一把尺在外、一把在内。
+     */
+    wallClockMs: (() -> Long)? = null,
+    /**
+     * 「累计后台毫秒」读数源（透传给 [com.eratw.port.core.code.VmHost.loopGuardBackgroundMs]）。
+     *
+     * 与 [wallClockMs] **必须同源**（生产都取自 `GameHost` 的那一份后台记账）：一个是扣掉
+     * 它的时钟、一个是它的原值；两边各算一份就会出现「告警说没后台、时钟却扣了后台」这种
+     * 事后对不上的现场。null（缺省）= 不记账，读数恒 0。
+     */
+    backgroundMs: (() -> Long)? = null,
     randSeed: Long? = null,
     soundSink: SoundSink = NoopSoundSink,
     systemOps: SystemOps? = null,
     semConfig: SemConfig? = null,
     configStore: ConfigStore? = null,
+    /**
+     * 平台出厂缺省覆盖（CONFIG-OVERLAY）：三层配置链 + `_Replace.csv` **之后**逐项 assign，
+     * 于是 [com.eratw.port.core.code.VmConfig] 这类「装配期读一次」的字段吃到的是平台标定值。
+     *
+     * **机制在 core、策略在壳层**：本参数只是「把这张表写进去」，不判断哪个键该被覆盖；
+     * 谁传谁负责举证，并负责「玩家有没有显式写过这个键」的判定
+     * （口径与理由见 [com.eratw.port.core.config.ConfigOverlay] 的类注释）。
+     *
+     * 缺省空表 ⇒ headless / golden / 装置逐字节零行为变化。
+     */
+    configOverlay: Map<ConfigKey, ConfigValue> = emptyMap(),
     /** 「一屏一帧」开关：false = 关掉帧冻结，控制台变更立即发布（见 `LineBufferConsoleSink`）。 */
     frameGateEnabled: Boolean = true,
     /**
@@ -277,6 +326,17 @@ class GameSession(
      */
     textMeasureRun: ((TextMeasureRequest) -> Long?)? = null,
     /**
+     * 绘制帧可用查询（**宿主供给**，MODERN-R12-WIRE）：`(资源名) -> 帧此刻是否可绘制`，
+     * 原样转发给 [LineBufferConsoleSink.frameAvailableOf] —— HTML 图形段的**缺帧面**判据
+     * （尺寸表命中而绘制时帧拿不到 ⇒ 宽度按 AltText 文本量，与画侧 R9-B 回落同尺；
+     * 判据唯一名下 = `CellWidth.imgWidthPxOrNull` 的文档表）。生产由 `GameHost` 把
+     * `SpriteBitmapSource`（同时是尺寸源与帧源）包成 lambda 现读传入：lambda 在**打印期**
+     * 才求值，而 `installGraphics` 晚于本构造（GameHost 装配序）——未挂档答 true =
+     * 未接线旧读数，首次打印时必已挂。null（缺省）= 不接线：headless / 纯 JVM 装置判不了
+     * 缺帧面，读数与接线前逐位一致。
+     */
+    frameAvailableOf: ((String) -> Boolean)? = null,
+    /**
      * **字体感知排版尺**（AA 画/老虎机字符画错位修复，2026-11）：控制台折行与按钮列位的
      * 半角格宽度来源。`SETFONT` 在原版是「换字形**并**换尺」（每段宽度 =
      * `StringMeasure.GetDisplayLength(Text, Font)` 的 GDI+ 实测，
@@ -355,6 +415,16 @@ class GameSession(
      */
     val echoInputMode: EchoInputMode = EchoInputMode.REPLICA,
     /**
+     * RT2 G 车 / P1-5：Mod 链接产物的 dispatch 表（`LinkedProgram.catalog.dispatch`，
+     * `SymbolCatalog.build` 内建分派幂等自检）。缺省 null = 无 Mod 链产物 ⇒
+     * [ProcessRuntime.functionDispatch] 缺省 null ⇒ `VirtualMachine.resolveDispatch`
+     * 静态 CALL 走物理下标直调，与不带 Mod 的既有装配**逐位一致**；非 null 时按
+     * `specs/erbc-format.md` §5.6a 查表分派（DIRECT 位绕表）。表长由 VM 构造期
+     * require 自检等于最终函数表长度。erbcc 模块编译产物（G 车余量）落地前，
+     * 生产装配恒传 null —— 本参数只把 VM 侧缝接通，不引入任何运行期行为差。
+     */
+    functionDispatch: IntArray? = null,
+    /**
      * 交给配置回填用的**脚本 px 版面宽**（R5.1；读数定义见 [BuiltinHost.windowWidthScriptPx]）。
      *
      * 0（缺省）= 未接线/未布局 ⇒ 回填层不写，`WindowX` 保持链读数（headless / 既有装置
@@ -368,6 +438,72 @@ class GameSession(
      * （差不到一格；判据见计划 C-WINDOW-SEED 的同源验收算式）。
      */
     windowWidthScriptPx: Long = 0L,
+    /**
+     * 会话兼容档案（ENGC-2）：目标引擎家族 + 方言 + 既有六个 facet 的**一份**声明（共十个字段）。
+     *
+     * 来源是构建期印章（`assets/engine-profile.json` → [EngineStamp] → [EngineProfiles]），
+     * 由 [com.eratw.port.android.GameHost] 装配时传入；无印章 = [LEGACY_ERATW_4981]，
+     * 与接线前逐字段相等。函数面门控走独立参数 [engineSurface]（无印章必须为 null，
+     * 见其 KDoc）；方言消费在 ENGC-5，本类里没有任何 `if (compatProfile...)` 分支。
+     */
+    val compatProfile: RuntimeCompatibilityProfile = RuntimeCompatibilityProfile.LEGACY_ERATW_4981,
+    /**
+     * 函数面门控（ENGC-3）：显式目标档的函数可见性集合；null（缺省）= 不过滤。
+     *
+     * [compatProfile] 只声明「跑哪一档」，本参数才是**是否启用门控**的开关：
+     * eraTW 无印章时档案仍是 [LEGACY_ERATW_4981]，但绝不能按 snake 档过滤（I7 零干扰），
+     * 所以两者分开传入，由装配方（[com.eratw.port.android.GameHost]）决定。
+     */
+    private val engineSurface: EngineSurface? = null,
+    /**
+     * RT2 G2 波 / P1-5 余量一：Mod 链接产物的**运行期三视图**
+     * （[ModChainRuntimePlan]：`program` + `functionTable` + `functionDispatch` + `hasOverrides`）。
+     *
+     * 三视图由 `wave/f3` 落 main 的核心层（`ModChainRuntimePlan.fromLinked`）从 LSC
+     * 一次派生并构造期自检；本参数是**宿主侧原子替换接线**：非 null 时，会话装配在
+     * ① `effectiveProgram`（进 VM 的 Program）② `ProcessRuntime` 的 `FunctionTable`
+     * ③ `ProcessRuntime.functionDispatch` **三处只从它取值**，不允许出现「新 Program
+     * 配旧 Meta 表」的静默错位。`HAS_OVERRIDES` 也在这里消费：仅当
+     * [ModChainRuntimePlan.hasOverrides] 为真才把 dispatch 交给 VM，否则走物理下标
+     * 直调（该对象自身已按 v6.2-c 性能闸在无覆盖时把 `functionDispatch` 置 null）。
+     *
+     * 缺省 null = 完全旁路（今天的生产恒此态）⇒ 三处取值与 G 车第一批逐位一致：
+     * `effectiveProgram` 走补丁或 base、`FunctionTable` 走 `metadata.functions`、
+     * `functionDispatch` 走上面的独立参数。
+     *
+     * **互斥 fail-closed**：与显式 `functionDispatch`、以及真正装载了 R7 `mods/` 补丁
+     * 的会话不得共存（两套替换源会漂移）。两条都由本类构造期 `require` 整包拒绝。
+     */
+    modChain: ModChainRuntimePlan? = null,
+    /**
+     * M1-4 阶段二：装载相位产出的 Mod CSV 注入上下文（CONTRACT-RT2-M14B-IMPL §1 裁定 1/3/7）。
+     *
+     * 非 null 且计划非空 ⇒ 本会话**按计划重载一次**游戏数据（在 registry 定型前扩容 + 登记注入关键字），
+     * 建好 store 后把上下文挂进 `store.aux`（`ModCsvLoadContext`），供 `ModRuntimeAssembly.attach`
+     * 只读消费（三端口 + 侧车计划）。null（缺省）= 与今天逐字节一致（`modRuntime` 缺省关即此态）。
+     */
+    modCsvContext: ModCsvLoadContext? = null,
+    /**
+     * 装载期启动快照（`CONTRACT-RT2-CFG16` + `CONTRACT-RT2-CFG16B` / SPEC-RULING 序 16）。
+     *
+     * 非 null ⇒ [scriptFontPixelSize] 与 sink 的 `lineHeightPx` 取快照度量（与 View 排版共用
+     * 同一份）；若快照还带链后 [BootViewMetrics.configStore] 与 [BootViewMetrics.rawEntries]
+     * （生产 `GameHost` 恒带），会话的条目表、字体名、日志行数、`BUTTON WRAPPING` 与
+     * `effective` 也全部从快照派生，**不再读盘、不再自建配置链**，`WindowX` 也不重复回填。
+     * null（缺省 / headless / 装置）⇒ 原路读本会话 `EffectiveConfig` 并自建链，与改动前逐位一致。
+     * 只有度量两项、没有 store 的半快照（A/L7 既有形态）同样走缺省回落。
+     */
+    bootViewMetrics: BootViewMetrics? = null,
+    /**
+     * SQLite 驱动（`CONTRACT-SQLITE-MIGRATION` §1/§4）：会话把它**同一个实例**同时喂给
+     * [RootedBuiltinHost] 与 [ConsoleBuiltinHost]（后者显式覆写，压过 `BuiltinHost by
+     * delegate` 的转发；前者留作回落）。null（缺省）= 宿主未接线，`SQL_*` 按契约抛 CodeEE，
+     * 禁止静默建内存库；headless / 既有装置 / golden 逐字不变。
+     *
+     * 位次在构造参数末尾：既有调用点全部按位置或具名传前 3–5 个参数，追加在尾部不移动任何
+     * 既有槽位（`GameSession(root, program, meta, consoleWidth = …)` 一族原样可编译）。
+     */
+    sqlDriver: SqlDriver? = null,
 ) {
 
     /**
@@ -460,13 +596,18 @@ class GameSession(
         ScriptScreenState(clientWidthPx, clientHeightPx, deviceFontPixelSize)
 
     init {
-        require(metadata.functions.isNotEmpty()) {
+        // RT2 G2：Mod 链非旁路装配时，配对校验的对象必须同步换成运行期三视图里的
+        // metas / program；否则会拿 base 侧车去校验链接产物，出现「校验过了但表是旧的」。
+        // 核心层 ModChainRuntimePlan.fromLinked 已自检稠密下标覆盖，这里只复核不重造。
+        val initMetas: List<FuncMeta> = modChain?.functionTable?.all() ?: metadata.functions
+        val initProgram: Program = modChain?.program ?: program
+        require(initMetas.isNotEmpty()) {
             "侧车缺少函数元数据（functions 段为空）：没有它 FunctionTable 认不出任何函数，" +
                 "begin(TITLE) 必然走「目标不存在」分支。请用 erbcc 的 compile 子命令重新落盘旁路文件。"
         }
-        val maxIndex = metadata.functions.maxOf { it.index }
-        require(maxIndex < program.functions.size) {
-            "侧车与 Program 不配对：函数下标 $maxIndex 越过 program.functions（${program.functions.size}）。" +
+        val maxIndex = initMetas.maxOf { it.index }
+        require(maxIndex < initProgram.functions.size) {
+            "侧车与 Program 不配对：函数下标 $maxIndex 越过 program.functions（${initProgram.functions.size}）。" +
                 "两种可能：侧车不是这份 program.erbc 的（同名不同后缀取错），或产物被单独替换过。"
         }
     }
@@ -503,6 +644,28 @@ class GameSession(
 
     /** 变量池（宿主可直接读，例如设置页的数据层）。 */
     val store: VariableStore
+
+    /**
+     * VM 是否处于活动调用栈（M5-3 活动期投射变更闸的会话级只读判据）。
+     *
+     * 判据 = 变量层帧活动（[VariableStore.currentFunction] 非空）：主 VM 入口帧、
+     * `_CALL`、尾跳、嵌套 VM（deriveNestedVm 同宿主）全部经
+     * [ProcessRuntime] 的 `onFunctionEnter`/`onFunctionExit` 驱动
+     * [VariableStore.enterFunction]/[leaveFunction]，嵌套调用、事件回调、输入流程
+     * （TINPUT park 帧挂起）期间恒非空；页边界（run 返回、unwindScopes finally 配对
+     * 离场）后为空。蓝图 era-arch-v61u.md §7 Mutation Boundary 的判据原文就是
+     * 「不只查 depth==0——嵌套调用、事件回调、输入流程」全算活动期。
+     *
+     * 为什么判据落在变量层帧活动而不是 [com.eratw.port.core.code.VirtualMachine] 的
+     * `running`/`depth`：`ProcessRuntime.vm` 是 private 且本波禁触 ProcessRuntime.kt，
+     * vm 实例对本类与装配层均不可达；变量层帧栈是 store 上的既有权威读数，本类与
+     * 生产装配点（ModRuntimeAssembly 的闸接线）各自从同一 store 读同一判据。
+     * ADR-003 单线程：判据的读写同在 VM 线程（闸 probe 在 VM 线程调），无可见性问题。
+     *
+     * 消费面：宿主取证/诊断，以及 ModRuntimeAssembly 装配点给
+     * RealCharaSlotProjector.bindActivityGate 接的 probe（同源判据，见其 KDoc）。
+     */
+    val isVmActive: Boolean get() = store.currentFunction != null
 
     /** 运行期（语句/表达式/CALL 家族/BEGIN 状态机）。 */
     val runtime: ProcessRuntime
@@ -631,6 +794,15 @@ class GameSession(
     val configStore: ConfigStore
 
     /**
+     * 本次会话被**平台出厂缺省覆盖**真正改写过的键（`ConfigKey.name` 逗号串；空串 = 一项都没改）。
+     *
+     * 只作取证读数（错误报告/日志面），不进玩家 UI 文案：它回答的是「为什么这个阈值不是
+     * 出厂 5000」这类问题。口径见 [com.eratw.port.core.config.ConfigOverlay]。
+     */
+    var configOverlayReadout: String = ""
+        private set
+
+    /**
      * 脚本 `px` 的**基准字号** = 生效 `Config.FontSize`（`Config.cs:431-435` 夹取后的值）。
      *
      * 渲染侧拿它把 `<img>` / `<shape>` 与 `PRINTIMG` / `PRECT` / `PSPACE` 的 `px` 形态折成设备
@@ -705,7 +877,17 @@ class GameSession(
         } else {
             null
         }
-        val effectiveProgram: Program = patchLoad?.program ?: program
+        // RT2 G2：三表同源互斥闸。R7 补丁真正装载了内容（loadedPatches 非空）时，
+        // 它也会替换 Program，与 Mod 链是两套替换源 ⇒ 整包拒绝，不静默叠谁在谁后面。
+        // 无候选的 Result（loadedPatches 空表，program === base）不算共装，放行使关态
+        // 与「mods/ 目录存在但为空」的生产形态逐位不变。
+        require(modChain == null || patchLoad == null || patchLoad.loadedPatches.isEmpty()) {
+            "Mod 链装配与 R7 mods/ 补丁共存尚未定义（两套 Program 替换源）—— 整包拒绝"
+        }
+        require(modChain == null || functionDispatch == null) {
+            "Mod 链装配与显式 functionDispatch 互斥（两套 dispatch 来源）—— 整包拒绝"
+        }
+        val effectiveProgram: Program = modChain?.program ?: patchLoad?.program ?: program
         if (effectiveProgram !== program) {
             // overlay 产物的扁平通道开关是构造缺省（true），不会自动继承 base 装载路径的
             // 开关；不同步的话 Android 生产（flatStatements = false，第 8b 步按 false 建
@@ -714,7 +896,17 @@ class GameSession(
             effectiveProgram.flatStatementsEnabled = program.flatStatementsEnabled
         }
         val patchMetas: List<FuncMeta> =
-            buildPatchFunctionMetas(effectiveProgram, program, patchLoad, metadata.functions)
+            if (modChain != null) {
+                // 链接产物的函数表尾段是 Mod 函数、不是 R7 补丁，不能走 buildPatchFunctionMetas
+                // 按 baseFnCount 切尾（那会把 Mod 函数再当补丁拼一遍）。metas 由 modChain 全量给。
+                emptyList()
+            } else {
+                buildPatchFunctionMetas(effectiveProgram, program, patchLoad, metadata.functions)
+            }
+        // 三表同源：非旁路时直接复用核心层派生的 FunctionTable 实例（不是按 metas 重建），
+        // 与 program / dispatch 一次传入，杜绝「新 Program 配旧 Meta 表」的静默错位。
+        val sessionFunctionTable: FunctionTable = modChain?.functionTable
+            ?: FunctionTable(if (patchMetas.isEmpty()) metadata.functions else metadata.functions + patchMetas)
         val patchLabels: Map<String, Map<String, Int>> = patchLoad?.labels ?: emptyMap()
         val patchDataSections: Map<Int, List<List<Expr>>> = patchLoad?.dataSections ?: emptyMap()
         patchLoadResult = patchLoad
@@ -724,34 +916,82 @@ class GameSession(
         if (patchLoad != null) stageMark?.invoke("session.patchwire")
 
         // 1) 游戏数据（缺失 = null，不阻断）
-        gameData = GameDataLoader.load(gameRoot.resolve(CSV_DIR_NAME))
+        //    M1-4 阶段二（CONTRACT-RT2-M14B-IMPL 裁定 1/4/7）：注入计划若在装载相位已知，
+        //    必须**在建 registry 之前**并入容量与名字表（`CsvNameTable.capacity` 与
+        //    `CharacterTable.blockSize` 都是构造期常量），故这里两趟：先 Base 口径取数据，
+        //    有非空计划则按计划重载一次（扩容 + 关键字登记），否则逐字节走原路。
+        val csvDir = gameRoot.resolve(CSV_DIR_NAME)
+        val baseGameData = GameDataLoader.load(csvDir)
+        val csvContext = modCsvContext?.takeIf { !it.plan.isEmpty }
+        gameData = if (csvContext != null) {
+            GameDataLoader.load(csvDir, csvContext.plan) ?: baseGameData
+        } else {
+            baseGameData
+        }
+        if (csvContext != null) stageMark?.invoke("session.csv.inject")
         stageMark?.invoke("session.csv")
 
         // 2) 配置先读一次：字体名、日志行数与 PRINTC 两项都影响控制台构造，故在控制台之前取。
         //    与 ConsoleBuiltinHost 同源（同一个 RootedBuiltinHost 实例随后交给它做委托）。
         //    M11-E hostwire：glyphMaskHost 在同一构造点喂入（判据④的装配行，其余结构不动）。
-        val rooted = RootedBuiltinHost(gameRoot, glyphMaskHost = glyphMaskHost)
-        val config = rooted.configOverrides
+        // CONTRACT-RT2-CFG16B：装载期快照携带「链后 store + 原始条目表」时，会话**不再读盘、
+        // 不再自建配置链** —— 两者都是 `GameHost` 那一次读取的产物，原版对应进程级单实例
+        // （`Program.cs:95` 一次 LoadConfig + `ConfigData.cs:494` SetConfig）。
+        // 显式 [configStore] 仍是最高优先：那是装配者自己管配置的既有语义（K-CONFIGWIRE），
+        // 快照只服务「宿主没给 store」的缺省装配（真机生产即此态）。半快照（只有度量两项、
+        // 没有 store）也走缺省回落，A/L7 既有用例逐位不变。
+        val bootConfig = bootViewMetrics?.takeIf { it.configStore != null && configStore == null }
+        // CONTRACT-RT2-CFG16C：把同一份快照也交给 rooted 宿主 —— 它的 `configOverrides` /
+        // `moneyLabel` / `useSaveFolder` / `applyChainTo`（`ConfigMethods.storeFromHost`）
+        // 与 `fileOps` 一族因此不再触发第三次读盘；无快照（含显式 configStore 分支）仍是
+        // 原路自读，逐位不变。
+        val rooted = RootedBuiltinHost(
+            gameRoot,
+            glyphMaskHost = glyphMaskHost,
+            configSnapshot = bootConfig?.let {
+                RootedConfigSnapshot(it.rawEntries, checkNotNull(it.configStore))
+            },
+            // SQLite 迁移：驱动从会话装配点透传（同一实例，不复制；见构造参数 KDoc）。
+            sqlDriver = sqlDriver,
+        )
+        val config = bootConfig?.rawEntries ?: rooted.configOverrides
         // 会话条目表在这里一次定死（原版 ConfigData.Instance 只在进程启动时装载一次，
         // spec: `Program.cs:95` 的 LoadConfig + `ConfigData.cs:494` 的 SetConfig；设置页改动
         // 落盘后由**下一次**会话构造吃到，见 SettingsActivity 的口径）。三条通道共用它：
         // 控制台（PRINTC 两项 / 字体 / 日志行数）、存档（SaveConfig / SAVENOS）、语句层。
-        this.configStore = configStore ?: ConfigStore().also { rooted.applyChainTo(it) }
+        this.configStore =
+            configStore ?: bootConfig?.configStore ?: ConfigStore().also { rooted.applyChainTo(it) }
         // R5.1 收口（0.2.43 同源补完）：`WindowX` 的**链后回填** —— 原版按配置开窗后把
         // **实际**客户区宽回填 `Config.WindowX`（MainWindow.cs:726），移植侧的对应读数是
         // [windowWidthScriptPx]（View 实际版面宽的同尺逆折算）。它必须落在三层链之后：
         // 链前播种会被文件值/裸缺省 760 盖住（原版方向），core 的 `drawableWidth` 就停在
         // 760 脚本 px ≈ 42 格而屏上是 139 列 —— `MAXWIDTH()` 掉进除零区（DEBUG.ERB
         // `CFLAG_DEBUG` 行561/575 的 `/45`、`/90`），HTML_PRINT 折行尺也与屏上分叉。
+        // 平台出厂缺省覆盖（CONFIG-OVERLAY）：必须在三层链 + `_Replace.csv` **之后**、
+        // `EffectiveConfig.of` **之前** —— 落前面会被文件值盖回去（原版方向），落后面则
+        // 本构造块里 `VmConfig.infiniteLoopAlertTimeMs` 那批「装配期读一次」的字段已经读完了。
+        // 空表（headless / golden / 装置）⇒ 一行都不执行，行为与接线前逐位一致。
+        val overlayApplied = ConfigOverlay.applyTo(this.configStore, configOverlay)
+        if (overlayApplied.isNotEmpty()) {
+            // 取证面（不进玩家 UI 文案）：报告里要能读出「这次会话被平台缺省改写过哪几项」，
+            // 否则「阈值为什么不是我设的 5000」在盘上没有线索。
+            configOverlayReadout = overlayApplied.joinToString(",") { it.name }
+        }
         // 外部传入 [configStore] 的装配者自己管配置，不回填（行为与接线前一致）。
-        if (configStore == null) {
+        // CONTRACT-RT2-CFG16B：装载期快照的 store 已由 `GameHost` 在会话构造前回填过一次
+        // （单点，见 `GameHost.start()`）；这里**不得**二次回填 —— 快照 store 的 WindowX
+        // 就是 View 版面宽的同源读数，会话再写一遍只会破坏「回填单点」判据。
+        if (configStore == null && bootConfig == null) {
             ConfigMethods.backfillWindowWidth(this.configStore, windowWidthScriptPx)
         }
+        // CONTRACT-RT2-CFG16B：快照在位时 `this.configStore` 就是快照里的**同一份** store，
+        // `effective` 因而与 View 排版 / 宿主读数同源（不再有「第二次读盘的另一份真相」）。
         val effective = EffectiveConfig.of(this.configStore)
         // 脚本 px 的基准字号（渲染侧折设备像素用；口径见 [scriptFontPixelSize] 的 KDoc）。
         // 取**生效值**而不是条目原值：`Config.cs:431-435` 把 <8 抬到 8，条目原值是个会被
         // 原版忽略的数，喂给尺子就会把图形整体缩到 1/3 以下。
-        this.scriptFontPixelSize = effective.fontSize
+        // CONTRACT-RT2-CFG16：装载期快照在位时取它（与 View 排版同一份），否则按本会话生效值。
+        this.scriptFontPixelSize = bootViewMetrics?.fontSize ?: effective.fontSize
         val fontName = config[CONFIG_FONT_NAME]?.trim()?.takeIf { it.isNotEmpty() }
             ?: LineBufferConsoleSink.DEFAULT_FONT_NAME
         val logLines = config[CONFIG_MAX_LOG]?.trim()?.toIntOrNull()?.takeIf { it > 0 } ?: maxLines
@@ -812,6 +1052,10 @@ class GameSession(
                     ?.find(name)
                     ?.let { com.eratw.port.core.host.ImageSizePx(it.width, it.height) }
             },
+            // 绘制帧可用查询（MODERN-R12-WIRE）：与 imageSizeOf 同源（同一宿主帧源现读），
+            // 缺帧面判据唯一名下见 CellWidth.imgWidthPxOrNull 的文档表；null（缺省）= 未接线，
+            // 折行/游标保持图宽旧读数逐字不变。
+            frameAvailableOf = frameAvailableOf,
             // 文本像素真值（FONT-MEASURE，2026-11-06）：div 锚点/按钮列位的行内游标里，
             // **文本段**的像素不再一律按「格 × FontSize/2」的等宽近似推进，改问宿主的真字体
             // 度量 —— 与原版同一把尺（`StringMeasure.GetDisplayLength` 的 GDI+ 实测，
@@ -837,7 +1081,7 @@ class GameSession(
             // EffectiveConfig.lineHeight 同一条夹取），与 app 侧 `applyBootFontMetrics` 灌给
             // View 的是**同一个 effective**（GameHost.kt）—— sink 的逃逸判定与真机版面同尺。
             // 缺省 19 保持给不喂这参的构造点（headless 纯 JVM 测试零行为）。
-            lineHeightPx = effective.lineHeight,
+            lineHeightPx = bootViewMetrics?.lineHeight ?: effective.lineHeight,
             // 排版尺（AA 画修复）：缺省静态表，真机注入 `CanvasConsoleView.fontDisplayWidth`。
             fontWidth = fontWidth,
         )
@@ -879,6 +1123,11 @@ class GameSession(
                 expLvDef = effective.source.itemOf(ConfigKey.ExpLvDef).longList().toLongArray(),
                 pbandDef = effective.long(ConfigKey.pbandDef),
                 relationDef = effective.long(ConfigKey.RelationDef),
+                // ENGC-4：两条关键字表方言直接取档案（真源 = EngineProfileData.DIALECT），
+                // 不在这里另立开关。缺省档案 = snake 档（NAME_CALLNAME_ONLY / EXCLUDED），
+                // 与 B5 之前的建表行为逐格相同。
+                nicknameKeywords = compatProfile.nicknameKeywords,
+                relationMastername = compatProfile.relationMastername,
             ),
         )
         // `MONEYLABEL` 伪变量（spec: `VariableData.cs:962-971` 的 MONEYLABEL_Token 读
@@ -922,6 +1171,9 @@ class GameSession(
         //     据此展开宏名（`ConfigMethods.lexerConfig` 现读该槽）。`metadata` 对象本身仍按类
         //     KDoc 的生命周期表在装配期后释放，本槽只留宏表投影（≈22 条字符串）。
         installLexerMacros(store.aux, metadata.dimParseConfig.macros)
+        // M1-4 阶段二（裁定 3）：注入上下文挂 aux，供 ModRuntimeAssembly.attach 只读消费
+        // （三端口 + 侧车计划），整趟不再二次 ManifestLoader.load。
+        if (csvContext != null) ModCsvLoadContext.install(store, csvContext)
         stageMark?.invoke("session.store")
 
         // 4) 全局 #DIM（原版 ERH 先于 ERB；install 自己就是不动点重试环）
@@ -944,17 +1196,25 @@ class GameSession(
         // 门 = `Config.UseERD`（与 5b 的 install 同一个开关；关掉时原版连表都不扫）。
         // 系统变量名不是 ERD 用户变量（原版 `#DIM` 重名会被拒）⇒ 排除，避免给
         // `GETNUM(TIME, …)` 一类折出原版没有的表（见 [UserKeywordTables.foldSnapshot] KDoc）。
+        // T8：ERD 表文件清单只扫一次。4) 的折叠快照与 5b) 的挂表本来就用同一份
+        // [UserKeywordTables.discover] 口径（同一棵 ERB 树 + CSV 目录，语料 4,920 文件），
+        // 改前两段各自 walk 一遍（桌面实测 2.1-2.5s/次，占 session.tables+session.keywords
+        // 4.34s 的绝大部分）。这里在 4) 之前算一次，5b) 复用；UseERD 关闭时两处都不扫，
+        // 与改前一致（原版关掉 UseERD 连表文件都不列，ErhLoader.cs:269-272）。
+        val erdDiscovered: Map<String, List<Path>>? =
+            if (effective.bool(ConfigKey.UseERD)) UserKeywordTables.discover(gameRoot) else null
         val erdFoldTables: Map<String, Map<String, Int>> =
             if (effective.bool(ConfigKey.UseERD)) {
                 val systemNames = gameData?.registry?.all()
                     ?.mapTo(HashSet()) { it.name.uppercase() } ?: emptySet()
-                UserKeywordTables.foldSnapshot(gameRoot, systemNames)
+                UserKeywordTables.foldSnapshot(gameRoot, systemNames, erdDiscovered)
             } else {
                 emptyMap()
             }
         // 键冲突时内置表优先（原版第一跳 `GetKeywordDictionary` 的口径，ConstantData.cs:857-861）。
         val foldKeywordTables: Map<String, Map<String, Int>> =
-            erdFoldTables + (gameData?.registry?.systemKeywordTables() ?: emptyMap())
+            erdFoldTables + (gameData?.registry?.systemKeywordTables() ?: emptyMap()) +
+                relationFoldTables(store, compatProfile.nicknameKeywords)
         stageMark?.invoke("session.tables")
         // 4b) VARSIZE 折叠快照**并入用户全局**（a59cd7ff 的运行期半边）：原版 ERH 边装边
         //     注册（IdentifierDictionary.cs:429），先声明的用户全局对后声明的
@@ -998,9 +1258,17 @@ class GameSession(
         //    R7-C4：补丁侧声明追加在同一条注册链（ModPatchLoader 结果的 privateDims；
         //    补丁头 v1 无 #DIM 载体 ⇒ 补丁段恒空表，追加零行为差 —— 载体扩展后由装载器
         //    抽取，见其类 KDoc「私有 #DIM」节）。
+        //    M2-4：Mod 链侧声明（modChain 的 descriptor @private-dims，legacy 进口转码器
+        //    产物）追加在同一条链——modChain ≠ null 时 patchLoad = null（互斥 require），
+        //    三源合并无叠加；模块链函数的私有 #DIM 变量从此可解析。
         val patchPrivateDims = patchLoad?.privateDims ?: emptyList()
+        val modPrivateDims = modChain?.privateDims ?: emptyList()
         val allPrivateDims =
-            if (patchPrivateDims.isEmpty()) metadata.privateDims else metadata.privateDims + patchPrivateDims
+            if (patchPrivateDims.isEmpty() && modPrivateDims.isEmpty()) {
+                metadata.privateDims
+            } else {
+                metadata.privateDims + patchPrivateDims + modPrivateDims
+            }
         var ok = 0
         val failures = ArrayList<String>()
         for (p in allPrivateDims) {
@@ -1028,6 +1296,7 @@ class GameSession(
             UserKeywordTables.install(
                 store, gameRoot, erdWarn,
                 checkDuplicateIdentifier = effective.bool(ConfigKey.CheckDuplicateIdentifier),
+                discovered = erdDiscovered,
             )
         }
         erdWarnings = erdWarn
@@ -1109,6 +1378,10 @@ class GameSession(
             deviceFontPixelSize = deviceFontPixelSize,
             // R5.1 同源回填：脚本 px 版面宽（0 = 未接线/未布局 ⇒ 回填层不写，WindowX 保持链读数）。
             windowWidthScriptPx = windowWidthScriptPx,
+            // SQLite 迁移：同一驱动实例也喂 Console 自己的注入位（ConsoleBuiltinHost 显式覆写，
+            // 压过 `BuiltinHost by delegate`；不给的话它会回落到 rooted —— 值相同，但接线点
+            // 必须是 Console 自己的，删掉 rooted 那份也不会静默失联）。
+            sqlDriver = sqlDriver,
         )
         beginHost = ConsoleBeginHost(
             inputSink,
@@ -1170,6 +1443,17 @@ class GameSession(
         effectiveProgram.internStatementArgs()
         stageMark?.invoke("session.intern")
 
+        // 7c) 命令面审计（ENGC-3 B4）：显式目标档才扫（engineSurface 是门控开关，无印章
+        //     = 旧路径全量注册表，零扫描零干扰，同 I7）。命中即硬拒（D14）——原版在目标
+        //     引擎的命令字典里查不到名字时是装载期硬错误（LogicalLineParser.cs:531-534 +
+        //     ErbLoader.cs:469-473），这里对齐到会话装配期。扫描不物化语句（成本见
+        //     Program.scanStatementHeaders）；snake 档的合法集覆盖全部枚举，scan 直接短路。
+        engineSurface?.let { surface ->
+            val hits = CompatCommandAudit.scan(effectiveProgram, surface.family)
+            if (hits.isNotEmpty()) throw CompatProfileMismatchException(surface.family, hits)
+            stageMark?.invoke("session.compatAudit")
+        }
+
         // 8) 运行期。存档/系统语句宿主缺省 = 真存档层：落盘走 `<gameRoot>`（原版 Program.ExeDir，
         //    Program.cs:207 的同一根），路径由 SaveConfig 产出（Config.cs:467-481）。
         //    R7-C4：VM 吃 overlay Program（无补丁时 === program）；FunctionTable 尾段追加
@@ -1177,21 +1461,29 @@ class GameSession(
         runtime = ProcessRuntime(
             effectiveProgram,
             store,
-            FunctionTable(
-                if (patchMetas.isEmpty()) {
-                    metadata.functions
-                } else {
-                    metadata.functions + patchMetas
-                },
-            ),
+            sessionFunctionTable,
             VmConfig(
                 maxStepsPerRun = maxStepsPerRun,
                 maxRunMillis = maxRunMillis,
                 // ENGFIX-4：唯一真源 = 会话生效配置（RootedBuiltinHost 重放包含游戏的
                 // emuera.config；注册缺省 5000ms，置 0 关，spec: ConfigData.cs:75）。
                 infiniteLoopAlertTimeMs = effective.int(ConfigKey.InfiniteLoopAlertTime).toLong(),
+                // 两条墙钟闸共用这把尺（null = 内置单调时钟，装置/测试口径不变）。
+                monotonicMs = wallClockMs,
             ),
             consoleSink = console,
+            // RT2 G2（P1-5 余量一）：HAS_OVERRIDES 的生产消费点。非旁路装配时只在
+            // hasOverrides=true 才把链接产物的 dispatch 交给 VM；false = 恒等表，
+            // 走物理下标直调（v6.2-c 性能闸 / golden 零变化前提；核心层已在无覆盖时
+            // 把 functionDispatch 置 null，这里再显式消费判据，不让两套口径分离）。
+            // 旁路态沿用独立实参（G 车第一批的透传缝，测试锁死），逐位不变。
+            functionDispatch = when {
+                modChain != null -> if (modChain.hasOverrides) modChain.functionDispatch else null
+                else -> functionDispatch
+            },
+            // M2-6：四桶表随三视图同源进运行期，是 executeEvent 在 Mod 链在场时的唯一派发源。
+            // 旁路态（modChain == null）传 null ⇒ 走原 FunctionTable.eventCallOrder，逐位不变。
+            eventRegistry = modChain?.eventRegistry,
             // 语句层缺省吃生效配置的 `PRINTCを並べる数`（spec: `Config.cs:326` 静态字段、
             // `ConfigData.cs:63` 注册缺省 3）；显式传入的 semConfig 优先（装置对拍固定传语料值）。
             // `saveDataNos` 无论哪条路都取生效值（Config.cs:338 + :441-450）。
@@ -1214,6 +1506,15 @@ class GameSession(
             semConfig = (semConfig ?: SemConfig(printCPerLine = effective.int(ConfigKey.PrintCPerLine)))
                 .copy(saveDataNos = effective.saveDataNos)
                 .copy(timesNotRigorousCalculation = effective.bool(ConfigKey.TimesNotRigorousCalculation))
+                // JSONConfig 面（`<gameRoot>/setting.json`，非 emuera.config）：原版
+                // `JSONConfig.Data.UseScopedVariableInstruction` 决定 VARI/VARS 能否执行
+                // （FunctionIdentifier.cs:4123-4127 + IdentifierDictionary.cs:624）。旧实现
+                // 把本作 4.980 的 false 写死进缺省，eraFL 这类 setting.json=true 的游戏
+                // 会在首次执行 VARI 时抛 CanNotUseVAR —— 现按**游戏目录自己的**文件取值。
+                .copy(
+                    useScopedVariableInstruction =
+                        JsonSetting.loadGameDir(gameRoot).useScopedVariableInstruction,
+                )
                 .copy(
                     moneyLabel = rooted.moneyLabel,
                     moneyFirst = rooted.moneyLabelFirst,
@@ -1230,6 +1531,14 @@ class GameSession(
             inputSink = inputSinkOverride ?: inputSink,
             disabledFunctions = disabledFunctions,
             infiniteLoopPrompt = infiniteLoopPrompt,
+            // 装置预算「继续」的取证行落点：与装配期轨迹同一根 lambda（`GameHost` 传的是
+            // `LoadTrace.mark`），不新开写盘面。只写 `loopguard.device_budget_continue`。
+            loopGuardTrace = stageMark,
+            backgroundMsProvider = backgroundMs,
+            // ENGC-3：显式目标档才门控函数面；null = eraTW/装置旧路径（全量注册表）。
+            engineSurface = engineSurface,
+            // ENGC-4：字符串 `>=`/`<=` 方言直接取档案（缺省 FIXED = 4.981 实跑口径）。
+            stringCompareDialect = compatProfile.stringCompare,
         )
         // 暂停开关的就绪发布（见 [setBackgroundPaused]）：先发布 runtime，再在**同一把锁**
         // 下消费装配期间收到的意图 —— 两个方向都走 [backgroundPauseLock]，意图不会丢。
@@ -1470,13 +1779,33 @@ class GameSession(
      * TODO(verify)：真机 `/proc/<pid>/fd` 的计数在 recreate 前后是否回落（本机无装置，
      * 只能由 JVM 单测证明 `FileChannel` 的关闭动作发生）。
      */
+    @Suppress("TooGenericExceptionCaught")
     fun close(): Boolean {
         // 暂停中的 VM 线程必须先放行：awaitResume 的循环条件是暂停位，不清位就只能靠
         // interrupt 叫醒等待（GameHost.close 会 interrupt，但会话也可能被单独关闭）。
         // 先清位再关输入队列：VM 恢复后若撞上输入等待，会按关闭口径抛 InputSinkClosedException。
         setBackgroundPaused(false)
         inputSink.close()
-        return program.releaseMmap()
+        // SQL 会话收口（CONTRACT-SQLITE-MIGRATION §2 / L1）：SqlSession 持有真实 SQLite
+        // 连接与语句，不关就是漏 fd / 漏连接。S0 的 SqlSession 按契约实现 AutoCloseable，
+        // 这里按通用 close 调用；槽位存在即关闭，不存在即「无资源可关」，不伪造关闭成功。
+        //
+        // try/finally 口径：SQL close 失败也必须走到 Program.releaseMmap()；否则一次关闭
+        // 异常会把文件通道/映射永久留在宿主进程里。先保存失败，释放完成后再原样抛出。
+        var sqlCloseFailure: Throwable? = null
+        try {
+            (store.aux.peek<Any>(SQL_AUX_SLOT) as? AutoCloseable)?.close()
+        } catch (t: Throwable) {
+            sqlCloseFailure = t
+        }
+        val released = try {
+            program.releaseMmap()
+        } catch (t: Throwable) {
+            sqlCloseFailure?.let(t::addSuppressed)
+            throw t
+        }
+        sqlCloseFailure?.let { throw it }
+        return released
     }
 
     companion object {
@@ -1519,7 +1848,8 @@ class GameSession(
         const val DEFAULT_MAX_STEPS_PER_RUN = 20_000_000L
 
         /**
-         * 生产（真机 `GameHost`）用的步数闸：10 亿步，是**生产唯一的死循环判据**。
+         * 生产（真机 `GameHost`）用的步数**兜底闸**：10 亿步（死循环判据仍是官方那条
+         * 墙钟 + 弹框问玩家，见 [com.eratw.port.core.code.VmConfig.infiniteLoopAlertTimeMs]）。
          *
          * 口径与 [DEFAULT_MAX_STEPS_PER_RUN] 完全相同（**段落**计数：每次让出边界从 0 重算，
          * `Vm.kt` 的 `steps`），只是取值按生产标定。
@@ -1546,6 +1876,15 @@ class GameSession(
          * VmHost.askInfiniteLoop）。本常量随之**降级为移植层极端兜底**（LoopGuardCause.DeviceBudget）：
          * 量级取「正常游戏永不触及」（`EVENTTRAIN` 起床链实测 2.90 亿条仍有两个数量级余量），
          * 不是官方语义 —— ADR-005 例外登记项（随 app 弹框接线波次一并落账）。
+         *
+         * **命中后的收口（loopguard 波 · 2026-11-09）**：本常量保留（给不出「没有它也不会把
+         * 设备钉死」的正证 ⇒ 不删），但命中**不再直接判死** —— VM 经
+         * `VmHost.askDeviceBudgetContinue` 按官方同形问玩家一次（与墙钟告警**同一条**
+         * AlertDialog，见构造参数 `infiniteLoopPrompt`）：答「继续」⇒ 预算再加一整份、
+         * 原地续跑，并落一行 `loopguard.device_budget_continue` 轨迹；答「退出」或宿主没有
+         * 弹框通道（headless / 装置）⇒ 才抛 `StepLimitExceeded`（`DeviceBudget`，文案与
+         * 现场逐字不变）。官方没有这条闸这一事实不变（`Process.cs:493-512` 只有墙钟 +
+         * YesNo），所以它的正确形态只能是「问玩家」，而不是替玩家按指令数中止。
          */
         const val PRODUCTION_MAX_STEPS_PER_RUN = 1_000_000_000L
 
@@ -1696,4 +2035,50 @@ object NoSaveSystemOps : SystemOps {
     override fun saveGlobal() {}
 
     override fun loadGlobal(): Boolean = false
+}
+
+/**
+ * 装载期 `GETNUM` 折叠用的关系表快照 —— 运行期 `VarMethods.keywordIndexOf` 路由闸的折叠面镜像。
+ *
+ * ## 原版路由面（GetKeywordDictionary，四树逐处）
+ * - `RELATION`、`NAME`、`CALLNAME` 四树都指向 `relationDic`
+ *   （v24 `ConstantData.cs:869-873`、em `:1070-1074`、snake `:1449-1453`、cs `:1086-1090`；
+ *   NAME/CALLNAME 见 v24 `:874-881`、em `:1075-1080`、snake `:1454-1459`、cs `:1091-1096`）。
+ * - `NICKNAME`、`MASTERNAME` 只有 v24 受理（`ConstantData.cs:874-881`）；em/snake/cs 无此
+ *   case ⇒ 字典查不到（`GetKeywordDictionary` 返回 null）⇒ `TryKeywordToInteger` 返回 false
+ *   （v24 `ConstantData.cs:666-680`）⇒ `GETNUM` 返回 -1
+ *   （v24 `Function/Creator.Method.cs:1655-1662`；装载期 `UniqueRestructure` 只折第二参
+ *   `:1664-1668`，`CanRestructure` 于 `FunctionMethodTerm.cs:35-56` 折成 `SingleLongTerm(-1)`）。
+ *
+ * ## 为什么按 [nicknameKeywords] 登记空表
+ * em/snake 的 `relationDic` 里确有 nickname/mastername 条目（em `ConstantData.cs:705-712`、
+ * snake `:854-863`），但 GETNUM 不路由这两个名字。若照抄整表，`#DIM X = GETNUM(NICKNAME, "アリ")`
+ * 会被折成 5，而运行期给 -1 —— 侧车与装置读数两套数。故未路由的名字登记**空表**：
+ * 文件夹对内建函数「表在册但键不命中」的两跳都落空 ⇒ 折 -1，与运行期同值；
+ * 也不能不登记键 —— 那样文件夹返回 null（拒绝折叠），声明在装载期直接失败，而原版是折 -1 成功。
+ *
+ * 表体本身取 `store.relationKeywords()`：与运行期 `keywordToInteger` 的 RELATION 分支同一张
+ * `templatesByName`，装载期快照在 `registerTemplate` 之后（GameSession 第 3 步）、折叠
+ * （第 4 步）之前取，保证同一份角色的 name/callname/nickname/mastername 两侧口径一致。
+ *
+ * 键名单（谁无条件路由、谁受 [nicknameKeywords] 门控）读生成物常量
+ * [EngineProfileData.RELATION_ROUTED_KEYWORDS] / [EngineProfileData.RELATION_GATED_KEYWORDS]；
+ * 运行期 `VarMethods.keywordIndexOf` 读同一对常量 —— 两处同源，不再各抄一份字面名单（E4）。
+ */
+internal fun relationFoldTables(
+    store: VariableStore,
+    nicknameKeywords: NicknameKeywordPolicy,
+): Map<String, Map<String, Int>> {
+    val table = store.relationKeywords()
+    // 名单单源：input yaml `dialect.getnum_nickname_mastername.keywords` → 生成物常量。
+    // 运行期 `VarMethods.keywordIndexOf` 读的是同一对常量，两处不再各抄一份字面名单（E4）。
+    val routed = EngineProfileData.RELATION_ROUTED_KEYWORDS.associateWith { table }
+    val extra = if (nicknameKeywords == NicknameKeywordPolicy.WITH_NICKNAME_MASTERNAME) {
+        EngineProfileData.RELATION_GATED_KEYWORDS.associateWith { table }
+    } else {
+        // 路由缺席 = 原版字典为 null 的方向：折 -1，不折正数、也不拒绝折叠。
+        val absent = emptyMap<String, Int>()
+        EngineProfileData.RELATION_GATED_KEYWORDS.associateWith { absent }
+    }
+    return routed + extra
 }

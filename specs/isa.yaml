@@ -1471,7 +1471,14 @@ instructions:
 #     （:3566），而 CALLF/TRYCALLF 看了（:1150 / :1274）——内存态重载 ERB 时 CALL 的装载期绑定不刷新。
 # 帧切换与 ARG/ARGS 绑定顺序（契约 C1/C5 依据）：
 #   1) CalledFunction.ConvertArg CalledFunction.cs:128-202 —— 在**调用者帧**内把 RowArgs 规整成
-#      UserDefinedFunctionArgument：数组长度 = TopLabel.Arg.Length（:137），实参多于形参 -> errMes TooManyFuncArgs（:138-142）；
+#      UserDefinedFunctionArgument：数组长度 = TopLabel.Arg.Length（:137）；
+#      **实参多于形参 = 静默丢弃**（4.981 口径，2026-11-12 校准）：复刻目标
+#      reference/emuera-skia-4.981/Emuera/Runtime/Script/Process.CalledFunction.cs:212-357 只循环
+#      func.Arg.Length 次、无 1.824 的 `array.Length < srcArgs.Count -> TooManyFuncArgs` 硬判
+#      （fork 更新记录 CHANGELOG.md「ConvertArg() 多余参数静默丢弃：移除 TooManyFuncArgs 报错」）；
+#      reference/emuera-cs 的 :137-142 只是历史对照锚。现场形态：fromEN/Addition/lib/DATEPICKER.ERB:56
+#      `GET_MONTH(ACTIVE_MONTH, 1)` 打在日時天候管理.ERB:189 的 `@GET_MONTH(ARG)`（单形参）上，
+#      真机正常出日历；1.824 口径会让「婚礼策划 → 日期」抛「GET_MONTH函数: 参数过多」。
 #      逐位：REF 形参必须是带下标的 VariableTerm 且类型匹配（:147-163）；缺失实参取 #DIM ARG 默认值 Def[i]（:167），
 #      无默认且 CompatiFuncArgOptional 关 -> 错（:168-172）；int/str 失配按 CompatiFuncArgAutoConvert 决定是否 TOSTR 包裹（:174-198）。
 #   2) UserDefinedFunctionArgument.SetTransporter UserDefinedFunctionArgument.cs:35-69 —— **按下标升序把全部实参求完值**
@@ -1540,9 +1547,15 @@ instructions:
 #      语料装载 ⇒ 装载期注册表恒空，照抄原版相位会把已接桩的 ModelSet/Chat 全部误杀（0.2.39 上报簇
 #      的复发方向）。故裁决点后移到「该行第一次执行」（宿主装配在 drive() 之前完成，此刻注册表已是
 #      终表），机制 = 行级联结记录 SharpLinkTable（fn/PluginMethods.kt）：
-#      首次执行未命中 → 把 `No native method <名> found` 记进行级错误态并当场抛；命中 → 方法本体
+#      首次执行未命中 → 把 `No native method <名> found` 记进行级错误态；命中 → 方法本体
 #      缓存绑定；**此后不重查**（= 原版联结期绑死 CallFunc / IsError，注册表再长出同名也不复活、
-#      clear 已绑定行不受影响）。执行期抛的是**记录值**（Process.cs:1017-1019 抛 ErrMes 的同构），
+#      clear 已绑定行不受影响）。
+#      **执行期处置 = 通用策略（2026-11-09，ADR-005 有意偏离，verify-notes §35）**：官方在
+#      Process.cs:1017-1019 抛**记录值**中断脚本；移植侧**不抛** —— 把同一句经 ConsoleSink.printError
+#      打一行错误行后**跳过该语句**（实参不求值、不回写 ⇒ 无副作用），脚本继续；每行键只提示
+#      一次（@CHAT_ACTION 挂 EVENTCOMEND，一段对话会走十几次，逐次打会刷屏）。
+#      已撤回：曾按插件名写本机实现（platform/chat/ChatCallSharpHost + MiniJson，44d9bb20 共 993 行）
+#      —— per-plugin 实现不 scale，且只是把「这一个插件」补成能跑，不是机制。
 #      两条通道：flat 生产路 `StatementExecutor.resolveSharpMethodFlat`（行键 = 语句池下标）与
 #      旧对象树对拍路 `resolveSharpMethodTree`（行键 = SpCallSharpArgument 实例身份）。
 #      const 名判定 = funcNameTerm is StrLiteral（原版名字恒 SingleStrTerm ⇒ IsConst 恒真，
@@ -1568,9 +1581,11 @@ instructions:
 #      ⇒ 即 ChatEx/ChatStream/ChatJson/ChatRaw/HttpGetJson 在本包语料不可达，不设桩、不测。
 #    · 原生名**不是引擎注册表成员**：查表走 `PluginManager.GetInstance()` 的
 #      HasMethod/GetMethod（FunctionIdentifier.cs:1201-1202/:1208），条目由玩家侧 .NET 插件注册
-#      ⇒ 移植层只能由宿主设桩：app `GameHost.wireCorpusNativeMethods`。
-#      钉在 core/proc/CallSharpCorpusCensusTest（可达名集合 + 未注册名报错口径）与
-#      core/proc/AiChatSharpStubTest（有桩/无桩两侧）。
+#      ⇒ 移植层保留宿主注册通道（app `GameHost.wireCorpusNativeMethods`，本版注册表**为空** ——
+#      不加载 .NET 插件 DLL），未提供的方法按通用策略在装载期告警、执行期提示后跳过
+#      （2026-11-09，ADR-005 有意偏离，verify-notes §35）。
+#      钉在 core/proc/CallSharpCorpusCensusTest（可达名集合 + 未注册名提示口径）与
+#      core/proc/AiChatSharpStubTest（无桩侧：两句提示按序、脚本不中断）。
 # 3) 变量实参回写的**有意偏离登记**（重要：这一条不是 bug 修正建议，是记账）：
 #    · 官方回写链**没有常量闸**：FunctionIdentifier.cs:1212-1234（DoInstruction）的 :1218-1232
 #      对每个 `aExpression is VariableTerm` 的实参位直接 `variableTerm.SetValue(...)`
@@ -1590,7 +1605,8 @@ instructions:
 #      `对话调用.erb:35` 的三个实参 模型API/模型Key/模型名称 全是
 #      `#DIMS CONST`（`ERB/DLC/AI对话补丁/AI返回参数.ERH:6/:7/:8`），走到该行即触发。
 #      判据钉 = `core/proc/ChatActionRealCorpusReproTest`（真语料事件 + 真全局维表登记链，
-#      断言上屏三要素与常量格不动；破坏性验证＝摘掉该闸恰好红「有桩」那一例，红的正是上面那句错）。
+#      无桩侧断言两句错误行按语料序上屏且脚本不中断；有桩侧断言整段跑完 + 降级提示上屏；
+#      破坏性验证＝摘掉回写常量位跳过恰好红「有桩」那一例，红的正是上面那句错）。
 #      既有 `AiChatSharpStubTest` 仍测不出这一条：它的 fixture 用 `SymbolTable().declareVariable`
 #      手搭（:56-58），不带 CONST 标志、也不接真全局维表。
 #    · 等值性说明：官方「静默写回同值」 vs 解法「跳过回写」，对现存全部语料观测等值
@@ -1601,7 +1617,7 @@ instructions:
   kind: call
   arg_form: SpCallSharpArgment (SP_CALLCSHARP)
   semantics: "调用宿主/插件注册的本地 C# 方法（原生名**不是**引擎注册表成员，来自玩家侧 .NET dll）；实参逐位转成参数槽、执行后把**变量实参**按槽回写。回写在官方侧没有常量闸，移植侧的偏离见下方注释块第 3 条。"
-  errors: "执行期（走到该行时）抛 CodeEE，文案**原样** `No native method <调用名> found`（<调用名> = 脚本原文里的调用名，4.981 真形 = ModelSet）。官方相位：装载/联结期只记错不抛，运行期才抛 —— 见下方注释块第 1 条。旧条目「解析期找不到本地方法报解析错误」与实现不符，已废。"
+  errors: "装载期（联结期相位）不抛，只记行级错误 + 收警告统一上屏；执行期**亦不抛**（通用策略，2026-11-09，ADR-005 有意偏离，登记见 verify-notes §35）：把文案**原样** `No native method <调用名> found`（<调用名> = 脚本原文里的调用名，4.981 真形 = ModelSet）经 ConsoleSink.printError 打一行错误行后**跳过该语句**（实参不求值、不回写），脚本继续；每行键只提示一次。官方原文在此处抛 CodeEE 中断脚本（Process.cs:1017-1019），见下方注释块第 1 条。"
   display_effect: ''
   source: FunctionIdentifier.cs:1169-1235
   aliases: CALLSHARP

@@ -18,15 +18,17 @@ import java.nio.file.Path
  *    不许退成 skip——「语料被换/被改」必须让闸报红；
  * 3. 判根失败（就近找不到 DIM.ERH）同样判红：环境变量既然显式指了根，根不完整就是口径事件。
  *
- * 读数出处（2026-11-05 本路实测）：
- * - 版本锚：两根 `ERB/DIM.ERH:2`，4.980=20260326、4.981=20261017；
+ * 读数出处（2026-11-05 本路实测；2026-11-14 语料换代 261111 随 V4_981 列重锚）：
+ * - 版本锚：`ERB/DIM.ERH:2`，4.980=20260326、4.981=20261111（261017 时代的 20261017 已随
+ *   语料换代退役，本枚举不再收列 —— 对 261017 根跑审计族判红属预期）；
  * - .als 数 / 可装载槽：4.980=19/18、4.981=23/20（AliasLoaderTest 两根实跑 + 目录清点）；
  * - ITEMNAME/ITEM 尺寸：4.980=1000/1000、4.981=1200/1200（CSV/VariableSize.csv:17/:74 两根对照）；
  * - 名字表简体化 5 处：Abl:0 / Exp:0 / Talent:0 / Mark:8 / Cflag:1（两根 CSV 逐格对照，
  *   其余本类断言过的格子两根同值）；
  * - ERD 快照表：4.980 六张 / 4.981 十四张（UserKeywordTablesTest 两根实跑读数）；
- * - smoke 清单与切片：4.980=3,971 文件 / 110,066 切片、4.981=4,258 文件 / 117,055 切片
- *   （`:core-vm:corpusSmoke` 两根单跑统计行）；
+ * - smoke 清单与切片：4.980=3,971 文件 / 110,066 切片、4.981=4,324 文件 / 118,527 切片
+ *   （`:core-vm:corpusSmoke` 两根单跑统计行；4.981 于 2026-11-14 L34 重测 —— 同一
+ *   `NOW_VERSION=20261017` 下语料加了口上包，4,258→4,324 文件、117,055→118,527 切片）；
  * - `emuera.config` 行数 / 匹配不上条目表的行数：4.980=97/1、4.981=103/7
  *   （configroot 波 2026-11-05 两根单跑三层链逐行打印；差额 6 行正是 4.981 独有的
  *   `SKIASHARP`×3 / `RENDERING BACKEND` / `PLUGIN AVAILABLE WARNING` /
@@ -108,10 +110,19 @@ enum class CorpusProfile(
         emueraConfigMaxLog = 900,
     ),
     V4_981(
-        nowVersion = 20261017L,
-        smokeFileCount = 4_258,
-        smokeSliceFloor = 117_055,
-        alsPhysical = 23,
+        // 2026-11-14 语料换代 261017→261111（蛇版官方仓提交 278662ced，NOW_VERSION 20261111）：
+        // 本列改钉 261111 实测值。261017 转退役留档（golden 基准采集根、回归对拍根），
+        // 不再持有审计列 —— 对退役根跑审计族按红线 2 判红属预期（换根=显式事件）。
+        // 实测出处（2026-11-14 本机 261111 根）：NOW_VERSION=DIM.ERH:2；
+        // smoke = erbcc compileCorpus 读数（文件 4365 / 切片 119124，含本机口上包）；
+        // als 25/20 = CSV 目录清点（新增 EI_BASE.als / EI_FLAG.als；二者不在 GameDataLoader.SLOT_FILES
+        // 槽位表内，只计入物理数、不计入可装载槽 —— AliasLoaderTest 读数）；
+        // ITEM/ITEMNAME 尺寸与五处名字表锚：两根 CSV 逐格对照同值；
+        // emuera.config 两根逐字节相同 ⇒ config 族读数不变。
+        nowVersion = 20261111L,
+        smokeFileCount = 4_365,
+        smokeSliceFloor = 119_124,
+        alsPhysical = 25,
         alsLoadableSlots = 20,
         itemNameSize = 1_200,
         itemSize = 1_200,

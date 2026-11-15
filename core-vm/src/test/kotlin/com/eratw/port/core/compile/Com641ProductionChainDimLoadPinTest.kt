@@ -33,10 +33,10 @@ import org.junit.jupiter.api.Assumptions
  * 语料原文（4.981 专属；4.980 无 COMF640-641 目录 ⇒ 本钉按假设跳过）：
  * `ERB/コマンド関連/COMF/外出系/COMF640-641_月虹市場&アビリティカード/`
  * `COMF641 アビリティカード_カードパラメータ.ERH`
- *  - 1 基 `:225` 单独一行左花括号开块
- *  - 1 基 `:226` 声明行（等号后为空）
- *  - 1 基 `:227`–`:259` 33 个元素，每行 `1 << COM641_AC_カードIDX_*`，可再按位或复合
- *  - 1 基 `:260` 单独一行右花括号收块
+ *  - 1 基 `:233` 单独一行左花括号开块（2026-11-14 语料换代 261111：块前移 8 行，261017=:225）
+ *  - 1 基 `:234` 声明行（等号后为空）
+ *  - 1 基 `:235`–`:267` 33 个元素，每行 `1 << COM641_AC_カードIDX_*`，可再按位或复合（idx30 上游改为裸 0）
+ *  - 1 基 `:268` 单独一行右花括号收块
  * 块合并口径 spec: EraStreamReader.cs:130-184（移植侧 `LogicalLineReader.kt:214-252`）。
  * 按位折叠口径 spec: OperatorMethodManager.cs:467-507（单 `&`/`|`/`^` 按位，注册 :737-739）
  * 与 :523-534（`<<`，注册 :741）； CONST 标识符自身可折叠 spec: UserDefinedVariableToken.cs:35。
@@ -44,7 +44,7 @@ import org.junit.jupiter.api.Assumptions
  * 折，整条声明报「尺寸/初值表达式有多余内容」整表丢弃（34e307e9 / 872b5934，2026-11-04），
  * 这就是那 46 份上报的因；本钉的第 3 例把这个失败方向钉死。
  *
- * 期望值是**独立算出来的**：用真文件 1 基 :209-213 的五个标量 CONST
+ * 期望值是**独立算出来的**：用真文件 1 基 :217-221 的五个标量 CONST
  * （ステータス補助 0 / 戦闘補助 1 / 技能補助 2 / うふふ補助 3 / 特殊効果 10）代入
  * :227-259 的元素式，按 Python 原生按位运算求值，不经移植侧解析器（与 v039 的
  * `expectedBits` 逐位对拍一致，两侧独立推导互验）。
@@ -59,13 +59,13 @@ class Com641ProductionChainDimLoadPinTest {
         const val ERH_DIR = "コマンド関連/COMF/外出系/COMF640-641_月虹市場&アビリティカード"
         const val ERH_REL = "$ERH_DIR/$ERH_NAME"
 
-        /** 合并后的逻辑行号 = 收块行所在物理行（1 基 :260 ⇒ 0 基 259）。 */
-        const val MERGED_LOGICAL_LINE = 259
+        /** 合并后的逻辑行号 = 收块行所在物理行（1 基 :268 ⇒ 0 基 267；261017=:259）。 */
+        const val MERGED_LOGICAL_LINE = 267
 
-        /** 1 基 :227-259 共 33 个元素，按位独立求值。 */
+        /** 1 基 :235-267 共 33 个元素，按位独立求值（idx30 = 裸 0，261017 = 2）。 */
         val EXPECTED_BITS = longArrayOf(
             1024, 6, 6, 7, 7, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1, 1,
-            2, 2, 2, 1, 1, 2, 2, 4, 1025, 4, 2, 6, 6, 10, 2, 6, 5,
+            2, 2, 2, 1, 1, 2, 2, 4, 1025, 4, 2, 6, 6, 10, 0, 6, 5,
         )
 
         /** 全树只编这一支目录（其余定义仍进符号表），把 40 秒级的全量切片压到本簇规模。 */
@@ -117,10 +117,10 @@ class Com641ProductionChainDimLoadPinTest {
         assertEquals(MERGED_LOGICAL_LINE, d.line, "逻辑行号 = 收块行物理行（0 基）")
         // 收集点必须收到**合并后**的整块：空等号起头 + 首元素 + 末元素，且花括号不进内容
         assertTrue(d.raw.startsWith("#DIM CONST $BIT_ARRAY = "), "合并串应以空等号起头：${d.raw.take(60)}")
-        assertTrue("1 << COM641_AC_カードIDX_特殊効果," in d.raw, "首元素（1 基 :227）应并入：${d.raw.take(120)}")
+        assertTrue("1 << COM641_AC_カードIDX_特殊効果," in d.raw, "首元素（1 基 :235）应并入：${d.raw.take(120)}")
         assertTrue(
             "1 << COM641_AC_カードIDX_ステータス補助 | 1 << COM641_AC_カードIDX_技能補助" in d.raw,
-            "末元素（1 基 :259）应并入",
+            "末元素（1 基 :267）应并入",
         )
         assertEquals(32, d.raw.count { it == ',' }, "33 元素 ⇒ 32 个逗号：${d.raw}")
         assertTrue('{' !in d.raw && '}' !in d.raw, "块标记不进逻辑行内容")

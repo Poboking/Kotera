@@ -1526,11 +1526,15 @@ private fun invalidColorMatrix(name: String, a: Long, b: Long): String =
  * 两支都不成立时原版留一份「行全是 null」的 float[5][] 给 ColorMatrix（空引用），
  * 这里按本包惯例折成 CodeEE。
  *
- * 元素换算：**每个元素 `/ 256f`**（spec: :9432 与 :9459）⇒ 脚本侧的 256 就是 1.0，
- * 单位阵写成对角 256、其余 0（语料实况
+ * 元素换算：**每个元素 `/ 256f`**（spec: :9432 与 :9459；蛇版
+ * `Creator.Method.cs:7050-7060` 的 `cm[x][y] = array[e1+x, e2+y] / 256f` 同式）⇒ 脚本侧的
+ * 256 就是 1.0，单位阵写成对角 256、其余 0（语料实况
  * `ERB/ステータス表示関連/グラフィック特殊効果.ERB:288-295` 的「夜」预设正是
- * 对角 90/90/200/256/256）。返回值是 25 个 Float 的**行主序**表，`m[源通道*5 + 目标通道]`，
- * 通道顺序与夹取/舍入口径见 [GraphicsBuffer.applyColorMatrix]（含 2026-10-23 的实测读数）。
+ * 对角 90/90/200/256/256）。返回值是 25 个 Float 的**行主序**表，`m[目标通道*5 + 源通道]`，
+ * 通道顺序、第 5 列偏移与夹取/舍入口径见 [GraphicsBuffer.applyColorMatrix]。
+ * 1.824 的装载式与本函数逐字同形，但其消费侧是 GDI+ `ColorMatrix`（行 = 源通道），且该树
+ * 不是复刻目标（`specs/engine-profiles.yaml:60-64` 标为 `cs_reference` / `NOT a target engine`）；分歧只在消费侧，
+ * **装载这里不做转置**，否则会与蛇版 `ReadColormatrix` 的元素次序失配。
  *
  * 下标求值顺序照抄原版：先 `ReadRectangle`（:7441）再读这里，本函数内部按
  * `Index1..Index3` 的顺序求值（:9413-9421 / :9443-9445）。

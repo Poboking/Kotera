@@ -180,7 +180,7 @@ class OptionPatchErbcProbeTest {
                         val full = snap.joinToString(" ⏎ ") { l ->
                             l.segments.joinToString("") { it.text }.trim().take(70)
                         }
-                        // 右栏候选快照（MainActivity.refreshShell → LeanOptionFilter → ShellUi.chips）：
+                        // 右栏候选快照（MainActivity.refreshShell → RailOptionRules.filterOptions → ShellUi.chips）：
                         // 逐条记 label/value/printsOwnNumber/ordinal，看补丁页往右栏塞了什么。
                         val opts = console.currentOptions()
                         val optText = opts.take(40).joinToString(" | ") { o ->

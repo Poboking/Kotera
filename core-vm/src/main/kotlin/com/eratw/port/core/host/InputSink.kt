@@ -84,6 +84,28 @@ data class InputRequest(
      * 语义按语料用法推定（`DLC/实用设置补丁/实用设置.ERB:571-573`）。
      */
     val macroEnabled: Boolean = true,
+    /**
+     * 无焦点等待（4.981 `NF` 后缀家族：`TINPUTNF` / `TINPUTSNF`）。
+     *
+     * 原版 `InputRequest.NoFocus`（`Runtime/InputRequest.cs:51`，注释「不强制滚动」）由
+     * `TINPUT_Instruction` / `TINPUTS_Instruction` 按构造参数 `_noFocus` 置位
+     * （`Instraction.Child.cs:1100`、`:1154`），到达控制台时据此走 `WaitInputNoFocus`
+     * 而不是 `WaitInput`（`:1126-1127`、`:1179-1180`）。两条等待路径的差别在
+     * `EmueraConsole.cs:716-755`（非 NF：清 `nfUserScrolledBack` 并把滚动条强拉回底部）
+     * 与 `:780-818`（NF：继承上滚状态、进等待前刷新一次 UI、置状态 `WaitInputNoFocus`）；
+     * 宿主再用 `IsWaitInputNoFocusState`（`:357`）在鼠标点击（`MainWindow.cs:949`）与
+     * 按键（`:1591`）两处跳过强制贴底。
+     *
+     * 取值语义：true = 本次等待不抢焦点、不把玩家从历史位置拽回底部；缺省 false =
+     * 既有 INPUT / TINPUT / BINPUT / WAIT 系的非 NF 路径逐字不变。交付写 RESULT 还是
+     * RESULTS、超时推进、消息跳过等都不看这一位（原版也只在等待入口与滚动侧读它）；
+     * 取值等待仍照常发生，`TINPUTSNF` 不是「不等输入」。
+     *
+     * TODO(verify)：`TONEINPUTNF` / `TONEINPUTSNF`（`FunctionIdentifier.cs:203-204`）在本移植
+     * 的语句池与别名表尚未登记（`OpcodeTable.kt:1304-1305` 只登记了 `TINPUTNF` / `TINPUTSNF`，
+     * 4.981 语料零命中）；补登记属注册面改动，需另波与 EngineProfileData 定向闸同跑。
+     */
+    val noFocus: Boolean = false,
 ) {
     enum class InputType { INT, STR }
 

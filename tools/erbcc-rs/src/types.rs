@@ -32,8 +32,10 @@ pub const ERBC_DIR_NAME: &str = "erbc.v1";
 /// 仓库根定位标记（与 `ErbcCompilerDigest.MARKER_REL` 同源）。
 pub const MARKER_REL: &str = "core-vm/src/main/kotlin/com/eratw/port/core/compile/ErbProgramCompiler.kt";
 
-/// 编译器指纹的源码根（与 `ErbcCompilerDigest.SOURCE_ROOT_REL` 同源）。
-pub const COMPILER_SOURCE_ROOT_REL: &str = "core-vm/src/main/kotlin";
+/// 编译器指纹的源码根集合（与 `ErbcCompilerDigest.SOURCE_ROOTS_REL` 同值同序）：
+/// core-vm 主源集 + erbcc 驱动两棵整树。每根都必须存在（缺一根 = 判据缺一角，
+/// `digest::compiler_digest` 直接报错，不许静默降级成单根继续算）。
+pub const COMPILER_SOURCE_ROOTS: &[&str] = &["core-vm/src/main/kotlin", "tools/erbcc/src/main/kotlin"];
 
 /// 引擎版本的唯一来源：`core-vm/.../Version.kt` 里的 `const val VERSION`。
 /// 禁止在任何侧硬编码版本串——读不到就报错，不返回默认值冒充。

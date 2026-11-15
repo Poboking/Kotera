@@ -105,17 +105,19 @@ enum class ConfigApplyMode {
          *     = `WindowX - max(2, FontSize/6)`，`Config.cs:461-466`）与 `WindowY` 派生的
          *     可见行数；两者都在会话装配期烘进条目表（`GameSession.configStore` 走
          *     `applyChainTo`，运行期不再现读盘），故判 [RESTART]。
-         *     **但 Android 上它们不是版面的输入**（2026-11-08 玩家回归根修）：
-         *     原版 `Config.WindowX` 是主窗口客户区宽的**回填值**（`MainWindow.cs:726`），
-         *     Android 没有可调整大小的窗口，客户区宽由屏幕决定；
-         *     `GameHost.applyBootFontMetrics` 因此**有意不**把 `effective.windowX` 交给
-         *     `applySourceWindowMetrics`（传 0 = 未接线 ⇒ 满宽解算），只保留反向的
-         *     `View.windowWidthScriptPx()` → `seedHostState` 播种链。
-         *     0.2.43 曾把配置宽灌回 View，旧盘上该键回落到引擎缺省 760 时把列数压到 80，
-         *     `DEBUG.ERB:582` 的 `MAXWIDTH()/90` 除零（详见 `GameHost` 的 KDoc 与
-         *     `render/view/ScreenLayoutWindowNarrowingRegressTest`）。
-         *     所以：「设置页改窗口宽」仍要重启才吃到（核心那把尺变了），
-         *     但**不会再改变屏上版面宽/列数** —— 这两件事不要混成一句「热更」。
+         *     Android 上 `WindowX` 同时是**版面输入**——但只认「链上显式写过、且值不是引擎
+         *     裸缺省」的值（2026-11-10「调窗口宽度失效」根修）：`GameHost.applyBootFontMetrics`
+         *     按 `ConfigChainLoad.touchedKeys` 判键有没有被三层链写过，再按「值 ≠ 裸缺省 760」
+         *     排掉设置页写盘侧「补全缺键」历史上追加进旧盘的伪造 760（与玩家显式 760 不可区分，
+         *     而 760 折算恒 ≈81 列、任何设备都落 `DEBUG.ERB:582` 的 `MAXWIDTH()/90` 除零区），
+         *     两闸皆过才交给 `applySourceWindowMetrics`（原版「按配置开窗」语义，
+         *     `MainWindow.cs:687-688`）；否则保持未接线（满宽解算）。
+         *     0.2.43 曾把配置宽无条件灌回 View，旧盘上该键回落到引擎缺省 760 时把列数压到 80
+         *     （详见 `GameHost` 的 KDoc 与 `render/view/ScreenLayoutWindowNarrowingRegressTest`）；
+         *     之后一度全断反向输入，又把「调窗口宽度」做成了死功能 —— 两个方向的根子是同一个：
+         *     **裸缺省不是玩家输入，显式写下的非缺省值才是**。
+         *     所以：「设置页改窗口宽」仍要重启才吃到（版面在会话装配期解算，核心那把尺也变了）；
+         *     `WindowY` 依旧不是版面输入（纵向观感零变化，恒不接线）—— 这两件事不要混成一句「热更」。
          *   * `PrintCPerLine` / `PrintCLength` / `MaxLog` / `ButtonWrap` —— 烘进控制台与语句层
          *     （`GameSession.kt:270-281`、`:420-422`）；
          *   * `SaveDataNos` / `SystemSaveInBinary` / `ZipSaveData` / `UseSaveFolder` —— 烘进存档层

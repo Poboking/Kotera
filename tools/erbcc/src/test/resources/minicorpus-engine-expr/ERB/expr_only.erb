@@ -1,0 +1,10 @@
+@FIXTURE_EXPR_ONLY_BUILTINS
+; minicorpus for the expression-position unknownFunctions probe (B7-E2E, ENGCOMPAT 8.5).
+; SQL_CONNECT sits in the snake function surface but is absent from the v24_1824 and
+; em_ee_1824_v22 surfaces, so compiling under those profiles must list it in the
+; unknownFunctions array of --engine-report at the physical 1-based line of the call
+; (line 8 below), while snake_4981 lists nothing and the default path stays untouched.
+; The IF condition is an expression position on purpose, not a line-head command.
+IF SQL_CONNECT("127.0.0.1", 3141) < 0
+ENDIF
+PRINTL expression probe executed

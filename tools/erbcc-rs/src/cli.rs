@@ -2,23 +2,46 @@ use crate::types::{
     current_dir, erbcc_version, find_repo_root, ErbccError, Outcome, EXIT_FAIL, EXIT_OK, EXIT_USAGE,
 };
 
-/// USAGE 文案 —— 逐字复刻 Kotlin `Main.kt:49-107` 的 `private const val USAGE`。
+/// USAGE 文案 —— Kotlin `Main.kt:53-123` 的 `private const val USAGE` 的**声明式子集**。
+///
+/// 口径（MODERN-R9-A 起）：Rust CLI 是 Kotlin CLI 的**子集**，不是逐字副本。
+/// 权威文案 = `tests/data/rust-scan/kotlin-usage.txt`（真 Kotlin 工具链 `--help` 的原始
+/// stdout 字节；body 全 LF + 结尾一个 `\r\n`，即 JVM `println` 那道行终止符）。本常量的
+/// **期望值** = 该基准主体逐行应用 `tests/data/rust-scan/usage-subset.tsv` 之后的结果 ——
+/// 不许多一个字节、少一个字节，由
+/// `tests/cli_contract.rs::usage_equals_kotlin_baseline_with_declared_subset_applied` 钉住；
+/// 未在 tsv 里声明的漂移（Kotlin 又加开关、或本常量自己乱加乱删）仍然红。
+/// Kotlin 侧新增开关时：先重出基准，再在 tsv 里 `drop`/`sub` 声明缺口，最后在下面的
+/// 「逐条遗漏理由」补一条 —— 三处缺一处就红。
 ///
 /// 内容含 `*.erb/*.erh`（即出现 `/*` 字符对），故必须放在**字符串字面量**里而非块注释
 /// （AGENTS §2.5：块注释正文出现 `/*` 会开嵌套注释吞掉闭合符）。
-/// 结尾随 Kotlin 一样带一个换行（`Main.kt:106` 后、`"""` 前的 `\n`），
-/// 再经 `println!` 追加换行，与 Kotlin `println(USAGE)` 的字节输出一致。
+/// 结尾随 Kotlin 一样带一个换行（`Main.kt:123` 的 `"""` 前的 `\n`），再经 `println!`
+/// 追加换行，与 Kotlin `println(USAGE)` 的字节输出一致。
 ///
-/// ①（rust-cli-polish）：audit 段的 `--allow` / `退出码` 两行写明「白名单不是合法 UTF-8 ⇒ 退出码 2
-/// 拒绝」与「文件不存在不是错误」，对位 Kotlin 的严格解码 `Main.kt:650-663`
-/// （`readAllowListText` 走 `CodingErrorAction.REPORT`，坏字节抛 `IllegalStateException`）与
-/// `Main.kt:487-491` → `err()`（`Main.kt:163-166` 恒退 2）；缺档提示见 `Main.kt:680`
-/// （`readAllowList` 打一行后返回 `AllowList.EMPTY`，不占退出码）。
-/// **改这两行时刻意不增减行数**（`Main.kt:150/163/487/650/680` 等行号在全仓各处被点名引用，
-/// USAGE 里多一行会把 `Main.kt:107` 之后的所有引用整体错位）。入库基准
-/// `tests/data/rust-scan/kotlin-usage.txt` 由**真 Kotlin 工具链** `--help` 的原始 stdout 落盘
-/// （body 全 LF + 结尾一个 `\r\n`，即 JVM `println` 本机行终止符；生成命令见交付报告），由
-/// `tests/cli_contract.rs::usage_text_is_byte_identical_to_kotlin_body` 逐字节钉住。
+/// ## 逐条遗漏理由（声明在 tsv，理由只写在这里）
+///
+/// 1. `compile --mode` + `--allow-parse-failures`（R7-PATCH-MOD 的 compat 容错档）：
+///    Rust `compile` 只走 strict「任何解析失败都拒落盘」这一条路（`cmd_compile`），
+///    compat 的 THROW 空体桩、`degraded-slices` manifest 段与容错清单校验一行都没移植
+///    ⇒ 用法行用 `sub` 回落成 `[--limit <N>]` 收尾，说明 8 行（`--mode` 起 5 行 +
+///    `--allow-parse-failures` 3 行）整行 `drop`。
+/// 2. `audit --reachability` / `--reach-out`（R6 的可达性/可移植性报告）：Rust `audit` 只做
+///    「解析期使用点 × 运行期真实命名空间」的未绑定符号审计，不产可达集、不产
+///    reachability.tsv ⇒ 2 行 `drop`。
+/// 3. `audit --reach-expect` / `--reach-write-expect`（R8-B 的读数基线对拍）：两者都以 R6
+///    的读数为输入，Rust 侧连带缺 ⇒ 2 行 `drop`。
+/// 4. `audit` 的「退出码」行：Kotlin 版把「可达性读数与基线有漂移」并进 1 档、把「两个基线
+///    开关缺 `--reachability` 或互斥同给」并进 2 档；Rust 没这两族开关，照抄就是广告不存在的
+///    失败档 ⇒ 用 `sub` 回落成不带这两句的旧措辞。
+///
+/// 唯一**不许**动的措辞是 `--allow` 那行与含它的「退出码」行：`--allow` 白名单不是合法 UTF-8
+/// ⇒ 退出码 2 拒绝那一档两腿都有（Kotlin `Main.kt:859-871` 的 `readAllowListText` 走
+/// `CodingErrorAction.REPORT`，坏字节抛 `IllegalStateException`（`:870`，正文见 `Main.kt:879-881`
+/// 的 `allowListCharsetRed`）→ `Main.kt:642-645` 的 `cmdAudit` 捕获 → `Main.kt:179-182` 的
+/// `err()` 恒退 2；缺档提示见 `Main.kt:887-890`，打一行后返回 `AllowList.EMPTY`、不占退出码）。
+/// **这两行刻意不增减行数**：`Main.kt` 的 `USAGE` 区间（`:53-123`）与 `:123` 之后的行号在全仓
+/// 各处被点名引用，USAGE 里多一行会把它们整体错位。
 pub const USAGE: &str = r#"erbcc - EraBasic 编译器 (eratw-android)
 
 用法:
@@ -79,18 +102,18 @@ scan 选项:
   union  磁盘与索引的并集
 "#;
 
-/// CLI 分发：子命令 → 各路 `execute`。逐项复刻 Kotlin `Main.kt:109-126` 的 `main`。
+/// CLI 分发：子命令 → 各路 `execute`。逐项复刻 Kotlin `Main.kt:125-142` 的 `main`。
 ///
-/// - 空参 / `--help` → 打 USAGE 退 0（`Main.kt:111-112`）；
-/// - `--version` → 打 `erbcc <引擎版本>` 退 0（`Main.kt:113`，版本串走
+/// - 空参 / `--help` → 打 USAGE 退 0（`Main.kt:127-128`）；
+/// - `--version` → 打 `erbcc <引擎版本>` 退 0（`Main.kt:129`，版本串走
 ///   `types::erbcc_version`，禁止硬编码）；
-/// - `scan` → `cmd_scan::execute`（`Main.kt:114`）；`compile`/`check` → 各自 execute
-///   （`Main.kt:116-117`）；`audit` → `cmd_audit::execute`（`Main.kt:118`，RUST1-B rust-audit 车道）；
-/// - `symbols` → `cmd_symbols::execute`（`Main.kt:115`，RUST1-B rust-symbols 车道，组长落的分派臂）；
-/// - 无法识别的参数 → 照 `Main.kt:119-123` 文案退 2。
+/// - `scan` → `cmd_scan::execute`（`Main.kt:130`）；`compile`/`check` → 各自 execute
+///   （`Main.kt:132-133`）；`audit` → `cmd_audit::execute`（`Main.kt:134`，RUST1-B rust-audit 车道）；
+/// - `symbols` → `cmd_symbols::execute`（`Main.kt:131`，RUST1-B rust-symbols 车道，组长落的分派臂）；
+/// - 无法识别的参数 → 照 `Main.kt:135-139` 文案退 2。
 pub fn run(args: &[String]) -> i32 {
     if args.is_empty() {
-        // Main.kt:111
+        // Main.kt:127
         println!("{USAGE}");
         return EXIT_OK;
     }
@@ -100,7 +123,7 @@ pub fn run(args: &[String]) -> i32 {
             EXIT_OK
         }
         "--version" => {
-            // Main.kt:113：`erbcc ${Version.VERSION}`。版本无源可读就报错，不硬编码。
+            // Main.kt:129：`erbcc ${Version.VERSION}`。版本无源可读就报错，不硬编码。
             let root = find_repo_root(&current_dir());
             match root.as_ref().map(|r| erbcc_version(r)) {
                 Some(Ok(v)) => {
@@ -121,15 +144,15 @@ pub fn run(args: &[String]) -> i32 {
         "scan" => finish(crate::cmd_scan::execute(&args[1..])),
         "compile" => finish(crate::cmd_compile::execute(&args[1..])),
         "check" => finish(crate::cmd_check::execute(&args[1..])),
-        // audit：RUST1-B / rust-audit 车道接线（`Main.kt:118` 的等价物）。
+        // audit：RUST1-B / rust-audit 车道接线（`Main.kt:134` 的等价物）。
         // `--roundtrip`（CMP-79）子路由 rust-roundtrip 车道落地，分派在 `cmd_audit` 内部
-        // （照 `Main.kt:474` 降级警告在先、`:476` 分派在后的顺序）。
+        // （照 `Main.kt:616` 降级警告在先、`:631` 分派在后的顺序）。
         "audit" => finish(crate::cmd_audit::execute(&args[1..])),
-        // symbols：RUST1-B / rust-symbols 车道接线（`Main.kt:115` 的等价物，组长落的分派臂）。
+        // symbols：RUST1-B / rust-symbols 车道接线（`Main.kt:131` 的等价物，组长落的分派臂）。
         // 装载序与比较器判定仍在 JVM kernel，本臂只做参数面、读数转发与 JSON 序列化。
         "symbols" => finish(crate::cmd_symbols::execute(&args[1..])),
         _ => {
-            // Main.kt:119-123 文案原样
+            // Main.kt:135-139 文案原样
             eprintln!("错误: 无法识别的参数: {}", args.join(" "));
             eprintln!("使用 --help 查看用法。");
             EXIT_USAGE

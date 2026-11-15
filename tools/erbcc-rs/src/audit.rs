@@ -90,14 +90,14 @@ pub fn blocking_findings<'a>(findings: &'a [Finding]) -> Outcome<Vec<&'a Finding
     Ok(out)
 }
 
-/// 一条读数是否被白名单放行（`Main.kt:615-617` 的 `AllowList.matches`）。
+/// 一条读数是否被白名单放行（`Main.kt:839-841` 的 `AllowList.matches`）。
 ///
 /// 两级匹配都是**整串相等**，不做大小写折叠、不做前缀匹配：
 /// - `<kind>\t<name>`（2 列行）；
 /// - `<kind>\t<functionKey>\t<name>`（3 列行，中间是读数自己的 functionKey，空就是空串）。
 pub fn allow_matches(allow: &[(String, Option<String>, String)], f: &Finding) -> bool {
     let function_key = f.function_key.clone().unwrap_or_default();
-    // 两个查表串就是 Kotlin 的 `byName` / `byFunction` 键形（`Main.kt:616-617` + `:636-637`）。
+    // 两个查表串就是 Kotlin 的 `byName` / `byFunction` 键形（`Main.kt:840-841` + `:899-900`）。
     let by_name = format!("{}\t{}", f.kind, f.name);
     let by_function = format!("{}\t{}\t{}", f.kind, function_key, f.name);
     allow.iter().any(|(kind, fn_key, name)| match fn_key {
@@ -107,13 +107,13 @@ pub fn allow_matches(allow: &[(String, Option<String>, String)], f: &Finding) ->
 }
 
 /// `--strict` 判据：存在「既算硬差异、又没被白名单放行」的读数 ⇒ 真
-/// （`Main.kt:502` 的 `blocking = report.blocking.filterNot { allowed.matches(it) }` +
-/// `:522` 的 `if (strict && blocking.isNotEmpty()) return 1`）。
+/// （`Main.kt:672` 的 `blocking = report.blocking.filterNot { allowed.matches(it) }` +
+/// `:719-722` 的 `if (strict && blocking.isNotEmpty()) return 1`）。
 pub fn has_hard_diff(findings: &[Finding], allow: &[(String, Option<String>, String)]) -> Outcome<bool> {
     Ok(hard_diff_count(findings, allow)? > 0)
 }
 
-/// 同上，但返回**条数**（`Main.kt:507` 打的 `硬差异：${blocking.size} 处` 用的就是它，
+/// 同上，但返回**条数**（`Main.kt:677` 打的 `硬差异：${blocking.size} 处` 用的就是它，
 /// 编排层拿它与 kernel 自己的读数交叉核对，不等即报红）。
 pub fn hard_diff_count(findings: &[Finding], allow: &[(String, Option<String>, String)]) -> Outcome<usize> {
     let mut n = 0usize;
@@ -212,20 +212,20 @@ pub fn parse_tsv(text: &str) -> Outcome<Vec<Finding>> {
     Ok(out)
 }
 
-/// `--allow` 白名单（`Main.kt:650-663` 的 `readAllowListText` + `Main.kt:678-696` 的 `readAllowList`）。
+/// `--allow` 白名单（`Main.kt:859-871` 的 `readAllowListText` + `Main.kt:887-905` 的 `readAllowList`）。
 ///
 /// 逐条口径：
-/// - 文件不是普通文件 ⇒ **不报错、不占退出码**，返回空白名单（`Main.kt:651` 的
-///   `if (!path.isRegularFile()) return null` → `Main.kt:679-681` 打一行
+/// - 文件不是普通文件 ⇒ **不报错、不占退出码**，返回空白名单（`Main.kt:860` 的
+///   `if (!path.isRegularFile()) return null` → `Main.kt:888-891` 打一行
 ///   `白名单文件不存在（按空白名单处理）: <路径>` 后 `AllowList.EMPTY`，进程退出码仍由**审计结果**定：
 ///   实测两腿同档同 rc —— Kotlin 腿 `build/cli-polish/a3k.err` rc=1 来自 `--strict` 下 8 处硬差异，
 ///   不是「缺白名单」这件事本身。那一行的文本单源在 [allow_missing_warning_text]（**原文形态**），
 ///   但由 `cmd_audit::stderr_head_lines`（携 `--allow` 原文）把 kernel 透出的那一份**就地换成原文形态**（保持行位置，也不会上屏两遍）。
-/// - 按 `\n` 与 `\r` 两个字符切行（`Main.kt:685` 的 `split('\n', '\r')`，CRLF 会切出空行，
+/// - 按 `\n` 与 `\r` 两个字符切行（`Main.kt:894` 的 `split('\n', '\r')`，CRLF 会切出空行，
 ///   下一步 trim 后丢掉）；
-/// - 整行 trim 后为空或以 `#` 开头 ⇒ 注释/空行跳过（`Main.kt:687`）；
+/// - 整行 trim 后为空或以 `#` 开头 ⇒ 注释/空行跳过（`Main.kt:895-896`）；
 /// - 以制表符切列：**2 列** = `kind<TAB>name`，**3 列** = `kind<TAB>functionKey<TAB>name`，
-///   其它列数的行跳过（`Main.kt:689-693`，跳过的告警同上由 kernel 打）；
+///   其它列数的行跳过（`Main.kt:898-902`，跳过的告警同上由 kernel 打）；
 /// - 列内不做 trim（Kotlin 只 trim 整行），所以列首/列尾的空格是匹配串的一部分。
 ///
 /// 返回的元组第 2 位用 `None` 表示 2 列行、`Some(fn)` 表示 3 列行 —— 与
@@ -235,8 +235,8 @@ pub fn parse_tsv(text: &str) -> Outcome<Vec<Finding>> {
 ///
 /// 非法 UTF-8 走 [ErbccError::Usage]（⇒ `cli::finish` 退 **2**），正文用
 /// [crate::cmd_audit::allow_charset_red]：Kotlin 侧是 `readAllowListText` 抛
-/// `IllegalStateException`（`Main.kt:660-661`）→ `cmdAudit` 转 `err()`（`Main.kt:487-491`，
-/// `Main.kt:163-166` 恒退 2），**不是** 1。本函数原先返回 `Io`（退 1），与编排层
+/// `IllegalStateException`（`Main.kt:869-870`）→ `cmdAudit` 转 `err()`（`Main.kt:642-645`，
+/// `Main.kt:179-182` 恒退 2），**不是** 1。本函数原先返回 `Io`（退 1），与编排层
 /// [crate::cmd_audit::preflight_allowlist] 的 `Usage`（退 2）对同一个条件给两个档 ——
 /// 修向是把 Rust 对齐 Kotlin（取 2、取同一段报红正文），Kotlin 判据一字不动。
 /// 生产链上 [crate::cmd_audit::preflight_allowlist] 在起 kernel 之前先拦，所以这枚是第二道闸；
@@ -244,7 +244,7 @@ pub fn parse_tsv(text: &str) -> Outcome<Vec<Finding>> {
 pub fn load_allowlist(path: &Path) -> Outcome<Vec<(String, Option<String>, String)>> {
     let text = match std::fs::read(path) {
         Err(e) => {
-            // Main.kt:651 + Main.kt:679-681：缺文件（或不是普通文件）按空白名单处理，不占退出码。
+            // Main.kt:860 + Main.kt:888-891：缺文件（或不是普通文件）按空白名单处理，不占退出码。
             let _ = e;
             return Ok(Vec::new());
         }
@@ -266,7 +266,7 @@ pub fn load_allowlist(path: &Path) -> Outcome<Vec<(String, Option<String>, Strin
     Ok(out)
 }
 
-/// `--allow` 缺档提示行的**正文单源**（`Main.kt:680` 的 `System.err.println`）。
+/// `--allow` 缺档提示行的**正文单源**（`Main.kt:889` 的 `System.err.println`）。
 ///
 /// Kotlin 打在 `Path(原文)` 上 ⇒ 相对原样 + 分隔符归一（实测读数：
 /// `白名单文件不存在（按空白名单处理）: tools\erbcc-rs\tests\data\rust-cli-surface\nope-missing.tsv`，
@@ -291,13 +291,13 @@ pub fn is_allow_missing_warning_line(line: &str) -> bool {
     line.starts_with(ALLOW_MISSING_PREFIX)
 }
 
-/// `Main.kt:680` 那行的固定前缀（不含路径段）。
+/// `Main.kt:889` 那行的固定前缀（不含路径段）。
 const ALLOW_MISSING_PREFIX: &str = "白名单文件不存在（按空白名单处理）: ";
 
-/// Kotlin `readAllowListText`（`Main.kt:650-663`）的**严格 UTF-8** 解码：解不动就按**参数错误**报红，
+/// Kotlin `readAllowListText`（`Main.kt:859-871`）的**严格 UTF-8** 解码：解不动就按**参数错误**报红，
 /// 不按替换字符糊过去 —— 白名单糊一条就等于少放行一条，Kotlin 侧同样是 `CodingErrorAction.REPORT`
 /// 那一档（坏字节直接抛，不做有损解码；这里也不做 BOM 剥离、不做 Shift-JIS 回退，
-/// 与 `Main.kt:658-659` 的注释口径一字一样：合法输入必须逐字同解）。
+/// 与 `Main.kt:867-868` 的注释口径一字一样：合法输入必须逐字同解）。
 fn decode_utf8_strict(bytes: &[u8], path: &Path) -> Outcome<String> {
     std::str::from_utf8(bytes)
         .map(|s| s.to_string())
@@ -320,7 +320,7 @@ fn clean(s: &str) -> String {
 // 判据本身**一条都不在这里**：侧车逐字段 / 三读数 / 名字集合哈希 / 容器条数全由
 // `SymbolLinkAudit.compareProduct`（`SymbolLinkAudit.kt:564-627`）判，Rust 侧只把
 // `RoundTripReport.writeTsv`（`:148-159`）落的文件读回来复算字节、数DIFF 行、
-// 给退出码（`Main.kt:566-574`）。
+// 给退出码（`Main.kt:794-796`）。
 // ---------------------------------------------------------------------------
 
 /// 一条对账读数（= `RoundTripCheck`，`SymbolLinkAudit.kt:114-125`；也是明细 TSV 的一行）。
@@ -372,7 +372,7 @@ pub fn roundtrip_tsv_text(checks: &[RoundTripCheck]) -> Outcome<String> {
 /// TSV 文本 → 对账读数表（kernel 落的明细是 Rust 侧唯一的取读数面）。
 ///
 /// 表头不对、列数不是 5、状态列不是 `OK`/`DIFF` 一律报红而不是跳过：
-/// 丢一行等于丢一条判据，而 `Main.kt:566` 的红判据是「任一项不等」。
+/// 丢一行等于丢一条判据，而 `Main.kt:795` 的红判据是「任一项不等」。
 pub fn parse_roundtrip_tsv(text: &str) -> Outcome<Vec<RoundTripCheck>> {
     let mut lines = text.split('\n');
     let head = lines.next().unwrap_or("");
@@ -413,17 +413,17 @@ pub fn roundtrip_mismatches(checks: &[RoundTripCheck]) -> Vec<&RoundTripCheck> {
     checks.iter().filter(|c| !c.equal).collect()
 }
 
-/// 判据条数（`Main.kt:557` 的 `对拍 ${report.checks.size} 项` / `:565` 的明细行数）。
+/// 判据条数（`Main.kt:781` 的 `对拍 ${report.checks.size} 项` / `:792` 的明细行数）。
 pub fn roundtrip_check_count(checks: &[RoundTripCheck]) -> usize {
     checks.len()
 }
 
-/// `Main.kt:566` 的红判据：**任一**项不等即红（对账本身是闸，不另设 `--strict`）。
+/// `Main.kt:795` 的红判据：**任一**项不等即红（对账本身是闸，不另设 `--strict`）。
 pub fn roundtrip_is_red(checks: &[RoundTripCheck]) -> bool {
     !roundtrip_mismatches(checks).is_empty()
 }
 
-/// 不等项的判据名，按 checks 序（`Main.kt:568` 的 `mismatches.joinToString("、") { it.name }`
+/// 不等项的判据名，按 checks 序（`Main.kt:792` 的 `mismatches.joinToString("、") { it.name }`
 /// 就是这个序 —— 编排层拿它把 kernel 的红行与本路复算交叉核对）。
 pub fn roundtrip_mismatch_names(checks: &[RoundTripCheck]) -> Vec<String> {
     roundtrip_mismatches(checks)

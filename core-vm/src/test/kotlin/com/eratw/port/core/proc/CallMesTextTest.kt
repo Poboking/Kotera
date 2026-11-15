@@ -300,16 +300,18 @@ class CallMesTextTest {
     // ------------------------------------------------------------------
 
     /**
-     * 实参多于形参 = `TooManyFuncArgs`（spec: CalledFunction.cs:136-140）：
-     * `ConvertArg` 按被调 arity 建 `AExpression[]`，`array.Length < srcArgs.Count` 直接
-     * 出 errMes，静态名在装载期 Warn 成 error、动态名在 `DoInstruction` 抛 CodeEE。
+     * 实参多于形参**不再抛错**：复刻目标蛇版 4.981 的 `ConvertArg` 只按 `func.Arg.Length`
+     * 逐位转换、多余实参静默丢弃
+     * （`reference/emuera-skia-4.981/Emuera/Runtime/Script/Process.CalledFunction.cs:212-357`；
+     * 1.824 的 `array.Length < srcArgs.Count → TooManyFuncArgs` 已删，fork 更新记录
+     * CHANGELOG.md「ConvertArg() 多余参数静默丢弃」）。
      *
      * 装置：ONE(ARG) 收 1 个形参，main 发 `_CALL ONE, 2, NONE`（两个实参）。
-     * 旧实现 `callInto` 的 `min(argc, arity)` 会**静默裁剪**第二个实参、照常执行 ——
-     * 本用例钉住"必须抛"。
+     * 绑定点只写被调形参覆盖的位（`bindCallArgs` 的 `plans.getOrNull(a.position) ?: continue`），
+     * 第二个实参不读不写。正向绑定断言见 `ExtraArgToleratedTest`（源码编译 + 真 ARG 绑定）。
      */
     @Test
-    fun `实参多于形参抛 TooManyFuncArgs 原文`() {
+    fun `实参多于形参静默丢弃多余实参`() {
         val b = CodeBuilder()
         // ONE 在 pc 0（下标 0），main 在其后（下标 1）：_CALL 的 a 要在发射时已知下标，
         // 故先声明被调、后声明调用方，build(1) 从 main 起跑。
@@ -334,13 +336,13 @@ class CallMesTextTest {
                 ),
             ),
         )
-        // zhs:901 = `{0}函数: 参数过多`，{0} = 标签名原文（不带 @）
-        assertEquals("ONE函数: 参数过多", assertFailsWith<CodeEE> { rt.execute() }.message)
+        // 4.981 口径：多余实参合法、静默丢弃；能跑到 HALT 即证明没有在建帧前抛错。
+        rt.execute()
     }
 
-    /** 实参数恰好等于形参数（含 0 参）不得误报 —— 同一装置把 b 改回 1。 */
+    /** 实参数恰好等于形参数（含 0 参）照常执行 —— 同一装置把 b 改回 1。 */
     @Test
-    fun `实参数不超过形参数时不报参数过多`() {
+    fun `实参数不超过形参数时照常执行`() {
         val b = CodeBuilder()
         val one = b.declareFunction("ONE", 0, 1, 1)
         b.emit(Opcode._RET, SlotAddr.local(0), 0, 0, 1)

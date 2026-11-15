@@ -1,9 +1,11 @@
 package com.eratw.port.core.expr
 
+import com.eratw.port.core.compat.StringCompareDialect
 import com.eratw.port.core.err.DIVIDE_BY_ZERO_TEXT
 import com.eratw.port.core.err.MULTIPLY_10K_TO_STR_TEMPLATE
 import com.eratw.port.core.err.MULTIPLY_NEGATIVE_TO_STR_TEMPLATE
 import com.eratw.port.core.err.renderMultiplyToStrLimit
+import com.eratw.port.core.err.zeroDivideWarning
 import com.eratw.port.core.lexer.longFromScaledDouble
 
 /**
@@ -748,16 +750,23 @@ data class Binary(
             // || 短路：spec: OperatorMethodManager.cs:393-409
             OperatorCode.OR ->
                 if (left.getIntValue(ctx) != 0L) 1L else if (right.getIntValue(ctx) != 0L) 1L else 0L
-            // 除/余先求右操作数（原版先取除数判 0）。spec: OperatorMethodManager.cs:121-157
+            // 4.981 整数除/余走 SafeArithmetic（SafeArithmetic.cs:67-84），调用点
+            // `OperatorMethod.cs:374/:388` 是
+            //   `SafeDivide(arguments[0].GetIntValue(exm), arguments[1].GetIntValue(exm))`
+            // ⇒ **求值序变成左先右后**（C# 实参左到右），与 1.824「先取除数判 0」
+            // （OperatorMethodManager.cs:121-157）相反。b == 0 时 PrintWarning 并返回 0，
+            // 不再抛 DivideByZero —— 真机「除数为0的除法运算」那一簇即由此中断脚本。
+            // 副作用顺序随之变：左子树的 RAND / ++ 现在会照常求值一次（不是「为取证补读」）。
             OperatorCode.DIV, OperatorCode.MOD -> {
-                val r = right.getIntValue(ctx)
-                if (r == 0L) throw ExprEvalException(DIVIDE_BY_ZERO_TEXT)
                 val l = left.getIntValue(ctx)
-                // C# 整除向零取整、% 符号随被除数，与 Kotlin Long./ 与 Long.% 语义一致
-                if (op == OperatorCode.DIV) {
+                val r = right.getIntValue(ctx)
+                if (r == 0L) {
+                    ctx.printSystemLine(zeroDivideWarning(l, op == OperatorCode.MOD))
+                    0L
+                } else if (op == OperatorCode.DIV) {
                     // `long.MinValue / -1` 是 .NET 唯一会溢出的整除：C# 抛 OverflowException，
                     // JVM 的 ldiv 静默回绕成 MIN_VALUE。按原版抛错，不回绕。
-                    // spec: OperatorMethodManager.cs:136（arguments[0].GetIntValue(exm) / intValue）
+                    // C# 整除向零取整、% 符号随被除数，与 Kotlin Long./ 与 Long.% 语义一致。
                     if (l == Long.MIN_VALUE && r == -1L) {
                         throw ExprEvalException("除算溢出：-9223372036854775808 / -1")
                     }
@@ -837,15 +846,16 @@ data class Binary(
      * （TODO(verify)：待 fork-src 就位后复核）。本机可达的替代依据：整型取余 `ModIntInt`
      * 实现见 `OperatorMethodManager.cs:140-157`、登记见 `:725`；本机全文无浮点 `%`，与上述同型。
      *
-     * 求值序：DIV 先右后左，与整型通道同一口径（spec: OperatorMethodManager.cs:121-157，
-     * 本机可达：`DivIntInt` 在 `:131` 先取 `arguments[1]`、`:136` 再取 `arguments[0]`）。
+     * 求值序：**浮点 DIV 先右后左**，与整型通道**不同**（4.981 起分道，不是漏改）。
+     * 整型支 `OperatorMethod.cs:374` 是 `SafeDivide(arguments[0], arguments[1])`，左先右后；
+     * 浮点支 `DivFloatFloat` / `DivMixedFloat` 仍先取除数判零。
      *
-     * 浮点除法判零硬错（2026-11-02 收口，原第 5 条偏离已对齐）：fork 的浮点除法
-     * `DivFloatFloat` 与 `DivMixedFloat` 都是先取除数、`if (divisor == 0.0) throw new
-     * CodeEE(trerror.DivideByZero.Text)`，不落到 IEEE 的 ±Infinity/NaN。
-     * 行号依据 `OperatorMethod.cs:983-989`（DivFloatFloat）与 `:1132-1138`（DivMixedFloat）
-     * 在本机不可取证（TODO(verify)：待 fork-src 就位后复核）；可达文案依据
-     * `emuera-zhs.xml:286`（`Error.DivideByZero` =「除数为0的除法运算」）。
+     * 浮点除法判零硬错（2026-11-02 收口，原第 5 条偏离已对齐；2026-11-12 fork-src 复核）：
+     * `OperatorMethod.cs:987`（DivFloatFloat）与 `:1137`（DivMixedFloat）都是
+     * `if (divisor == 0.0) throw new CodeEE(trerror.DivideByZero.Text)`，不落 IEEE ±Infinity/NaN。
+     * **反向证明**：`SafeArithmetic.cs:91-100` 虽定义了返回 NaN 的 `SafeFloatDivide`，但
+     * 全仓无任何调用点，浮点除法字典挂的仍是上面两个硬错实现 ⇒ 4.981 的钳制只覆盖整数。
+     * 文案依据 `emuera-zhs.xml:286`（`Error.DivideByZero` =「除数为0的除法运算」）。
      */
     override fun getFloatValue(ctx: EvalContext): Double =
         if (operandType != OperandType.FLOAT) getIntValue(ctx).toDouble()
@@ -854,16 +864,13 @@ data class Binary(
             OperatorCode.MINUS -> left.getFloatValue(ctx) - right.getFloatValue(ctx)
             OperatorCode.MULT -> left.getFloatValue(ctx) * right.getFloatValue(ctx)
             OperatorCode.DIV -> {
-                // 除数判零硬错（第 5 条偏离收口，2026-11-02 组长接线）：
-                // fork 的 DivFloatFloat / DivMixedFloat 均
-                // `if (divisor == 0.0) throw new CodeEE(trerror.DivideByZero.Text)`，
-                // 不落 IEEE ±Infinity/NaN。
-                // 行号依据 OperatorMethod.cs:983-989 / :1132-1138 在本机不可取证
-                // （TODO(verify)：待 fork-src 就位后复核）；可达文案依据
-                // emuera-zhs.xml:286「除数为0的除法运算」。
-                // 与本文件整型支同一口径（:754）。
+                // 除数判零硬错（OperatorMethod.cs:987 / :1137，2026-11-12 fork-src 复核）：
+                // 4.981 的 SafeArithmetic 钳制**只覆盖整数**；SafeFloatDivide 是未接线的死代码。
+                // 不落 IEEE ±Infinity/NaN，文案见 emuera-zhs.xml:286。
+                // 与上方整型支（零除→警告+0）刻意不同，别把两支合并。
                 val r = right.getFloatValue(ctx)
-                if (r == 0.0) throw ExprEvalException(DIVIDE_BY_ZERO_TEXT)
+                // 浮点通道只给表达式原文：Long 装不下 10.5 这类非整值，折损后的数会误导取证。
+                if (r == 0.0) throw divModByZero(ctx, rightValue = null, leftValue = null)
                 left.getFloatValue(ctx) / r
             }
             else -> throw ExprEvalException("非法的浮点二元运算符 ${OperatorCode.toOperatorString(op)}")
@@ -907,9 +914,15 @@ data class Binary(
  * 比较基准 = `Config.SCExpression`（Config.cs:523 为 `const StringComparison.Ordinal`）
  *   ⇒ 恒为序数比较，Kotlin String.compareTo 同口径。
  *
+ * 方言（ENGC-4）：`>=`/`<=` 在四树里分两派 —— v24 把两处都编译成 `compare < 0`
+ * （spec: OperatorMethod.cs:487/:518，官方 bug），em 与 4.981 是 `c >= 0` / `c <= 0`
+ * （spec: em :478/:509；snake :547/:578）。选哪派由 [EvalContext.stringCompareDialect]
+ * 决定，缺省 [StringCompareDialect.FIXED]（4.981 实跑口径）；v24 档由装配方下传
+ * [StringCompareDialect.LEGACY_BOTH_LT]。
+ *
  * 历史：移植早期按 **1.824** 的 `OperatorMethodManager.cs:331/:367`（两处均 `c < 0`）把 `>=`/`<=`
- * 复刻成反的；那是官方 bug，但本项目目标是 4.981（已修）⇒ 2026-11-08 校准回正（MODERN-T5）。
- * 语料对字符串 `>=`/`<=` 零命中，故校准不改变现存游戏产物。
+ * 复刻成反的；2026-11-08 按 4.981 校准回正（MODERN-T5）。这不再是「对/错」问题而是两档方言，
+ * 缺省仍是 4.981 口径。语料对字符串 `>=`/`<=` 零命中，缺省档零漂移。
  *
  * **不得**把这里的 GREATER_EQUAL / LESS_EQUAL 拿去装配 `SELECTCASE` 的 `CASE lo TO hi`
  * 区间判定（CORE-01，2026-10-23）：原版的 TO 形态根本不走运算符重载，是 CaseExpression 里
@@ -924,8 +937,12 @@ internal fun strCompare(op: OperatorCode, ctx: EvalContext, left: Expr, right: E
         OperatorCode.NOT_EQUAL -> if (c != 0) 1L else 0L
         OperatorCode.GREATER -> if (c > 0) 1L else 0L
         OperatorCode.LESS -> if (c < 0) 1L else 0L
-        OperatorCode.GREATER_EQUAL -> if (c >= 0) 1L else 0L  // spec: OperatorMethod.cs:547（4.981 c>=0）
-        OperatorCode.LESS_EQUAL -> if (c <= 0) 1L else 0L     // spec: OperatorMethod.cs:578（4.981 c<=0）
+        // ENGC-4：legacy 档两处都按 `c < 0`（v24 spec: OperatorMethod.cs:487 / :518）；
+        // fixed 档 `c >= 0` / `c <= 0`（snake :547 / :578；em :478 / :509）。
+        OperatorCode.GREATER_EQUAL ->
+            if (if (ctx.stringCompareDialect == StringCompareDialect.LEGACY_BOTH_LT) c < 0 else c >= 0) 1L else 0L
+        OperatorCode.LESS_EQUAL ->
+            if (if (ctx.stringCompareDialect == StringCompareDialect.LEGACY_BOTH_LT) c < 0 else c <= 0) 1L else 0L
         else -> throw ExprEvalException("非法字符串比较运算符")
     }
 }
@@ -995,3 +1012,140 @@ data class Ternary(
     override fun getFloatValue(ctx: EvalContext): Double =
         if (cond.getIntValue(ctx) == 0L) ifFalse.getFloatValue(ctx) else ifTrue.getFloatValue(ctx)
 }
+
+// ---------------------------------------------------------------------------
+// 除零 / 取模的取证面（2026-11-09 lane bug-divzero）
+// ---------------------------------------------------------------------------
+
+/**
+ * **浮点**除零时的求值期错误，带上「哪个表达式、左右操作数」三件取证。
+ *
+ * 4.981 起整型 DIV/MOD 已在 [getIntValue] 改成钳制返回 0 + 警告，**不再经过这里**；
+ * 本函数现只服务浮点支（唯一硬错通道）。[rightValue] / [leftValue] 因此恒传 null：
+ * `Long?` 装不下 10.5 这类非整值，折损后的数会误导取证，宁可留空，只给 [exprText]。
+ *
+ * [ExprEvalException.operandA] 的「只在左子树无副作用时才补读」是 1.824 抛错通道的
+ * 遗留纪律（口径见该属性 KDoc）；整型支不再抛错后，那里改为按 4.981 正常求值一次。
+ */
+private fun Binary.divModByZero(
+    ctx: EvalContext,
+    rightValue: Long?,
+    leftValue: Long? = left.evidenceIntValueOrNull(ctx),
+): ExprEvalException =
+    ExprEvalException(
+        DIVIDE_BY_ZERO_TEXT,
+        operandA = leftValue,
+        operandB = rightValue,
+        exprText = renderSourceText(),
+    )
+
+/**
+ * 取证用「补读一次整型值」——**只在子树无副作用时**执行，且读失败一律 null。
+ *
+ * 两条判据缺一不可：
+ * * [isSideEffectFree] 挡住 `RAND` / 用户函数 / `++`（补读会多消耗 RNG 或再写一次变量，
+ *   那是改变求值语义，不是取证）；
+ * * 读失败（未定义变量、下标越界、子式自己除零）一律吞成 null —— 本函数处在**错误路径**上，
+ *   不许用第二条新错误去顶替本来要报的那条（口径同 `VirtualMachine.currentScriptFile`
+ *   的 `runCatching`）。
+ */
+private fun Expr.evidenceIntValueOrNull(ctx: EvalContext): Long? {
+    if (!isSideEffectFree()) return null
+    return try {
+        if (operandType == OperandType.FLOAT) getFloatValue(ctx).toLong() else getIntValue(ctx)
+    } catch (e: RuntimeException) {
+        null
+    }
+}
+
+/**
+ * 该子树**再求值一次**是否不改变任何可观察状态（取证补读的准入判据）。
+ *
+ * 判为**有副作用**的五类，逐条对应语料里真实存在的形态：
+ * * [FuncCall]：内建与用户方法都可能有副作用（`RAND` 家族、`SETVAR`、`PRINT*`）；
+ * * [VarRef] 且名为 `RAND`：ERB 的 `RAND:n` 是**伪变量读**，每读一次推进一次 RNG
+ *   （`VariableData.cs:845-853`）；
+ * * 前置 `++`/`--`（[Unary] 的 INCREMENT/DECREMENT）与全部后置自增（[UnaryAfter]）：写变量；
+ * * 取负**最小整数**会打一行系统提示（[Unary] 的 MINUS 支，spec: OperatorMethodManager.cs:561-564
+ *   「对 -9223372036854775808 取负不生效」）—— 那是可观察输出，同样算副作用；
+ *   只有操作数是**字面量**时能静态判掉这一支，其余取值不可知 ⇒ 判脏；
+ * * 其余按子结点递归 —— 纯算术/比较/三目在两侧都纯时才纯。
+ *
+ * 保守方向是「宁可判脏」：判脏只是让 `operandA` 少一个数，判净则会偷偷多跑一次副作用。
+ */
+internal fun Expr.isSideEffectFree(): Boolean = when (this) {
+    is IntLiteral, is StrLiteral, is FloatLiteral, is NullTerm -> true
+    is VarRef -> name.uppercase() != "RAND" && indices.all { it.isSideEffectFree() }
+    is KeywordIndexArg -> expr.isSideEffectFree()
+    is FuncCall -> false
+    is Unary -> when (op) {
+        // 写变量
+        OperatorCode.INCREMENT, OperatorCode.DECREMENT -> false
+        // 取负 MIN_VALUE 会打系统行；字面量能静态判掉，其余取值不可知 ⇒ 保守判脏
+        OperatorCode.MINUS -> when (val o = operand) {
+            is IntLiteral -> o.value != Long.MIN_VALUE
+            is FloatLiteral -> true
+            else -> false
+        }
+        else -> operand.isSideEffectFree()
+    }
+    is UnaryAfter -> false
+    is Binary -> left.isSideEffectFree() && right.isSideEffectFree()
+    is Ternary -> cond.isSideEffectFree() && ifTrue.isSideEffectFree() && ifFalse.isSideEffectFree()
+    is FormStringTerm -> parts.all { p ->
+        p is FormPart.Text || (p as FormPart.Embedded).ast.isSideEffectFree()
+    }
+}
+
+/**
+ * 把表达式 AST 重建为**源码形态**文本（除零取证面的 `exprText`）。
+ *
+ * ## 为什么是「重建」不是「原文」
+ * ERB 原文不随产物保存：`.erbc` 的表达式池只有 AST（`ErbcWriter.kt:746` 起逐结点写），
+ * 行号表只到「指令 → 0 基行」这一维。所以报告里能给的最忠实形态就是 AST → 文本的重建，
+ * 它保证**标识符与下标逐字**（`MAXBASE:0:12`、`CFLAG:TARGET:0`），只把空格与括号规范化。
+ *
+ * ## 规范化口径（确定性，测试逐字钉住）
+ * * 二元结点一律 `左 空格 运算符 空格 右`；子结点是二元/三目时加一层括号（优先级歧义在这里显式化）；
+ * * 变量 = `名` + 可选的 `@私钥` + 每个下标前加一个冒号（`MAXBASE:0:12`）；
+ * * 下标位的字符串字面量**不加引号**（ERB 的 `MAXBASE:TARGET:酒気` 就是裸关键字）；
+ * * 函数调用 = `名(实参, 实参)`；空实参位渲染为空串（位置数守恒）；
+ * * 字符串形式 `@"..."` 按 `{expr}` / `%expr%` / `\@cond?左#右\@` 三段还原。
+ */
+internal fun Expr.renderSourceText(): String = renderExprPart(inIndex = false)
+
+private fun Expr.renderExprPart(inIndex: Boolean): String = when (this) {
+    is IntLiteral -> value.toString()
+    is StrLiteral -> if (inIndex) value else "\"" + value + "\""
+    is FloatLiteral -> value.toString()
+    is NullTerm -> "null"
+    // 注意不要用 buildString 的 lambda 去拼：它的接收方是 StringBuilder（CharSequence），
+    // 裸写 `indices` 会解析成 `CharSequence.indices`（IntRange），循环变量就成了 Int。
+    is VarRef -> name + (if (subKey != null) "@" + subKey else "") +
+        indices.joinToString("") { ":" + it.renderExprPart(inIndex = true) }
+    is KeywordIndexArg -> expr.renderExprPart(inIndex = true)
+    is FuncCall -> name + "(" + args.joinToString(", ") { it?.renderExprPart(inIndex = false) ?: "" } + ")"
+    is Unary -> OperatorCode.toOperatorString(op) + operand.wrapIfCompound()
+    is UnaryAfter -> operand.wrapIfCompound() + OperatorCode.toOperatorString(op)
+    is Binary -> left.wrapIfCompound() + " " + OperatorCode.toOperatorString(op) + " " + right.wrapIfCompound()
+    is Ternary ->
+        cond.wrapIfCompound() + " ? " + ifTrue.renderExprPart(inIndex = false) +
+            " # " + ifFalse.renderExprPart(inIndex = false)
+    is FormStringTerm -> "@\"" + parts.joinToString("") { p ->
+        when (p) {
+            is FormPart.Text -> p.str
+            is FormPart.Embedded -> when (val c = p.conversion) {
+                is FormConversion.Curly -> "{" + p.ast.renderExprPart(inIndex = false) + "}"
+                is FormConversion.Percent -> "%" + p.ast.renderExprPart(inIndex = false) + "%"
+                is FormConversion.YenAt ->
+                    "\\@" + p.ast.renderExprPart(inIndex = false) + "?" +
+                        c.ifTrue.renderExprPart(inIndex = false) + "#" +
+                        c.ifFalse.renderExprPart(inIndex = false) + "\\@"
+            }
+        }
+    } + "\""
+}
+
+/** 复合子式加括号：二元/三目在**任何**父结点下都括起来，优先级歧义在重建文本里显式化。 */
+private fun Expr.wrapIfCompound(): String =
+    if (this is Binary || this is Ternary) "(" + renderExprPart(inIndex = false) + ")" else renderExprPart(inIndex = false)

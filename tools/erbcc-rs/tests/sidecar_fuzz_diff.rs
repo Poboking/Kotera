@@ -539,10 +539,10 @@ fn fam_meta_head() -> Vec<Mut> {
     let mut push = |id: &'static str, desc: &'static str, apply: fn(&mut Fuzz)| {
         v.push(Mut { id, family: Family::MetaHead, desc, apply })
     };
-    push("sc-fmtver-2", "format-version 1→2（高于本引擎支持的版本 ⇒ 两侧都拒）", |f| {
-        meta_replace_line(f, "format-version ", "format-version 2")
+    push("sc-fmtver-4", "format-version 3→4（高于本引擎支持的版本 ⇒ 两侧都拒）", |f| {
+        meta_replace_line(f, "format-version ", "format-version 4")
     });
-    push("sc-fmtver-0", "format-version 1→0（版本非法 ⇒ 两侧都拒）", |f| {
+    push("sc-fmtver-0", "format-version 3→0（版本非法 ⇒ 两侧都拒）", |f| {
         meta_replace_line(f, "format-version ", "format-version 0")
     });
     push("sc-fmtver-nonint", "format-version 载荷改成 `x`（不是整数 ⇒ 两侧都拒）", |f| {

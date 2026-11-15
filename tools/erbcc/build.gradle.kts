@@ -1,5 +1,6 @@
 import com.eratw.port.buildlogic.CORPUS_PATCHES_MARKER
 import com.eratw.port.buildlogic.CorpusPatchPlan
+import com.eratw.port.buildlogic.corpus
 import com.eratw.port.buildlogic.corpusStagingDir
 import com.eratw.port.buildlogic.planCorpusPatches
 
@@ -52,6 +53,7 @@ tasks.register<JavaExec>("compileCorpus") {
         "ERATW_ERBC_PARALLEL" to "eratw.erbcc.parallel",
         "ERATW_ERBC_PARALLEL_THREADS" to "eratw.erbcc.parallel.threads",
         "ERATW_ERBC_PARALLEL_CHUNK" to "eratw.erbcc.parallel.chunk",
+        "ERATW_ERBC_FUNC_CACHE" to "eratw.erbcc.funcCache",
     ).forEach { (envKey, propKey) ->
         System.getenv(envKey)?.takeIf { it.isNotBlank() }?.let { value ->
             jvmArgs("-D$propKey=$value")
@@ -111,6 +113,23 @@ tasks.register<JavaExec>("compileCorpus") {
         .orElse(project.providers.environmentVariable("ERATW_COMPILE_MODE"))
         .orElse("strict")
     inputs.property("compileMode", compileModeProvider)
+    // 引擎档透传（CONTRACT-ENGCOMPAT §8.0.4）：`-PeratwEngineProfile=<profile_id>` 非空时
+    // 在 doFirst 给 erbcc 追加 `--engine-profile <值>`（erbcc 侧实现归 B6-ERBCC lane）。
+    // 缺省/空 ⇒ args 与不带它时逐字一致（I7：eraTW 无配置路径零干扰）。
+    // 声明为任务输入（与 corpusPath/compileMode 同一模式）：换档必须重跑，
+    // 不许复用另一档的绿缓存。
+    val engineProfileProvider = project.providers.gradleProperty("eratwEngineProfile")
+    inputs.property("engineProfile", engineProfileProvider.orElse(""))
+    // 引擎缺口报告落点，与 `--engine-profile` **同生共死**（组长裁定 1 落地）：带 profile
+    // 编译时 doFirst 同步追加 `--engine-report <本子工程 build 根>/engine-report.json`
+    // （CONTRACT §8.0.3 的 JSON 形状，erbcc 侧实现归 B6-ERBCC lane）；缺省/空 ⇒ 不追加，
+    // 也**不登记输出**（eraTW 缺省路径连输出声明都不多一个）。pack 配置模式（ENGC-6）的
+    // `--engine-config` 分支按约定来读这个固定落点渲染兼容性报告，路径别改。
+    val engineProfileAtConfig = engineProfileProvider.orNull?.trim()?.takeIf { it.isNotEmpty() }
+    val engineReportPath = layout.buildDirectory.file("engine-report.json").get().asFile.absolutePath
+    if (engineProfileAtConfig != null) {
+        outputs.file(engineReportPath).withPropertyName("engineReport")
+    }
     // 输入/输出必须声明，否则 JavaExec 恒被判「无输出」而每次重跑（6g 堆、全量几分钟），
     // 于是没人愿意在出包前跑它 —— 这正是 `stageGameAssets` 只能读现成产物目录、陈旧 .erbc
     // 被静默随包的原因（2026-10-22 复核）。声明之后：语料 + erbcc/core-vm 字节码未变
@@ -136,6 +155,12 @@ tasks.register<JavaExec>("compileCorpus") {
     inputs.dir(rootProject.projectDir.resolve("devtools/corpus-patches"))
         .withPropertyName("corpusPatches")
         .optional(true)
+    // `-PeratwForeignCorpus=1`（pack `--foreign-corpus`，ENGC-6 构建期通道）：声明本语料根不是
+    // eraTW 补丁表的根 ⇒ 整表不适用（不 staging、不套用、也不要求 index 在场）。
+    // 登记为输入：翻这个值必须重跑，不许复用另一根的产物。缺省 false = args 与判据逐字节不变。
+    val foreignCorpusAtConfig = providers.gradleProperty("eratwForeignCorpus").orNull
+        ?.trim()?.lowercase() in setOf("1", "true")
+    inputs.property("foreignCorpus", foreignCorpusAtConfig)
     outputs.dir(outProvider.get()).withPropertyName("erbcOut")
     doFirst {
         val corpus = corpusProvider.get()
@@ -152,6 +177,7 @@ tasks.register<JavaExec>("compileCorpus") {
             patchesDir = rootProject.projectDir.resolve("devtools/corpus-patches"),
             stagingRoot = layout.buildDirectory.dir("corpus-staging").get().asFile,
             logger = logger,
+            foreignCorpus = foreignCorpusAtConfig,
         )
         val effectiveCorpus = when (patchPlan) {
             is CorpusPatchPlan.None -> {
@@ -160,7 +186,15 @@ tasks.register<JavaExec>("compileCorpus") {
             }
             is CorpusPatchPlan.Staged -> patchPlan.corpusRoot.absolutePath
         }
-        val taskArgs = mutableListOf("compile", "--corpus", effectiveCorpus, "--out", outProvider.get(), "--mode", mode)
+        // `--require-fold`：正式产物口径，常量关键字折叠的数据面（CSV/系统名表/ERD 表）
+        // 缺任何一项就拒落盘 —— 否则产物静默退回运行期按名查表（真机
+        // 「…csv 中未定义关键字」）。手工调试可直接跑 main，不带此开关。
+        val taskArgs = mutableListOf(
+            "compile", "--corpus", effectiveCorpus, "--out", outProvider.get(), "--mode", mode, "--require-fold",
+        )
+        // 与上面 patchPlan 的 foreignCorpus 同一身份，透传给 erbcc：`--require-fold` 的 ERD
+        // 分档据此放宽（第三方语料没有用户 ERD 表按官方口径合法；eraTW 语料仍判红）。
+        if (foreignCorpusAtConfig) taskArgs += "--foreign-corpus"
         // 空串 / 0 / false / no / off 一律视为关；其余非空值 = 容错清单路径
         // （与 `-Pstrict` 的「在即开」口径不同，因为环境变量路径也必须能显式表达「关」）。
         val tolerant = allowParseFailuresProvider.orNull?.trim()
@@ -172,6 +206,13 @@ tasks.register<JavaExec>("compileCorpus") {
             taskArgs += listOf("--allow-parse-failures", resolveAllowListPath(tolerant).absolutePath)
         } else {
             require(mode != "compat") { "compat 档必须带 -PallowParseFailures=<容错清单>" }
+        }
+        // 引擎档透传（CONTRACT-ENGCOMPAT §8.0.4）：属性非空才追加，缺省/空串不进 args。
+        // 报告参数与 `--engine-profile` 同生共死：同一次追加，报告 JSON 供 pack 配置模式
+        // 渲染兼容性报告（落点见上面 engineReportPath 的注释）。
+        engineProfileProvider.orNull?.trim()?.takeIf { it.isNotEmpty() }?.let { profile ->
+            taskArgs += listOf("--engine-profile", profile)
+            taskArgs += listOf("--engine-report", engineReportPath)
         }
         setArgs(taskArgs)
     }
@@ -278,8 +319,9 @@ tasks.register<JavaExec>("symbolAudit") {
 // 修法不在钉的用例文件里（那会越权），而在跑法口径：本任务把 ERATW_GAMEDIR / ERATW_CORPUS
 // 任务级指向 4.981 根，再点名这枚钉 —— 从「静默跳」变成「有判定力的 PASS」。根的发现
 // 不硬编本机绝对路径：`-Pcorpus981` 显式指定优先，否则走候选链，逐候选用 4.981 标记
-// `ERB/DLC/AI对话补丁/对话调用.erb` 验明正身（与 core-vm 的 CORPUS_981_MARKER 同一文件，
-// 三处一个真相）；一个都不命中时 doFirst 判红并打印逐候选判定 —— 负控
+// `ERB/DLC/AI对话补丁/对话调用.erb` 验明正身（与 core-vm 的 CORPUS_981_MARKER 同一份生成物
+// 投影 `corpora.V4_981.marker_file`，与 core-vm 测试装置 GameRoot981 同源）；一个都不命中时
+// doFirst 判红并打印逐候选判定 —— 负控
 // （`-Pcorpus981=<不存在的目录>`）必须红，不许静默空转。
 //
 //   ./gradlew --configure-on-demand :tools:erbcc:gate981Corpus
@@ -290,14 +332,27 @@ tasks.register<JavaExec>("symbolAudit") {
 // 分目录，与标准闸互不覆盖）。
 // ---------------------------------------------------------------------------
 
-/** 4.981 打包根目录名（与 core-vm 的 CORPUS_981_DIR 同源；换根两处一起改）。 */
-private val CORPUS_981_DIR = "eraTW4.981-261017-EAGLOV3"
+/**
+ * 4.981 语料身份：**不在这里写字面量**（CONTRACT-ENGCPL E7）。
+ *
+ * 单源 = 手写的 `specs/engine-profiles.input.yaml`，经 `devtools/gen_engine_profiles.py`
+ * 投影成 `specs/engine-profiles.yaml`；本脚本与 `:core-vm` 的同名闸都经 [CorpusIdentity]
+ * 窄解析生成物的 `corpora.V4_981` 取值，测试装置 `GameRoot981` 吃 Kotlin 投影
+ * `EngineProfileData.CORPORA`。换根 = 改 input yaml + 重生成，三侧一处不动。
+ */
+private val CORPUS_981 = corpus(rootProject.file("specs/engine-profiles.yaml"), "V4_981")
+
+/** 4.981 打包根目录名（= 生成物 `corpora.V4_981.root_dir`）。 */
+private val CORPUS_981_DIR = CORPUS_981.rootDir
 
 /**
- * 4.981 标记文件：4.980 根**无**此文件（全树差集实测），命中即认 4.981。
- * 与 core-vm 的 CORPUS_981_MARKER、core-vm 测试装置 GameRoot981 同一文件 —— 三处一个真相。
+ * 4.981 标记文件（= 生成物 `corpora.V4_981.marker_file`）：4.980 根**无**此文件
+ * （全树差集实测），命中即认 4.981。
  */
-private val CORPUS_981_MARKER = "ERB/DLC/AI对话补丁/对话调用.erb"
+private val CORPUS_981_MARKER: String = CORPUS_981.markerFile ?: throw GradleException(
+    "生成物 specs/engine-profiles.yaml 的 corpora.V4_981 没有 marker_file：" +
+        "4.981 打包根失去认根标记，gate981 的候选链无法验明正身（换语料请同步给 marker_file）",
+)
 
 /** 标记命中判定（取证面：既进构建日志也进判红文案）。 */
 fun corpus981MarkerHit(dir: File): Boolean =

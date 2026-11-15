@@ -1,6 +1,11 @@
 package com.eratw.port.core.vars
 
+import com.eratw.port.core.compat.RelationMasternamePolicy
+import com.eratw.port.core.entity.ICharaSlotProjector
 import com.eratw.port.core.entity.VirtualCharaIndexResolver
+import com.eratw.port.core.err.RAND_TOKEN_CLAMP_KIND
+import com.eratw.port.core.err.clampWarnings
+import com.eratw.port.core.err.randTokenClampMessage
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.VarInfo
 import com.eratw.port.core.expr.VariableHandles
@@ -91,13 +96,69 @@ class VariableStore(
      * 越界判定抛 `OoRCharaVarArg`——与原版行为一致，不是错误。
      */
     charaIndexResolver: VirtualCharaIndexResolver? = null,
+    /**
+     * 角色槽投射桥（M5-2；`null` = 无实体系统 = 逐位旁路：五个行操作接点零调用、
+     * 零分配，与 [charaIndexResolver] 同形态并列、互不替代）。
+     *
+     * 接点（era-arch-v61u.md §7 Active Roster Pinning）：[deleteCharacter] /
+     * [deleteCharacters] 删行后逐次 [ICharaSlotProjector.onCharacterRowDeleted]；
+     * [swapCharacters] 换位后以恒等 + a↔b permutation 调
+     * [ICharaSlotProjector.onCharacterRowsPermuted]；[sortCharacters] 在 reorder 后
+     * **由排序实现产出的 order 逆映射**调 [ICharaSlotProjector.onCharacterRowsPermuted]
+     * （禁止事后按值猜映射）；[pickUpCharacters] 不单设接点——其内部逐次调用
+     * [swapCharacters]/[deleteCharacter]，复合即整场 oldToNew 映射的逐次同步。
+     *
+     * **构造后绑定**（循环依赖破法）：桥持本 store 引用、本类又持桥，二者不能在同一
+     * 构造表达式里互喂 —— 装配序 = 先建 store、再建桥（构造拿到 store 完整引用）、
+     * 最后回填本属性。`var` 与 [writeProbe] 同形（ADR-003 单线程执行；
+     * @Volatile 照 writeProbe 先例：宿主线程赋值、VM 线程消费）。
+     */
+    @Volatile
+    var charaSlotProjector: ICharaSlotProjector? = null,
 ) : VariableReader, VariableWriter, VariableHandles {
 
     private val sizes = registry.sizes
     val characters: CharacterTable = CharacterTable(sizes, config, initialCharaCapacity)
 
-    /** 角色下标解析层（见构造参数 KDoc）；`null` 时 [resolveCharaPos] 原值直通。 */
-    private val charaIndexResolver: VirtualCharaIndexResolver? = charaIndexResolver
+    /**
+     * 角色下标解析层（见构造参数 KDoc）；`null` 时 [resolveCharaPos] 原值直通。
+     *
+     * RT2 车次表 F 车（MR-2b-2）：生产 store 由 `GameSession` 在声明事务**之前**构造，
+     * 那时虚拟 NO 注册表与真投射桥都还不存在，resolver 无法当构造实参喂进来。故本属性
+     * 与 [charaSlotProjector] 同形（`@Volatile` + 可后期装配），且只经
+     * [bindCharaIndexResolver] / [unbindCharaIndexResolver] 两个显式缝改写：重绑即拒绝、
+     * 解绑按实例比对幂等，不静默覆盖别人的解析器。构造参数注入的既有语义零改动。
+     *
+     * 装配相位单线程（ADR-003，与 [charaSlotProjector] 回填同相位）；解析热路径
+     * [resolveCharaPos] 只读一次 volatile，零同步块、零分配。
+     */
+    @Volatile
+    private var charaIndexResolver: VirtualCharaIndexResolver? = charaIndexResolver
+
+    /** 当前已装配的解析器观察面（取证 / 收口比对用；未装配 = null）。 */
+    val charaIndexResolverOrNull: VirtualCharaIndexResolver? get() = charaIndexResolver
+
+    /**
+     * 后期装配角色下标解析器（F 车生产装配序的 store 侧落点）。
+     *
+     * 幂等边界：已装配时（无论来自构造实参还是上一次绑定）**拒绝重绑**，当场抛而不静默
+     * 替换——静默覆盖会让共用 store 的另一会话的虚拟 NO 突然解析到别人的投射行。
+     * 要换解析器须先 [unbindCharaIndexResolver] 再绑，或使用新的 store。
+     */
+    fun bindCharaIndexResolver(resolver: VirtualCharaIndexResolver) {
+        require(charaIndexResolver == null) {
+            "VariableStore.charaIndexResolver 重复绑定：先解绑本会话解析器再重绑"
+        }
+        charaIndexResolver = resolver
+    }
+
+    /**
+     * 收口解绑：只解 [resolver] 自己那一份；重复解绑或传来别人的实例一律 no-op。
+     * 与 [bindCharaIndexResolver] 成对，保证 shutdown 幂等且不误伤后一会话的绑定。
+     */
+    fun unbindCharaIndexResolver(resolver: VirtualCharaIndexResolver) {
+        if (charaIndexResolver === resolver) charaIndexResolver = null
+    }
 
     /**
      * 附属运行时状态（XML/Map/DT/图形池）。与变量池同生命周期——一个 VM 一套，
@@ -165,49 +226,90 @@ class VariableStore(
     private fun intCol3(index: Int): LongArray = intCol(gInt3, index, gInt3Len[index])
 
     /**
-     * 存档抓取用的系统整型列快照（整列一次取走，替代逐元素 `readInt(def.name, …)`）。
+     * 存档写侧的**零拷贝系统整型列视图**（SAVE-STREAM 波，2026-11-13）。
      *
-     * 存在理由：`save/SaveCapture.entryForDef` 对 `TA`/`TB` 这类 3 维列原本是**每个元素**做一次
-     * 按名解析 + 一块新的下标数组（出厂尺寸 100×100×100 ⇒ 一次存档 200 万轮），堆贴顶时正是
-     * 「玩久了存不上」（2026-11-01 OOM 单）的尖峰形状。
+     * ## 为什么不再复制
      *
-     * **只在能与逐元素读法证明等值时**返回非 null，其余一律返回 null 让调用方退回原路径：
-     * - 按名解析到的就是这个 def（同名私有/用户变量遮蔽时，`readInt(def.name, …)` 读的是**那个**
-     *   变量，批量面不能替它改口径）；
-     * - 不是 [VarDef.isForbid]（该形态下逐元素读的第一句就抛「尺寸为 0」，批量不能替它决定报不报）；
-     * - 列长 == `def.dims` 各维乘积（[checkFlat] 的行主序公式 `elem = elem * n + v` 与抓取侧的
-     *   下标拆解同一条，长度对不上就没有下标对应关系可言）。
+     * 原版 `VariableData.SaveToStreamBinary` 只是 `writer.WriteWithKey(item.Key, value.GetArray())`
+     * （VariableData.cs:3980-3997），而 `GetArray()` 直接 `return array`（:76 / :168 / :268）——
+     * 存档全程**只有活列这一份**。移植侧此前先 `copyOf()` 整列、或对未分配列造一整列零，
+     * 把整个池又复制了一份：`globalIntDeclaredBytes` 实测 16.7 MiB，加真档 168 角色 × 208 KB
+     * ≈ 35 MiB，单次 `SAVEDATA` 瞬时分配在 50 MiB 量级。512 MiB 挡位下稳态水位 88%~93% 时
+     * 这一笔必然分不出来，屏上只剩「SAVEDATA命令在存档时发生了意料之外的错误」——
+     * 玩家「一天玩 38 分钟、试三次都存不了、重启就好」的机制就在这里。
      *
-     * 返回的是**副本**：抓取之后脚本还会继续写这一列，活数组绝不能交出去。
+     * ## 活引用安全吗
+     *
+     * 安全：本视图只在**存档写调用栈内**被读，而存档是 VM 线程的同步调用
+     * （`FileSystemOps.saveData` 由 `StatementExecutor` 的 SAVEDATA 直接调），写盘期间脚本
+     * 不可能执行（ADR-003 单线程 VM）。原版同口径：writer 直接持有活数组写到 FileStream 关闭。
+     * 视图离开写调用栈后没有消费者 —— 它不是长期快照，调用方也不许缓存它。
+     *
+     * ## 判据不变
+     *
+     * 三个前置条件与旧批量面逐条相同（[VarDef.isForbid] / 按名解析身份 / 列长 == 维度乘积），
+     * 任一不满足仍返回 null，调用方退回逐元素读法 —— 条目长度与顺序因此不会变。
      */
-    internal fun captureSystemIntColumn(def: VarDef): LongArray? {
-        if (def.isForbid) return null
-        if (resolveEntry(def.name) !== def) return null
-        var product = 1L
-        for (n in def.dims) product *= n
-        val column = when (def.storage) {
-            // 未分配列 == 全 0 列（读法 `?.get(elem) ?: 0L` 的同一口径），长度取分配时的同一读数；
-            // 读数与 def 的维度乘积不一致就交回逐元素路径（批量面不能改变条目长度）。
-            Storage.G_INT1 -> gInt1[def.index] ?: return zeroColumn(product, sizes.int1D[def.index])
-            Storage.G_INT2 -> gInt2[def.index] ?: return zeroColumn(product, gInt2Len[def.index])
-            Storage.G_INT3 -> gInt3[def.index] ?: return zeroColumn(product, gInt3Len[def.index])
-            else -> return null
-        }
-        if (product != column.size.toLong()) return null
-        return column.copyOf()
+    /** 能走整列视图的三张存储形态（G_INT1/2/3）；其余形态一律退回逐元素读法。 */
+    private val intColumnStorages = setOf(Storage.G_INT1, Storage.G_INT2, Storage.G_INT3)
+
+    internal class IntColumnView(
+        val length: Int,
+        private val values: LongArray?,
+    ) {
+        /** 未分配列按全 0 读（与逐元素 `?.get(elem) ?: 0L` 同一口径），且**不造数组**。 */
+        fun get(i: Int): Long = values?.get(i) ?: 0L
     }
 
-    private fun zeroColumn(product: Long, columnLength: Int): LongArray? =
-        if (product == columnLength.toLong()) LongArray(columnLength) else null
+    /**
+     * [IntColumnView] 的字符串列版本（`G_STR1`）。
+     *
+     * `gStr1` 存的是驻留池下标，逐元素解码走 [pool] 的 [StringTable.lookup]（返回池内已驻留的
+     * 同一实例，不分配）；旧实现为每个元素新建 `Array<String?>` 再逐个塞进去。
+     */
+    internal class StrColumnView(
+        val length: Int,
+        private val ids: IntArray,
+        private val pool: StringTable,
+    ) {
+        fun get(i: Int): String = pool.lookup(ids[i])
+    }
 
-    /** [captureSystemIntColumn] 的字符串列版本（`G_STR1`，元素走驻留池解码）。 */
-    internal fun captureSystemStrColumn(def: VarDef): Array<String?>? {
-        if (def.isForbid) return null
-        if (def.storage != Storage.G_STR1) return null
-        if (resolveEntry(def.name) !== def) return null
+    /**
+     * 系统整型列 → 零拷贝视图；null = 不满足整列口径（调用方退回逐元素读法）。
+     *
+     * 长度口径与旧批量面逐字相同：已分配列取 `column.size`，未分配列取分配时的声明读数
+     * （`sizes.int1D` / `gInt2Len` / `gInt3Len`）。
+     */
+    internal fun systemIntColumn(def: VarDef): IntColumnView? {
+        val eligible = !def.isForbid &&
+            resolveEntry(def.name) === def &&
+            def.storage in intColumnStorages
+        if (!eligible) return null
+        var product = 1L
+        for (n in def.dims) product *= n
+        val values = when (def.storage) {
+            Storage.G_INT1 -> gInt1[def.index]
+            Storage.G_INT2 -> gInt2[def.index]
+            else -> gInt3[def.index]
+        }
+        val length = values?.size ?: when (def.storage) {
+            Storage.G_INT1 -> sizes.int1D[def.index]
+            Storage.G_INT2 -> gInt2Len[def.index]
+            else -> gInt3Len[def.index]
+        }
+        return if (product == length.toLong()) IntColumnView(length, values) else null
+    }
+
+    /** [systemIntColumn] 的字符串列版本（`G_STR1`）；null = 不满足整列口径。 */
+    internal fun systemStrColumn(def: VarDef): StrColumnView? {
+        val eligible = !def.isForbid &&
+            def.storage == Storage.G_STR1 &&
+            resolveEntry(def.name) === def &&
+            def.dims.size == 1
+        if (!eligible) return null
         val column = gStr1[def.index]
-        if (def.dims.size != 1 || column.size != def.dims[0]) return null
-        return Array<String?>(column.size) { pool.lookup(column[it]) }
+        return if (column.size == def.dims[0]) StrColumnView(column.size, column, pool) else null
     }
 
     // 维度乘积走 [dimProduct]（Long 预乘 + 上限判定）：VARIABLESIZE.CSV 会把这里的维度
@@ -575,6 +677,20 @@ class VariableStore(
      * 非 null 时优先于 [lineCount] 快照；纯变量池测试无宿主，走快照。
      */
     var lineCountSource: (() -> Long)? = null
+
+    /**
+     * 4.981 钳制类告警的**系统行出口**（`Console.PrintError` / `Console.PrintWarning`）。
+     *
+     * 伪变量通道（`RAND:n`）在存储层，拿不到 `EvalContext.printSystemLine`，故按
+     * [lineCountSource] 的同一形态由宿主注入；`null` = 纯变量池（测试 / erbcc 自检）
+     * 不上屏，但告警仍留在 [aux] 的 `clamp-warnings` 槽里可取证。
+     *
+     * 生产由 `ProcessRuntime.init` 接到 `evalContext.printSystemLine` —— 走的是文字流
+     * 唯一出口 `consoleBridge`（契约 C6），并带上 `UseUserStyle = false` 的系统行样式。
+     * @Volatile 与 [writeProbe] 同形（ADR-003：宿主线程赋值、VM 线程消费）。
+     */
+    @Volatile
+    var systemLineSink: ((String) -> Unit)? = null
     var isTimeout: Boolean = false
     var windowTitle: String = ""
     var moneyLabel: String = "$"
@@ -669,32 +785,34 @@ class VariableStore(
     }
 
     /**
-     * 浮点局部的有效长度：`max(VARSIZE 档, #LOCALFSIZE[, 形参声明长])`。
+     * 浮点局部的有效长度（**严格照抄 fork**，组长裁决落地，契约 CONTRACT-RT2-M32A 判据 2）：
      *
-     * - 档位下界 = [VariableSizes.float1D] 那一格（出厂 10，spec: fork-src
-     *   `ConstantData.cs:211-217`；`VARIABLESIZE.CSV` 的浮点行改写它，spec: :532-533；
-     *   原版把这一格交给 `VariableLocal` 当 `size`，spec: `VariableData.cs:376-379`）；
-     * - `LOCALF`：`max(档位, #LOCALFSIZE)`；
-     * - `ARGF`：`max(档位, #LOCALFSIZE, 形参声明长)` —— 「声明只增不减」对应
-     *   spec: fork-src `VariableLocal.cs:50-53` 的
-     *   `if (newSize < size && (ARG || ARGS || ARGF)) newSize = size`。
+     * - `LOCALF`：`#LOCALFSIZE` 声明 > 0 用声明（**不抬档位下限**），否则档位
+     *   [VariableSizes.float1D] 那一格（出厂 10，spec: fork-src
+     *   `ConstantData.cs:211-217`；`VARIABLESIZE.CSV` 的浮点行改写它，spec: :532-533）。
+     *   锚 = `VariableLocal.cs` → `GetNewLocalVariableToken` 的 LOCALF 支
+     *   （`newSize = func.LocalFloatLength`；`> 0` 直接 `creater(..., newSize)`——
+     *   钳制名单 `varCode ∈ {ARG, ARGS, ARGF}` 里没有 LOCALF，spec: fork-src
+     *   `VariableLocal.cs:48-53`）⇒ 非事件函数 `#LOCALFSIZE 4` 缩到 4；
+     *   事件函数的档位下限在**分组聚合**时抬（`LabelDictionary.cs` → `SortLabel` 事件支
+     *   `localFloatMax < getLocalDefaultSize("LOCALF")` ⇒ 组内回写值已 ≥ 档位），
+     *   本式读到的 `floatLocal` 就是聚合值。
+     * - `ARGF`：`max(档位, 形参声明长)`——**不并入 `#LOCALFSIZE`**。锚 = `VariableLocal.cs`
+     *   的 ARGF 支只读 `func.ArgFloatLength`（`#LOCALFSIZE` 记在 `func.LocalFloatLength` 上，
+     *   两者不互相抬界，spec: fork-src `VariableLocal.cs:48-49` + `LogicalLineParser.cs:257-266`），
+     *   且 ARGF 在钳制名单里（`newSize < size ⇒ newSize = size`）。
      *
-     * ⚠ **与 fork 的两处已知口径差**（本路按 g1 契约取上述上界，逐条已实测取证，
-     * 改动会影响 g1 已验收的 `FloatDeclFaceTest` ⇒ 留给组长裁决，见交付报告）：
-     * 1. fork 的 `ARGF` 只读 `func.ArgFloatLength`（`VariableLocal.cs:48-49`），
-     *    `#LOCALFSIZE` 记在 `func.LocalFloatLength` 上（`LogicalLineParser.cs:257-266`），
-     *    两者不互相抬界 ⇒ 严格照抄应是 `max(档位, 形参声明长)`，本式多并入了 `#LOCALFSIZE`；
-     * 2. fork 对**非事件函数**的 `LOCALF` 不做下界钳制（`VariableLocal.cs:52` 的钳制名单里
-     *    没有 LOCALF），只有事件函数在分组时按 `getLocalDefaultSize("LOCALF")` 抬到档位
-     *    （spec: fork-src `LabelDictionary.cs:155-173, :226-253`）⇒ 严格照抄时
-     *    `#LOCALFSIZE 4` 在非事件函数里是**缩到 4**，本式仍取 max。
+     * 历史注记：本式曾按 g1 契约取 `max(档位, #LOCALFSIZE, 形参声明长)` 三者上界
+     * （两处口径差当时登记为 TODO 留组长裁决）；本波按严格照抄裁决改为上述 fork 口径，
+     * 受影响的既有断言（`FloatDeclFaceTest` 2 例 / `FloatVarLocalLengthTest` 2 例）已
+     * 逐例刷新并给理由（见 DELIVERY-RT2-M32A）。
      */
     private fun resolveFloatLocalSize(funcKey: String, def: VarDef): Int {
         val base = def.dims[0]
         val len = localLengths[upperOf(funcKey)] ?: return base
         return when (def.code) {
-            VariableCode.ARGF -> maxOf(base, len.floatLocal, len.floatArg)
-            else -> maxOf(base, len.floatLocal)
+            VariableCode.ARGF -> maxOf(base, len.floatArg)
+            else -> if (len.floatLocal > 0) len.floatLocal else base
         }
     }
 
@@ -1928,12 +2046,19 @@ class VariableStore(
      * 注册角色模板（CSV 装载期）。同 NO 重复时保留**首次**出现的定义：
      * 原版 `GetCharacterTemplate` 对 CharacterTmplList 线性扫描、命中即返回
      * （spec: ConstantData.cs:1218-1228），即列表里第一条。
+     *
+     * `MASTERNAME` 列只在该档 `RELATION` 逆引表收录时登记（[VarConfig.relationMastername]）：
+     * 原版 relationDic 建表循环 v24/em 加 Mastername（spec: ConstantData.cs:640-641 /
+     * :711-712），snake/cs 不加（:854-863 / :743-753）。Name/Callname/Nickname 四树一致。
      */
     fun registerTemplate(template: CharacterTemplate) {
         templatesByNo.putIfAbsent(template.no, template)
         if (template.name.isNotEmpty()) templatesByName.putIfAbsent(template.name, template)
         if (template.callname.isNotEmpty()) templatesByName.putIfAbsent(template.callname, template)
         if (template.nickname.isNotEmpty()) templatesByName.putIfAbsent(template.nickname, template)
+        if (config.relationMastername == RelationMasternamePolicy.INCLUDED && template.mastername.isNotEmpty()) {
+            templatesByName.putIfAbsent(template.mastername, template)
+        }
     }
 
     fun clearTemplates() {
@@ -1949,6 +2074,16 @@ class VariableStore(
      * （运行期 [keywordToInteger]，装载期符号审计用它判「模板名是否存在」）。
      */
     fun templateByName(name: String): CharacterTemplate? = templatesByName[name]
+
+    /** `RELATION` 逆引键 → 角色 NO（未登记返回 null；口径见 [registerTemplate]）。 */
+    fun relationIndex(keyword: String): Long? = templatesByName[keyword]?.no
+
+    /**
+     * `RELATION` 逆引表快照（键 → NO，先到先得）。装载期 `GETNUM` 折叠用；与运行期
+     * [keywordToInteger] 的 RELATION 分支同表，避免两处口径分叉。
+     */
+    fun relationKeywords(): Map<String, Int> =
+        templatesByName.mapValuesTo(LinkedHashMap()) { it.value.no.toInt() }
 
     /** ADDCHARA：按 NO 查模板，未命中则 CodeEE。spec: VariableEvaluator.cs:1201-1210 */
     fun addCharacter(no: Long): Int {
@@ -2045,6 +2180,8 @@ class VariableStore(
             throw CodeEE("试图删除不存在的注册角色(" + pos.toString() + ")")
         }
         characters.removeAt(pos.toInt())
+        // M5-2 行删除钩子：原生行变更完成后、与既有变量状态一致时逐次通知（§7）。
+        charaSlotProjector?.onCharacterRowDeleted(pos.toInt())
     }
 
     /**
@@ -2154,8 +2291,13 @@ class VariableStore(
             // 后续对半死行系统 1 维/2 维变量的读写走 NRE 等价闸（见 [CharacterTable.requireSystemRowAlive]）。
             characters.disposeRow(i)
         }
-        // 降序按位删除；与原版「先整体 Dispose 再按对象 Remove」的成功路径等价性论证见 KDoc
-        for (i in seen.sortedDescending()) characters.removeAt(i)
+        // 降序按位删除；与原版「先整体 Dispose 再按对象 Remove」的成功路径等价性论证见 KDoc。
+        // 降序保证每次 removeAt(i) 的目标行号未被此前删除移动（更大行号已删不影响更小者），
+        // 故逐次回调的行号 = 该行被删瞬间的实际原生行号（§7 钩子顺序契约）。
+        for (i in seen.sortedDescending()) {
+            characters.removeAt(i)
+            charaSlotProjector?.onCharacterRowDeleted(i)
+        }
     }
 
     /**
@@ -2213,6 +2355,17 @@ class VariableStore(
             throw CodeEE("试图替换一个不存在的注册角色")
         }
         characters.swap(a.toInt(), b.toInt())
+        // M5-2 行排列钩子：交换后以「恒等 + a↔b」permutation 通知（§7）。
+        // a == b 时行一格未动（spec: VariableEvaluator.cs:1384「x == y 不动」，与
+        // [CharacterTable.swap] 的同位早退一致）⇒ 不调钩子：纯自交换不该假递增世代。
+        if (a != b) {
+            charaSlotProjector?.let { projector ->
+                val map = IntArray(characters.count) { it }
+                map[a.toInt()] = b.toInt()
+                map[b.toInt()] = a.toInt()
+                projector.onCharacterRowsPermuted(map)
+            }
+        }
     }
 
     // ---- 角色指针（MASTER/TARGET/ASSI）----
@@ -2338,6 +2491,15 @@ class VariableStore(
         characters.reorder(order)
         remapGlobalPosition("TARGET", order)
         remapGlobalPosition("ASSI", order)
+        // M5-2 行排列钩子：整场排序（行重排 + TARGET/ASSI 重定位）落定后才通知，钩子看到
+        // 的就是「与既有变量状态一致」的 roster。映射**由排序实现产出的 order 取逆**得来
+        // （§7 裁定：禁止事后按列值猜映射）：order[新位置] = 旧位置 ⇒ 逆即
+        // oldToNew[旧位置] = 新位置，直接从 order 翻转，不经任何列值反推。
+        charaSlotProjector?.let { projector ->
+            val oldToNew = IntArray(n)
+            for (newPos in order.indices) oldToNew[order[newPos]] = newPos
+            projector.onCharacterRowsPermuted(oldToNew)
+        }
     }
 
     /**
@@ -2764,30 +2926,110 @@ class VariableStore(
     ) {
         companion object {
             /**
-             * 形参表里 ARGF 的个数 = 该函数 ARGF 的**声明长**（fork 的 `label.ArgFloatLength`）。
+             * 形参表里 [code] 变量（`ARG` / `ARGS` / `ARGF`）的**声明长** = 该函数对应数组的长度。
              *
-             * 原版按 `max(下标 + 1)` 取（spec: fork-src ErbLoader.cs:600-602,709-710,787：
-             * `maxArgF` 初值 **-1**，每条 ARGF 形参用 `vTerm.getEl1forArg + 1` 抬上界）；
-             * 移植侧的形参表在进程序表时已经**剥掉下标**（spec:
-             * [com.eratw.port.core.stmt.FuncLabelStmt.paramNames] 的「下标被剥掉，供 arity /
-             * 类型桶计数使用」），与整数侧 `argIntCount` 的「按个数分桶」同一口径
-             * （erbcc `CorpusCompile.kt:641-642` 的 `params.size - strParam` 也是数个数）。
-             * ⇒ 写成 `@F(ARGF, ARGF:5)` 这种跳号形参在移植侧得到 2 而不是 6；
-             * TODO(verify)：4.981 语料实测 **0 处** ARGF 形参（`grep -ri ARGF ERB/` 零命中，
-             * 2026-10-31），故该形态无对拍样本。
+             * 原版是 `max(下标 + 1)` 而不是形参**个数**：
+             * `ErbLoader.cs:565-576`（`if (maxArg < vTerm.getEl1forArg + 1) maxArg = …`，
+             * ARGS 同段）→ `:612-613` 落 `label.ArgLength` / `label.ArgsLength`；
+             * 4.981 fork 的 ARGF 同一口径（fork-src `ErbLoader.cs:709-710,787`）。
+             * `@F(ARG, ARG:3)` ⇒ 4（下标跳号时个数 2 会少算），`@F(ARGF:5)` ⇒ 6。
              *
-             * `paramNames` 为空（`.erbc` v1 容器不带段 8）⇒ 0 ⇒ 与改造前的 `floatArg` 恒 0 同值。
+             * 这正是第三方语料把 `VariableSize.csv` 的 `ARG,1` 缩到底后暴露的缺陷：
+             * 省略位写回 `ARG[3]` 撞「超出数组范围」（2026-11-12 真机 eratohoReverse）。
+             *
+             * 形参表用 [com.eratw.port.core.stmt.FuncLabelStmt.paramRefs]（保留 `:n` 原文，
+             * 经 `.erbc` 段 8 到达运行期）；[count] 是旧口径（形参个数），从下面两点作为**下界**保留：
+             * - `.erbc` v1 容器没有段 8 ⇒ 形参表为空，只有个数可用（此时返回值 = [count]，
+             *   与改造前逐字同值）；
+             * - 类型桶回退路径（`ProcessRuntime.bindArgs`）按个数写 `ARG:0..count-1`，
+             *   把声明长缩到个数以下会让这条旧路径凭空越界。
+             * 个数 ≥ 下标上界时两者一致（稠密形参 = 语料常态），故该下界只影响「有私有形参
+             * 混在 ARG 里」这类退化写法，不会掩掉稀疏下标的扩张。
              */
-            fun floatArgFromParams(paramNames: List<String>): Int =
-                paramNames.count { it.startsWith(ARGF_PARAM_PREFIX, ignoreCase = true) }
-
-            private const val ARGF_PARAM_PREFIX = "ARGF"
+            fun declaredLength(paramRefs: List<String>, code: String, count: Int): Int {
+                var max = count
+                for (ref in paramRefs) {
+                    if (ref.length < code.length) continue
+                    if (!ref.regionMatches(0, code, 0, code.length, ignoreCase = true)) continue
+                    // 整名匹配：ARG 不能吃掉 ARGS/ARGF。
+                    var i = code.length
+                    if (i < ref.length && ref[i] == '$') i++
+                    var sub = 0
+                    if (i < ref.length) {
+                        if (ref[i] != ':') continue
+                        i++
+                        var v = 0
+                        var ok = i < ref.length
+                        while (i < ref.length) {
+                            val c = ref[i]
+                            if (c < '0' || c > '9' || v > (Int.MAX_VALUE - 9) / 10) {
+                                ok = false
+                                break
+                            }
+                            v = v * 10 + (c - '0')
+                            i++
+                        }
+                        // 非十进制形态不该出现（装载期已把下标折成规范化十进制，
+                        // spec: LineParser.constSubscripts）；出现就不猜，按无此形参处理。
+                        if (!ok) continue
+                        sub = v
+                    }
+                    if (sub + 1 > max) max = sub + 1
+                }
+                return max
+            }
         }
     }
 
+    /**
+     * 注册一条函数的局部长度；同名（key 归一）重复注册时做**跨定义合并**：
+     *
+     * - `arg` / `args` / `floatArg`（ARG/ARGS/ARGF）：**跨定义单调合并**（取 max，含被覆盖
+     *   定义）——C# 非事件支每条定义装载时按自己的声明触发一次 `resizeLocalVars`
+     *   （spec: `LabelDictionary.cs` → `SortLabel` 非事件支），而
+     *   `VariableLocal.ResizeLocalVariableToken` 是**单调不缩**（`if (size < newSize)
+     *   ret.resize(newSize) else ret.resize(size)`，spec: fork-src `VariableLocal.cs:75-83`）
+     *   ⇒ 同名多重定义的有效声明长 = 跨定义 max；旧实现的 plain put（后写覆盖）只有
+     *   最后一条定义生效，与原版分叉（本波 M3-2-A 收口，契约判据 3）。
+     * - `local` / `locals` / `floatLocal`（LOCAL/LOCALS/LOCALF）：**后写胜**——C# 非事件
+     *   支 `noneventLabelDic[key] = label` 直接覆盖（spec: `LabelDictionary.cs:111-118`），
+     *   生效定义就是最后装载者，它的 LOCAL 声明就是有效声明；事件成员的 LOCAL/LOCALS/
+     *   LOCALF 已由装配期事件组聚合（`ProcessRuntime.init`，C# `SortLabel` 事件支）
+     *   抬到组内 max + 档位下限后再到这里，组内各成员写的是同一聚合值，覆盖与回写同值。
+     *
+     * 单定义（每 key 首次注册）走 `old == null` 快路，逐位等价旧实现；全零行不进
+     * 本方法（`ProcessRuntime.init` 的全零 continue），事件成员 arg 全零经 max(0,·)
+     * 亦不回退。
+     */
     fun defineLocalLengths(funcKey: String, lengths: LocalLengths) {
-        localLengths[funcKey.uppercase()] = lengths
+        val key = funcKey.uppercase()
+        val old = localLengths[key] ?: run {
+            localLengths[key] = lengths
+            return
+        }
+        localLengths[key] = LocalLengths(
+            local = lengths.local,
+            locals = lengths.locals,
+            arg = maxOf(old.arg, lengths.arg),
+            args = maxOf(old.args, lengths.args),
+            floatLocal = lengths.floatLocal,
+            floatArg = maxOf(old.floatArg, lengths.floatArg),
+        )
     }
+
+    /**
+     * 局部变量档位默认尺寸（`LOCAL` / `LOCALS` / `LOCALF` 名 → 注册表那一格的 dims[0]）。
+     *
+     * C# 锚：`IdentifierDictionary.cs` → `getLocalDefaultSize(key)` 返回 `localvarTokenDic
+     * [key].GetDefaultSize()`（= `VariableLocal.size` = `VariableIntArrayLength` /
+     * `VariableFloatArrayLength` 那一格，spec: `IdentifierDictionary.cs` 同名符号 +
+     * `VariableData.cs:367-379`）；移植侧同一格 = [VariableRegistry] 的 `VarDef.dims[0]`
+     * （`VariableSizes` 表镜像，`VariableSize.csv` 装载覆盖后即本作档位）。装配期事件组
+     * 聚合用它抬组内 max 的下限（spec: `LabelDictionary.cs` → `SortLabel` 事件支尾部三个
+     * `if (xxxMax < getLocalDefaultSize(...))`）。未知名字返回 0（不抬档）。
+     */
+    internal fun localDefaultSize(name: String): Int =
+        registry.def(name)?.dims?.firstOrNull() ?: 0
 
     /**
      * Capacity hint for the per-function local-length table. Purely an
@@ -3272,7 +3514,17 @@ class VariableStore(
         else -> throw CodeEE("未知的 GAMEBASE 常量 $name")
     }
 
-    /** RAND 伪变量。spec: VariableData.cs:838-876 */
+    /**
+     * RAND 伪变量。
+     *
+     * 4.981 `VariableToken.cs:1413-1436` 的 `RandToken`（12.2.0，见 `CHANGELOG.md:105-112`）
+     * 已把 1.824 `VariableData.cs:846-851` 的 `num <= 0 → throw RandArgIsNegative`
+     * 改成「钳制返回 0 + 首次 PrintError」。真机上报的 `RAND不能指定0以下的值(0)`
+     * 就是移植侧仍停在 1.824 语义、把本不该中断的脚本打断了。
+     *
+     * `CompatiRandToken`（`VariableToken.cs:1438+`）是另一条归一化通道，1.824 起就不抛，
+     * 上面的 `config.compatiRand` 分支原样保留、不在本轮改动范围。
+     */
     private fun random(indices: LongArray): Long {
         if (indices.size != 1) throw CodeEE("RAND 需要 1 个参数")
         val rng = randProvider ?: throw CodeEE("RAND 需要注入 RandProvider（M2 第二批接 SFMT19937）")
@@ -3283,10 +3535,15 @@ class VariableStore(
             return rng.next(32768L) % bound
         }
         val bound = indices[0]
-        // 文案逐字对齐官方 zhs（`emuera-zhs.xml:376` Error.RandArgIsNegative，模板里的
-        // `{0}` 就是 bound；抛点 `VariableData.cs` RandToken :846-851 的 `num <= 0`）。
-        // 2026-10-31 玩家报告 M_KOJO_EVENT_K70_31 行6087 实证玩家看到的就是这一句。
-        if (bound <= 0) throw CodeEE("RAND不能指定0以下的值($bound)")
+        if (bound <= 0L) {
+            // 与 RandToken 同序：先判非法、直接 return 0，不调 GetNextRand（不消耗 RNG）。
+            // clampedWarned 在 4.981 是 RandToken 类的 private static；这里按会话槽分桶，
+            // 与 RandMethod 那一支互不共用（4.981 也是各自一份 static）。
+            val message = randTokenClampMessage(bound)
+            aux.clampWarnings().once(RAND_TOKEN_CLAMP_KIND, message)
+                ?.let { systemLineSink?.invoke(it) }
+            return 0L
+        }
         return rng.next(bound)
     }
 
@@ -3367,6 +3624,15 @@ class VariableStore(
                 throw oorCharaVarArg(def.name, 1, pos)
             }
             if (dims.isEmpty()) return packSlot(pos.toInt(), 0)
+            // PERF：角色 1 维（CFLAG/CSLOT 一类）是环体里的主形态，绕开循环与乘法。
+            if (dims.size == 1) {
+                val v = indices[1]
+                val n = dims[0]
+                if (v < 0 || v >= n) {
+                    throw oorCharaVarArg(def.name, 2, v)
+                }
+                return packSlot(pos.toInt(), v.toInt())
+            }
             var elem = 0
             var d = 0
             while (d < dims.size) {
@@ -3383,6 +3649,15 @@ class VariableStore(
         if (dims.isEmpty()) {
             if (indices.isNotEmpty()) throw zeroDVarHasArg(def.name)
             return 0L
+        }
+        // PERF：非角色 1 维（A..Z / FLAG 一类）同样绕开循环；elem = 0*n + v = v。
+        if (dims.size == 1) {
+            val v = indices[0]
+            val n = dims[0]
+            if (v < 0 || v >= n) {
+                throw oorVarArg(def.name, 1, v)
+            }
+            return v
         }
         var elem = 0
         var d = 0

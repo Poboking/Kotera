@@ -139,56 +139,51 @@ class OperatorAuditTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `整数除法向零截断与除零异常`() {
-        // 原版：OperatorMethodManager.cs:121-137 DivIntInt —— 先取右操作数判 0（:131-135），
-        //       再 arguments[0] / arguments[1]（:136）作用于 System.Int64。
+    fun `整数除法向零截断与零除钳制`() {
+        // 4.981：OperatorMethod.cs:374 → SafeArithmetic.SafeDivide（:67-77），
+        //       非零时仍是 System.Int64 整除（向零截断），b == 0 时警告并返回 **0**。
+        // 1.824 的 OperatorMethodManager.cs:121-137 才是「先判 0 抛 DivideByZero」。
         // .NET 框架语义：整数除法向零截断（ECMA-335 的 div 指令）⇒ 无行号，框架证据缺口。
-        // 移植侧：Expr.kt:240-245（Kotlin Long 的 / 亦向零截断）。
         assertEquals(3L, evi(listOf(i(7), op("/"), i(2))))
         assertEquals(-3L, evi(listOf(i(-7), op("/"), i(2))))
         assertEquals(-3L, evi(listOf(i(7), op("/"), i(-2))))
         assertEquals(3L, evi(listOf(i(-7), op("/"), i(-2))))
         assertEquals(0L, evi(listOf(i(1), op("/"), i(2))))
         assertEquals(0L, evi(listOf(i(-1), op("/"), i(2))))
-        // 除零：原版抛 CodeEE(Lang.Error.DivideByZero)（:132-135；文案 lang.emuera-zhs.xml:286）
-        assertFailsWith<ExprEvalException> { evi(listOf(i(1), op("/"), i(0))) }
+        assertEquals(0L, evi(listOf(i(1), op("/"), i(0))), "4.981 零除钳制，不再抛 DivideByZero")
         // 商余恒等式（截断方向的间接证据；两边同构）：(-7/3)*3 + (-7%3) == -7
         assertEquals(-7L, evi(listOf(i(-7), op("/"), i(3), op("*"), i(3), op("+"), i(-7), op("%"), i(3))))
         // TODO(verify): 负商截断方向缺 C# 行号级证据，需 dotnet 复测（样本见交付）
     }
 
     @Test
-    fun `取模符号跟随被除数与模零异常`() {
-        // 原版：OperatorMethodManager.cs:140-156 ModIntInt —— 同样先判 0（:150-154），
-        //       再 arguments[0] % arguments[1]（:155）。
+    fun `取模符号跟随被除数与模零钳制`() {
+        // 4.981：OperatorMethod.cs:388 → SafeArithmetic.SafeModulo（:79-88），
+        //       非零时仍是 `arguments[0] % arguments[1]`，b == 0 时警告并返回 **0**。
         // .NET 框架语义：`%` 是余数（rem），符号跟随**被除数**，不是 floorMod ⇒ 无行号。
-        // 移植侧：Expr.kt:240-245（Kotlin Long 的 % 同为 rem 语义）。
         assertEquals(1L, evi(listOf(i(7), op("%"), i(2))))
         assertEquals(-1L, evi(listOf(i(-7), op("%"), i(2))))
         assertEquals(1L, evi(listOf(i(7), op("%"), i(-2))))
         assertEquals(-1L, evi(listOf(i(-7), op("%"), i(-2))))
         assertEquals(0L, evi(listOf(i(4), op("%"), i(2))))
-        assertFailsWith<ExprEvalException> { evi(listOf(i(1), op("%"), i(0))) }
+        assertEquals(0L, evi(listOf(i(1), op("%"), i(0))), "4.981 模零钳制，不再抛 DivideByZero")
         // TODO(verify): 负余数符号缺 C# 行号级证据，需 dotnet 复测
     }
 
     @Test
-    fun `除与余先求右操作数再求左`() {
-        // 原版：DivIntInt :131 先 arguments[1].GetIntValue，:136 才 arguments[0]；ModIntInt 同型。
-        // 移植侧：Expr.kt:241-243 同序 ⇒ 除数为 0 时左操作数的副作用不发动。
+    fun `除与余按 4_981 先求左操作数再求右`() {
+        // 4.981 OperatorMethod.cs:374/:388：SafeDivide/SafeModulo 的实参是
+        // (arguments[0].GetIntValue(exm), arguments[1].GetIntValue(exm)) ⇒ C# 左到右，
+        // 左侧副作用照常发动。1.824 的 DivIntInt :131 才是先取 arguments[1] 判 0。
         val ctx = sideCtx()
-        assertFailsWith<ExprEvalException> {
-            evalInt(parseOrThrow(call("SIDE") + op("/") + i(0)), ctx)
-        }
-        assertEquals(0, ctx.funcCalls.size)   // 左操作数（含副作用）未被求值
+        assertEquals(0L, evalInt(parseOrThrow(call("SIDE") + op("/") + i(0)), ctx), "b==0 钳制返回 0")
+        assertEquals(1, ctx.funcCalls.size, "左操作数（含副作用）按 4.981 求值一次")
         val ctx2 = sideCtx()
         assertEquals(3L, evalInt(parseOrThrow(call("SIDE") + op("/") + i(1)), ctx2))
         assertEquals(1, ctx2.funcCalls.size)
         val ctx3 = sideCtx()
-        assertFailsWith<ExprEvalException> {
-            evalInt(parseOrThrow(call("SIDE") + op("%") + i(0)), ctx3)
-        }
-        assertEquals(0, ctx3.funcCalls.size)
+        assertEquals(0L, evalInt(parseOrThrow(call("SIDE") + op("%") + i(0)), ctx3))
+        assertEquals(1, ctx3.funcCalls.size)
     }
 
     // ------------------------------------------------------------------

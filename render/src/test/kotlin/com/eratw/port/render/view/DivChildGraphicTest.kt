@@ -4,12 +4,14 @@ import com.eratw.port.core.host.DisplayDivBlock
 import com.eratw.port.core.host.DisplayDivChildLine
 import com.eratw.port.render.adapter.DivOverlayFrame
 import com.eratw.port.render.adapter.DivOverlayPlanner
+import com.eratw.port.render.adapter.HtmlRunFlatten
 import com.eratw.port.render.button.ButtonLayer
 import com.eratw.port.render.glyph.CellMetrics
 import com.eratw.port.render.sprite.Raster
 import com.eratw.port.render.sprite.SpriteTable
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /**
  * div 子行的**图形落像素**与**按钮焦点/按下**（CONTRACT-DIV-HIT2 B 路）。
@@ -43,6 +45,7 @@ class DivChildGraphicTest {
     )
 
     private val background = ScreenScene.DEFAULT_BACKGROUND
+    private val fore = 0xFFC0C0C0.toInt()
     private val red = 0xFFFF0000.toInt()
     private val blue = 0xFF0000FF.toInt()
     private val green = 0xFF00FF00.toInt()
@@ -54,6 +57,19 @@ class DivChildGraphicTest {
     private val anchorTopPx = 10
 
     /**
+     * 接上尺寸源的同一台合成器：`<img>` 因此走「命中」支（[HtmlRunFlatten.emitImage] 填
+     * `altText`），用于把「尺寸已知、帧取不到」这一档与「未接尺寸源 ⇒ altText 恒 null」
+     * 那一档分开。尺寸只影响布局占宽，落像素由 sprite 表决定。
+     */
+    private fun sizedComposer(w: Int = 20, h: Int = 20): ScreenComposer = ScreenComposer(
+        clientWidthCells = 100,
+        heightLines = 20,
+        metrics = metrics,
+        canvasHeightPx = 20 * 18,
+        sizeSource = HtmlRunFlatten.ImageSizeSource { (w shl 16) or h },
+    )
+
+    /**
      * 一颗覆盖块（relative、已逃逸、无盒模型内缩）→ 规划产物。
      *
      * `widthPx`/`heightPx` 是脚本尺寸；规划后 `borderRectPx.width = widthPx + 2`
@@ -63,6 +79,7 @@ class DivChildGraphicTest {
         children: List<String>,
         widthPx: Int = 100,
         heightPx: Int = 60,
+        owner: ScreenComposer = composer,
     ): DivOverlayPlanner.Block {
         val raw = DisplayDivBlock(
             altHeadTag = "<div>",
@@ -86,11 +103,11 @@ class DivChildGraphicTest {
             isEscaped = true,
             children = children.map { DisplayDivChildLine(it) },
         )
-        val plan = composer.divPlanner.plan(
+        val plan = owner.divPlanner.plan(
             blocks = listOf(raw),
             anchorTopPx = anchorTopPx,
             anchorPointXPx = 0,
-            canvasHeightPx = composer.canvasHeightPx,
+            canvasHeightPx = owner.canvasHeightPx,
             visibleTopLine = 0,
             visibleBottomLine = 100,
             anchorLineNo = 0,
@@ -107,7 +124,8 @@ class DivChildGraphicTest {
         sprites: SpriteTable = SpriteTable(),
         focused: ButtonLayer.DivFocus? = null,
         pressed: ButtonLayer.DivFocus? = null,
-    ): Raster = composer.compose(
+        owner: ScreenComposer = composer,
+    ): Raster = owner.compose(
         commands = emptyList(),
         rowCount = 20,
         scene = ScreenScene(),
@@ -138,14 +156,40 @@ class DivChildGraphicTest {
     }
 
     @Test
-    fun `子行 img 资源缺失静默跳过`() {
-        // ConsoleImagePart.cs:168 的 IsCreated 守卫：查不到 sprite 就什么都不画、也不抛。
+    fun `子行 img 尺寸已知但帧缺失回落 AltText`() {
+        // ConsoleImagePart.cs:168 的守卫不成立（查不到 sprite）⇒ :175-182 把 AltText
+        // 当文本画：裸 PointX（不加 shift）+ 裸 pointY（不加 ypos）。
+        val owner = sizedComposer()
+        val canvas = compose(
+            block(
+                listOf("<img src='NO_SUCH_SPRITE' width='20px' height='20px'>"),
+                owner = owner,
+            ),
+            SpriteTable(),
+            owner = owner,
+        )
+        // 裸列游标 0 + 行顶 10 + 字形内缩 2：首字形 `<` 落在 (0..8, 12..26) 内。
+        assertEquals(fore, canvas.pixelAt(1, 13), "缺帧回落画重建出来的 `<img …>` 文案，不是空白")
+        assertTrue(
+            (20 until 60).any { canvas.pixelAt(it, 13) == fore },
+            "AltText 是整串一次画（不止首字形）",
+        )
+    }
+
+    @Test
+    fun `子行 img 未接尺寸源时缺帧保持静默`() {
+        // 未接尺寸源 ⇒ 生产侧没给 altText（null），缺帧回落退化为接入前的静默
+        // （契约 §0 第 3 条：altText == null 行为完全一致）。
         val canvas = compose(
             block(listOf("<img src='NO_SUCH_SPRITE' width='20px' height='20px'>")),
             SpriteTable(),
         )
         assertEquals(background, canvas.pixelAt(3, 10))
-        assertEquals(background, canvas.pixelAt(22, 29))
+        assertEquals(background, canvas.pixelAt(1, 13), "altText == null：一个字形都不画")
+        assertTrue(
+            (0 until 60).none { canvas.pixelAt(it, 13) == fore },
+            "静默档整条行带都没有前景色字形",
+        )
     }
 
     @Test

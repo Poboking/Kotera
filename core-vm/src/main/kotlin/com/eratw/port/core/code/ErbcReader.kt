@@ -22,6 +22,7 @@ import com.eratw.port.core.expr.Ternary
 import com.eratw.port.core.expr.Unary
 import com.eratw.port.core.expr.UnaryAfter
 import com.eratw.port.core.expr.VarRef
+import com.eratw.port.core.patch.CallSentinels
 import com.eratw.port.core.stmt.Argument
 import com.eratw.port.core.stmt.ArgType
 import com.eratw.port.core.stmt.ArgValueType
@@ -142,8 +143,40 @@ object ErbcReader {
      *   带基线时：池按基线重灌、[Program] 六个基线原样传入，产物里仍然只有**本段**条目 ——
      *   基线不进容器。
      */
-    fun decode(bytes: ByteArray, base: ProgramBase = ProgramBase.NONE): Program =
-        Decoder(bytes, base).decodeProgram()
+    fun decode(
+        bytes: ByteArray,
+        base: ProgramBase = ProgramBase.NONE,
+        /**
+         * M2-4：`.erbm` 模块容器允许 `_CALL` 的外部导入哨兵（`-(extIdx+1)`，
+         * `IMPORT_INDEX_MAX` 封顶）。**只给模块容器读路开**：零基线 Module 的跨包调用
+         * 就是负导入下标，链接期由 `CallRelocation` 还原；base `.erbc` 与 legacy 窗口
+         * 补丁的读路保持 false（导入哨兵在那两条路仍是损坏字节）。
+         */
+        allowImportCalls: Boolean = false,
+    ): Program = Decoder(bytes, base, allowImportCalls).decodeProgram()
+
+    /**
+     * `_CALL.a` 的负值域判据（RT2 superfix；两条装载路共用同一份 —— 理由同
+     * [needsStatementPool]：字节路 `Decoder.validate` 与映射路 `ErbcStream` 的校验趟是
+     * 逐字副本，判据分家会出现「同一份产物、一档放行一档报错」的判定漂移）。
+     *
+     * 仅 [CallSentinels] 的 CALL_SUPER_SENTINEL / TRY_CALL_SUPER_SENTINEL 两个精确
+     * 设计值放行：它们是 Mod 包编译档的一等公民（`ModuleDescriptor.kt` 的 CallSentinels
+     * KDoc 在案），容器直存 Program 字节、链接期由 `CallRelocation` 还原为前实现物理
+     * 下标 + DIRECT 位；四池容器闸 `ModuleContainer.validateCallTargets` 同判据
+     * （「合法 super」continue 分支）。
+     *
+     * M2-4 起增加 `allowImportCalls`：**模块容器读路**（[decode] 的 true）再放行外部
+     * 导入哨兵区间 `-(IMPORT_INDEX_MAX+1) .. -1`。导入哨兵的决议仍是链接期的事，
+     * base `.erbc` 与 legacy 窗口补丁读路传 false，负值照拒。
+     *
+     * @return true = 该负值不是设计哨兵，装载闸应当拒绝
+     */
+    internal fun isRejectedCallNegative(a: Int, allowImportCalls: Boolean = false): Boolean =
+        a < 0 &&
+            a != CallSentinels.CALL_SUPER_SENTINEL &&
+            a != CallSentinels.TRY_CALL_SUPER_SENTINEL &&
+            !(allowImportCalls && a >= -(CallSentinels.IMPORT_INDEX_MAX + 1))
 
     /**
      * `else` 分支的操作码判定：**既是分类，也是操作码范围的单一咽喉**。
@@ -167,7 +200,7 @@ object ErbcReader {
                 0,
                 "操作码 $op 越出 0..${ErbcFormat.OPCODE_MAX}" +
                     "（VM 内部 0..28 / isa 语句 29..197 / 编译器扩展 198..201 / 栈码 202..243 /" +
-                    " 浮点返回 244 / 运行期字符串调用 245）：字节码损坏",
+                    " 浮点返回 244 / 运行期字符串调用 245 / 条件融合 246 / 循环条件融合 247..248）：字节码损坏",
             )
         }
         return op in ErbcFormat.MARKER_OPCODE_MIN..ErbcFormat.MARKER_OPCODE_MAX
@@ -267,7 +300,7 @@ object ErbcReader {
                         requireJumpTarget(f.name, start, end, pc, op, pc.toLong() + 1 + program.b(pc))
                     // 条件位融合超指令（246，MODERN-T1）：跳转偏移在 c、相对下一条指令，
                     // 与 `_JUMP_IF_FALSE` 同一档（不覆盖就会漏掉跨函数跳的保护）。
-                    Opcode._EVAL_INT_JZ ->
+                    Opcode._EVAL_INT_JZ, Opcode._LT_JZ, Opcode._GT_JZ ->
                         requireJumpTarget(f.name, start, end, pc, op, pc.toLong() + 1 + program.c(pc))
                     // 栈码的条件跳（T2-21）与 `_JUMP_IF_*` 同一档：偏移在 a、相对下一条指令。
                     // 不覆盖就会漏掉 CMP-55 要防的那件事 —— 栈码跳进**别的函数体**，
@@ -337,6 +370,8 @@ object ErbcReader {
         private val bytes: ByteArray,
         /** 本段基线（[ProgramBase.NONE] = 全量产物；池与 [Program] 都按它重灌/构造）。 */
         private val base: ProgramBase,
+        /** M2-4：模块容器读路放行 `_CALL` 外部导入哨兵（见 [ErbcReader.decode]）。 */
+        private val allowImportCalls: Boolean = false,
     ) {
         val header: ErbcHeader = parseHeader()
 
@@ -701,10 +736,12 @@ object ErbcReader {
                         // - a < functionBase：base 区段的绝对下标（补丁调用 base 公共函数，R7 主流场景，
                         //   本段产物里没有那条记录可查）⇒ 放行，函数解析落 overlay 拼接后的 base 区段；
                         // - a ≥ functionBase：折回 a - functionBase 查本段 functions，越界才拒。
+                        // 负值域判据共用一份（RT2 superfix，哨兵协议 ABI-4）：仅 `CallSentinels`
+                        // 两个 super 设计哨兵精确放行、其余一切负值照拒，见 [isRejectedCallNegative]。
                         // 文案与 `ErbcStream` 的逐字副本保持一致（等价性对拍要求同一句），故这里只
-                        // 换判据不换措辞：`functions.size` 是本段条数，无基线时与绝对条数相同、判定与
-                        // 改造前的 `a !in functions.indices` 逐位相同。
-                        if (a < 0 ||
+                        // 换判据不换措辞：`functions.size` 是本段条数，无基线时与绝对条数相同、
+                        // 非负下标的判定与改造前的 `a !in functions.indices` 逐位相同。
+                        if (isRejectedCallNegative(a, allowImportCalls) ||
                             (a >= program.functionBase && a - program.functionBase !in program.functions.indices)
                         ) {
                             throw ErbcDecodeException(

@@ -156,6 +156,38 @@ internal class ArgInterner(
     private var statements = 0
 
     /**
+     * 规范表当前形态数（census 取数面；整表重置后从 0 重新累计）。
+     * 只读 `size` 标量，不遍历表、不触发任何物化（`LiveSetCensus` 的禁物化铁律同口径）。
+     */
+    val formCount: Int get() = size
+
+    /**
+     * 运行期规范表上界（已武装后生效）；[Int.MAX_VALUE] = 未武装（装载趟按旧口径无界）。
+     *
+     * 为什么要有这一条：规范表把**每个不同结构的代表实例**钉在开放寻址表里，永不归还 ——
+     * 装载趟去重的对象是语料固定面，运行期去重的对象是「物化过的全部结点」，随游玩覆盖面
+     * 无界增长（2026-11-14 桌面 soak512 实测 25 分钟爬到 ~1.7M 形态 / 表壳两数组 ~54 MiB，
+     * 且被它钉住的结点图是 512 MiB 挡位 OOM 缺口的主力）。上界触发时**整表重置**：
+     * 已登记的代表实例只要还被语句/片/节点表持有就照常活着（归一从不改写引用者手里的
+     * 实例，只替换新语句字段指向谁），丢掉的只是「跨代去重」这一层收益 —— 结构相等
+     * 语义逐字不变，`sameStructure` 的合并判定与 [merged]/[nodes] 累计读数都不受影响。
+     */
+    private var runtimeFormBudget: Int = Int.MAX_VALUE
+
+    /** 运行期整表重置次数（诊断/单测读数；装载趟不计）。 */
+    var runtimeFormResets: Int = 0
+        private set
+
+    /**
+     * 装载收尾武装：之后规范表形态数超过 [maxForms] 就整表重置。
+     * 只许在装载趟结束后调（`Program.armRuntimeCodeCacheBudgets`）；对未武装实例零影响。
+     * 串池的界另由 `StringPool.armRuntimeDistinctBudget` 武装（本方法不代劳，两界独立调参）。
+     */
+    fun armRuntimeBudget(maxForms: Int) {
+        runtimeFormBudget = maxForms
+    }
+
+    /**
      * 种子段标记（见 [internStatement]）：表达式池根**只登记、不替换**。
      *
      * 这条模式存在的原因：表达式池根的实例身份与逐字段值必须保真（`program.expr(k)` 的
@@ -541,7 +573,17 @@ internal class ArgInterner(
         reps[i] = o
         hashes[i] = h
         size++
+        if (size > runtimeFormBudget) resetTableForRuntime()
         return o
+    }
+
+    /** 运行期上界触发：整表重置（代表实例归引用者所有，表壳换回初始容量）。 */
+    private fun resetTableForRuntime() {
+        hashes = LongArray(INITIAL_CAPACITY)
+        reps = arrayOfNulls(INITIAL_CAPACITY)
+        mask = INITIAL_CAPACITY - 1
+        size = 0
+        runtimeFormResets++
     }
 
     /**

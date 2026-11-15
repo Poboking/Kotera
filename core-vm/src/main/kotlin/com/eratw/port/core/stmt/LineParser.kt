@@ -42,8 +42,10 @@ data class StmtWarning(val line: Int, val message: String)
  * - 形参校验（G1）：`@F(...)` 的每个形参按原版 `ReduceArguments(..., isDefine:true)`
  *   解成 `VariableTerm`（spec: ErbLoader.cs:658-702），非可赋值变量 / 未声明名 →
  *   `ArgCanOnlyAssignableVar`（spec: ErbLoader.cs:651-652）→ `Warn(level 2, isError)`（:769）。
- * - `VARI`/`VARS`（G3）：原版在 `ParseLine` 内即时 `AddPrivateVariable`
- *   （spec: LogicalLineParser.cs:471 / 508），本条回调与之同点位。
+ * - `VARI`/`VARS`（G3）：原版在装载期 `ParseLine` 内 `AddPrivateVariable`
+ *   （spec: LogicalLineParser.cs:471 / 508）。本回调是同一相位的单行版本；整函数
+ *   可见性（声明可写在引用之后）由预扫描 `CorpusScan` 的装载期登记保证 —— 原版
+ *   实参解析推迟到整文件扫描之后（ErbLoader.cs:514-521）。
  */
 interface DefinitionScopedResolver : StmtResolver {
     /**
@@ -411,8 +413,11 @@ class LineParser(
         }
         // G3：VARI/VARS 登记当前函数的私有变量表（spec: LogicalLineParser.cs:463-471 / 500-508）。
         // 原版字段：Dimension = 长度个数、TypeIsStr = (VARS)、Static=false，无 CONST；
-        // 登记点位是 ParseLine 内即时登记，故只有**之后的**行可见（与函数体内 #DIM 的
-        // 第一遍预登记不同，spec: ErbLoader.cs:413-423）。
+        // 原版装载期**整文件扫描时**就 `AddPrivateVariable`，而实参解析被推迟到
+        // setLabelsArg/执行期（ErbLoader.cs:514-521 + ArgumentParser.cs:2687-2705），
+        // 所以声明对整条函数体可见、与书写位置无关。本回调只覆盖**本行之后**的行 ——
+        // 全量编译的整函数可见性由预扫描负责（CorpusScan 在装载相位登记，并随侧车
+        // 落进运行期私有表）；不经预扫描的解析器（单函数装置）保持原有点位，不假装有前视。
         if (resolver is DefinitionScopedResolver) {
             resolver.declarePrivateVariable(
                 name,

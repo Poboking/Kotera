@@ -351,14 +351,17 @@ class ExprAuditTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `除余先取右操作数-左操作数不求值`() {
-        // spec: OperatorMethodManager.cs:121-138 / :140-157 —— 先算 arguments[1] 判 0 再算 arguments[0]。
+    fun `除余按 4_981 先取左操作数`() {
+        // 4.981 OperatorMethod.cs:374 / :388 的 SafeDivide/SafeModulo 实参是
+        //   (arguments[0].GetIntValue(exm), arguments[1].GetIntValue(exm))，
+        // C# 实参左到右 ⇒ **左侧先求值**。1.824（OperatorMethodManager.cs:121-157）才
+        // 是「先算 arguments[1] 判 0、左侧不求值」；b == 0 也不再抛 DivideByZero。
         listOf("/", "%").forEach { o ->
             val ctx = TestContext()
             ctx.funcs["F"] = { Value.IntV(6L) }
             val tokens = listOf(id("F"), lp(), rp(), op(o), i(0))
-            assertFailsWith<ExprEvalException>(o) { evalInt(parseOrThrow(tokens), ctx) }
-            assertEquals(0, ctx.funcCalls.size, "$o 除零（Error.DivideByZero）时左操作数不应被求值")
+            assertEquals(0L, evalInt(parseOrThrow(tokens), ctx), "$o 零除钳制返回 0")
+            assertEquals(1, ctx.funcCalls.size, "$o 零除时左操作数仍按 4.981 求值一次")
         }
     }
 
@@ -431,12 +434,13 @@ class ExprAuditTest {
         // TODO(verify): 除「除数为0的除法运算」外，以下消息仍是硬编码中文，未接 lang 表；
         //   C# 走 Lang.Error 文本，权威文案见 lang.emuera-zhs.xml 的 Error 段，逐条比对如下：
         //   除数为0的除法运算 ↔ Error.DivideByZero（Lang.cs:1326 / 语料根 emuera.zhs.xml:236 /
-        //     reference 表 :286）—— 2026-11-04 lane errtext 已按官方逐字收口，见 OperatorErrorText.kt
+        //     reference 表 :286）—— 2026-11-04 lane errtext 已按官方逐字收口，见 OperatorErrorText.kt。
+        //     2026-11-12 起这条文案**只剩浮点支**：4.981 SafeArithmetic 把整数零除改成
+        //     钳制，逐字验收由 FloatExprFaceTest / OperatorErrorTextTest 承担。
         //   数值型 + 字符串型：不合法的组合 ↔ Error.CanNotAppliedBinaryOp（zhs.xml:282，{0}整数型/{1}字符串型）
         //   ++/-- 只能作用于变量 ↔ Error.IncrementNonVar（zhs.xml:273）
         //   一元运算符 ! 不能作用于字符串型 ↔ Error.CanNotAppliedUnaryOp（zhs.xml:281）
-        val div = assertFailsWith<ExprEvalException> { evalInt(parseOrThrow(listOf(i(1), op("/"), i(0)))) }
-        assertEquals("除数为0的除法运算", div.message)
+        assertEquals(0L, evalInt(parseOrThrow(listOf(i(1), op("/"), i(0)))), "4.981 整数零除钳制返回 0，不再抛 DivideByZero")
 
         val mix = assertFailsWith<ExprEvalException> { parseOrThrow(listOf(i(1), op("+"), s("a"))) }
         assertEquals("数值型 + 字符串型：不合法的组合", mix.message)

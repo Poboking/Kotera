@@ -126,6 +126,22 @@ class EventRegistryTest {
         assertEquals(2, reg.membersOf("EVT").size)
     }
 
+    @Test
+    fun `ONLY旗标随四桶表带出M2-6`() {
+        val metas = listOf(
+            eventMeta(0, "EVT", isOnly = true),
+            eventMeta(1, "EVT"),
+        )
+        val reg = EventRegistry.of(catalogOf(metas))
+        val members = reg.membersOf("EVT")
+        // ONLY 桶(0)先于 NORMAL 桶(2)，同桶链接序不变；旗标随成员带出，不许靠桶位反推。
+        assertContentEquals(intArrayOf(0, 1), members.map { it.physicalIndex }.toIntArray())
+        assertTrue(members[0].isOnly)
+        assertEquals(0, members[0].bucket)
+        assertFalse(members[1].isOnly)
+        assertEquals(2, members[1].bucket)
+    }
+
     // 「LSC 脱节 / 非事件成员污染」的负控不可达：SymbolCatalog 只有 build 一个构建
     // 出口（private constructor，ABI-7 封装），合法输入下 events 与候选集必然一致。
     // EventRegistry.of 里对应的 require 是防未来演化的防御判据，不立用例。

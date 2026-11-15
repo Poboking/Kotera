@@ -46,22 +46,23 @@ import kotlin.test.assertNotNull
  * 本闸把真语料那一行喂进**同一条编译链**（`LineParser` → `ErbProgramCompiler` →
  * `ErbcWriter.encode` → `ErbcReader.decode`），断言往返后的静态类型、行号与读数。
  *
- * ## 行号口径（上报的 625 到底是哪一行）
+ * ## 行号口径（上报的 625/629 到底是哪一行）
  *
  * 基线 `34e4af08` 的上报行号是 **0 基**（与原版 `ScriptPosition.LineNo` 同口径，
  * spec: `lexer/EraStreamReader` 侧的 `curNo`；移植侧写死在同一处：
  * `LogicalLine.lineNo` 的 KDoc「逻辑行的 0 基行号」+ `lexer/LexError.kt` 的
  * 「原版 ScriptPosition.LineNo 为 0 基」）。`proc/ProcessRuntime.stampPosition` 取的是
  * `StmtEnv.line` = `Program.lineOf(pc)`，而行表填的就是 `LogicalLine.lineNo` ⇒
- * 报告里的「行625」= 物理第 626 行。本闸第一个用例直接读真文件量这件事，不靠注释。
+ * 报告里的「行625」= 物理第 626 行（261017 语料）。2026-11-14 语料换代 261111 后上报锚随语料体移到
+ * 0 基 629 = 物理 630 行（函数体前段多 4 行），本闸直接读真文件量这件事，不靠注释。
  *
  * ## 语料侧事实（4.981 `ERB/ステータス計算関連/SOURCE/SOURCE_EXTRA.ERB`）
  *
- * `@SOURCE_DOWNBASE(ARG)` 起于物理 584 行，体内只有两行带 `POWER(0.95, …)`：
- * 物理 626 / 627（0 基 625 / 626），形如
+ * `@SOURCE_DOWNBASE(ARG)` 起于物理 588 行（261017=584），体内只有两行带 `POWER(0.95, …)`：
+ * 0 基 629 / 630 = 物理 630 / 631，形如
  * `DOWNBASE:ARG:体力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:体力)`。
  * 4.980 的同名函数（`SOURCE_EXTRA.ERB:572` 起）**没有** MAGIC_DLC 那一段，全文件只有
- * 588 行 ⇒ 连 0 基 625 这一行都不存在，与该簇「老包一份没有」的读数一致。
+ * 588 行 ⇒ 连 0 基 629 这一行都不存在，与该簇「老包一份没有」的读数一致。
  *
  * ## 为什么这一簇在 0.2.39 上「仍活着」但代码侧已修
  *
@@ -86,10 +87,10 @@ class SourceDownbasePowerWireTest {
 
     private companion object {
         /** 上报原文里的行号（0 基）与它对应的物理行号（1 基）。 */
-        const val REPORTED_LINE = 625
-        const val PHYSICAL_LINE = 626
-        const val RAW_626 = "DOWNBASE:ARG:体力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:体力)"
-        const val RAW_627 = "DOWNBASE:ARG:気力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:気力)"
+        const val REPORTED_LINE = 629
+        const val PHYSICAL_LINE = 630
+        const val RAW_630 = "DOWNBASE:ARG:体力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:体力)"
+        const val RAW_631 = "DOWNBASE:ARG:気力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:気力)"
 
         /** 赋值语句 marker 的操作码区间（契约 C3：内部指令 0..28、语句 29..197）。 */
         fun isStatementMarker(op: Int): Boolean = op in 29..197
@@ -150,7 +151,7 @@ class SourceDownbasePowerWireTest {
      */
     private fun wireStatement(): Pair<Program, AssignStmt> {
         val raw = realLine(REPORTED_LINE).content
-        assertEquals(RAW_626, raw.trim(), "真文件 0 基 625 行的原文")
+        assertEquals(RAW_630, raw.trim(), "真文件 0 基 629 行的原文（2026-11-14 语料换代 261111：函数体前移 4 行，261017=0 基 625）")
         val text = "A =" + raw.substringAfter('=')
         val stmt = LineParser(SymbolTable().declareVariable("A", OperandType.INT, 1))
             .parseLogicalLine(LogicalLine(LineKind.CODE, "SOURCE_EXTRA.ERB", REPORTED_LINE, text))!!
@@ -189,13 +190,13 @@ class SourceDownbasePowerWireTest {
         val codes = logicalLines().filter { it.kind == LineKind.CODE }
         val powerLines = codes.filter { it.content.contains("POWER(0.95") }
         assertEquals(listOf(REPORTED_LINE, REPORTED_LINE + 1), powerLines.map { it.lineNo }, "体内两条 POWER 行的 0 基行号")
-        assertEquals(RAW_626, powerLines[0].content.trim())
-        assertEquals(RAW_627, powerLines[1].content.trim())
+        assertEquals(RAW_630, powerLines[0].content.trim())
+        assertEquals(RAW_631, powerLines[1].content.trim())
         // 上报口径的直接复现：lineNo 是 0 基，物理行号 = lineNo + 1
-        assertEquals(PHYSICAL_LINE, powerLines[0].lineNo + 1, "「行625」= 物理 626 行")
+        assertEquals(PHYSICAL_LINE, powerLines[0].lineNo + 1, "「行629」= 物理 630 行")
         assertEquals(rawOf(PHYSICAL_LINE), powerLines[0].content.trim(), "reader 的行内容与物理行原文一致（未被 {} 合并挪位）")
         // 全文只有这两处 POWER(0.95：该簇的现场就是这两行之一，不存在第三个候选
-        assertEquals(2, powerLines.size, "SOURCE_DOWNBASE 体内恰两条 POWER 行（0 基 625/626）")
+        assertEquals(2, powerLines.size, "SOURCE_DOWNBASE 体内恰两条 POWER 行（0 基 629/630）")
     }
 
     /** 物理行原文（`readAllLines` 口径，用来交叉验证上面的 lineNo 换算）。 */

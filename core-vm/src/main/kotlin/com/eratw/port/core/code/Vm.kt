@@ -1,12 +1,12 @@
 package com.eratw.port.core.code
 
 import com.eratw.port.core.diag.PageFunctionTrail
-import com.eratw.port.core.err.DIVIDE_BY_ZERO_TEXT
 import com.eratw.port.core.err.MULTIPLY_10K_TO_STR_TEMPLATE
 import com.eratw.port.core.err.MULTIPLY_NEGATIVE_TO_STR_TEMPLATE
 import com.eratw.port.core.err.erbDisplayLine
 import com.eratw.port.core.err.notDefinedLabelNameText
 import com.eratw.port.core.err.renderMultiplyToStrLimit
+import com.eratw.port.core.err.zeroDivideWarning
 import com.eratw.port.core.expr.Binary
 import com.eratw.port.core.expr.EvalContext
 import com.eratw.port.core.expr.Expr
@@ -17,9 +17,23 @@ import com.eratw.port.core.expr.VarRef
 import com.eratw.port.core.expr.VariableHandles
 import com.eratw.port.core.expr.VariableReader
 import com.eratw.port.core.expr.VariableWriter
+import com.eratw.port.core.expr.toCodeEE
 import com.eratw.port.core.lexer.LangVariant
 import com.eratw.port.core.stmt.Statement
 import com.eratw.port.core.sem.FlatStmtSource
+
+/**
+ * 缺省的**单调时钟**（毫秒）—— [VmConfig.monotonicMs] 为 null 时用它。
+ *
+ * 口径与改造前逐条一致：`System.nanoTime()` 是 JVM 的单调源（`System.currentTimeMillis`
+ * 会被系统对时回拨，不能用来量段落时长），除以 `1_000_000` 折成毫秒。
+ *
+ * 与改造前那两处 `(System.nanoTime() - segStartNanos) / 1_000_000L` 的唯一差别是取整顺序
+ * （先折毫秒再做差 ⇒ 可能少 1 ms）。阈值的最低有效档是「秒级」，1 ms 的偏差在任何既有
+ * 用例的判据之外；[VmConfig.infiniteLoopAlertTimeMs] 的 0 = 关闭与 [VmConfig.maxRunMillis]
+ * 的 0 = 不限两个开关位也一位不受影响。
+ */
+val FALLBACK_MONOTONIC_MS: () -> Long = { System.nanoTime() / 1_000_000L }
 
 /**
  * VM 运行期配置。
@@ -51,6 +65,20 @@ import com.eratw.port.core.sem.FlatStmtSource
  * * [maxRunMillis] —— 段落**墙钟**预算（撞线即终止，不问玩家）。同样是装置/诊断旋钮。
  *
  * 两个预算都**不参与**死循环判定，只在显式传值时兜底；默认值见各自字段。
+ *
+ * ## [maxStepsPerRun] 命中 ⇒ 问玩家，不直接判死（loopguard 波 · 2026-11-09）
+ *
+ * 上一版把 `steps > maxStepsPerRun` 直接抛 [StepLimitExceeded]（`guardCause =
+ * [LoopGuardCause.DeviceBudget]`），命中即按装载失败收口 —— 那是**移植层自造的**中止，
+ * 官方从来没有这一维：`Process.cs:493-512` 的死循环判据只有墙钟，撞线弹 YesNo 框，
+ * 玩家点「否」⇒ `state.lineCount = 0` + `startTime.Restart()`（`:509-510`）继续跑，
+ * 点「是」才 `throw CodeEE`（`:505-507`）。
+ *
+ * 现在这条兜底也走**同一条询问通道** [VmHost.askDeviceBudgetContinue]：答「继续」⇒
+ * 预算再加**一整份**基础预算、原地续跑（≙ 官方「复位后重新给满额」），轨迹行
+ * `loopguard.device_budget_continue` 由宿主落；答「退出」与「宿主没有弹框通道」
+ * （headless / 装置 / 未接线生产路径）⇒ 才抛，且文案与成因位逐字不变
+ * （可诊断中止，绝不静默）。
  */
 data class VmConfig(
     /**
@@ -112,8 +140,35 @@ data class VmConfig(
      * 口径与 `PRINTCの文字数` 那批条目一致 —— 设置页改这项由下一局会话吃到）。
      * 本类**不抄第二份缺省**：这里唯一的缺省是 0 = 关闭，原版那个 5000 只记在
      * `ConfigSpec.kt:132` 的条目注册处，取值链路上不允许出现第二把尺。
+     *
+     * 命中之后的退避（**有意偏离官方**）：玩家答「继续」时本 run 的生效阈值翻倍
+     * （封顶 [LOOP_ALERT_ESCALATE_CAP_MS]），见 [VirtualMachine] 的 `loopAlertEscalated`。
      */
     val infiniteLoopAlertTimeMs: Long = 0L,
+    /**
+     * **单调时钟注入位**（毫秒读数，**不是**自段落起点以来的差值）。
+     *
+     * [maxRunMillis] 与 [infiniteLoopAlertTimeMs] 两处比较**共用这一把尺**：本类里没有
+     * 第二处 `System.nanoTime()`，段落起点与读数都走这里（ENGFIX 口径：一个段落只有一个
+     * 时钟，否则两条闸会各算各的）。
+     *
+     * ## 为什么可注入（2026-11-10，「无限循环误报」的第二半）
+     * 墙钟闸想量的是「**VM 真在跑**的时长」。缺省尺是纯 `System.nanoTime()`，它把
+     * 「玩家按 Home / 系统冻结进程 / OEM 后台管控」那一段也算进同一段——`BASE自然変動`
+     * 这类纯计算长链（不经过 [VmHost.backgroundPaused] 的 `awaitResume` 阻塞点）尤其吃亏：
+     * 切后台放一夜，回来照样撞闸，玩家读作「又判我死循环」。
+     * ⇒ 宿主可以注入一把**已经扣掉后台累计**的单调尺（`GameHost` 就是这么接的：
+     * `SystemClock.elapsedRealtime() - 后台累计`），于是两条闸都只量前台运行时间。
+     *
+     * ## 契约
+     * * `null`（缺省）= 内置尺 [FALLBACK_MONOTONIC_MS]。纯测试 / 装置 / golden 不注入 ⇒
+     *   读数与改造前等价（同一 `System.nanoTime()` 口径），既有用例逐条不变。
+     * * 非 null = 宿主尺。此时 VM **不再**按 [VmHost.awaitResume] 的阻塞时长平移段落起点
+     *   （宿主尺已扣过那一段，再平移就是重复扣）；`null` 时老路径照旧。
+     * * 必须是**单调**的（只增不减）：段落起点与读数做差，回拨会算出负值。
+     * * 调用频率 = 每 65536 步 / 每 10000 行，不是每条指令（`System.nanoTime` 是系统调用）。
+     */
+    val monotonicMs: (() -> Long)? = null,
 )
 
 /**
@@ -293,6 +348,70 @@ interface VmHost {
     fun askInfiniteLoop(alert: InfiniteLoopAlert): InfiniteLoopAnswer = InfiniteLoopAnswer.NoUi
 
     /**
+     * **装置预算命中**时的询问口（移植层兜底维；官方没有这条闸，见 [VmConfig.maxStepsPerRun]）。
+     *
+     * 触发点：[VirtualMachine.execute] 的 `steps > maxStepsPerRun` 检查 —— 上一版在这里
+     * 直接抛 [StepLimitExceeded]，等于「移植层按指令数中止脚本」，而官方唯一的死循环中止
+     * 路径是**玩家在弹框里点「是」**（`Process.cs:493-512`，`:505-507` 才 `throw CodeEE`）。
+     * 因此这一维也必须在同一张框上问一句，答「继续」才允许继续跑。
+     *
+     * ## 契约
+     * * **调用线程** = VM 线程，必须**阻塞返回**（同 [askInfiniteLoop]）；实现方可直接
+     *   复用同一条弹框通道（生产 `ProcessRuntime` 就是这么接的）。
+     * * **一次一问**：每次撞线只问一次；[InfiniteLoopAnswer.Continue] ⇒ VM 把预算抬到
+     *   [nextBudget] 后原地续跑（≙ 官方 `state.lineCount = 0` + `startTime.Restart()`，
+     *   `:509-510`），下一次撞线（若有）再问 —— 官方也是每撞一次问一次，不是一问定终身。
+     * * **不得抛出**：宿主抛出会被当成脚本错误收口；要么给答案，要么返回
+     *   [InfiniteLoopAnswer.NoUi] 让 VM 走可诊断中止。
+     * * **没有通道**（缺省 [InfiniteLoopAnswer.NoUi]）⇒ VM 立刻抛 [StepLimitExceeded]
+     *   （`guardCause = [LoopGuardCause.DeviceBudget]`，文案与现场逐字不变）——
+     *   headless / 装置 / 未接线路径因此**保持可诊断中止，不静默、不悬挂**。
+     *
+     * @param alert 现场（文件名/行号/已执行量/墙钟；正文模板仍用官方
+     *   `Lang.MessageBox.TooLongLoop`，第 2 位给的是**指令数** —— 官方没有「指令预算」这一维，
+     *   文案没有对应占位；不改官方模板，见 [InfiniteLoopAlert.linesExecuted]）
+     * @param steps 已执行指令数（本次撞线的读数，= `budget + 1` 起步）
+     * @param budget 撞线时的预算（指令数）
+     * @param nextBudget 答「继续」后将生效的新预算（单调增，见 `grownStepBudget`）
+     */
+    fun askDeviceBudgetContinue(
+        alert: InfiniteLoopAlert,
+        steps: Long,
+        budget: Long,
+        nextBudget: Long,
+    ): InfiniteLoopAnswer = InfiniteLoopAnswer.NoUi
+
+    /**
+     * **告警阈值翻倍**的留痕口（2026-11-10；官方没有这一维，见
+     * [VmConfig.infiniteLoopAlertTimeMs] 的「有意偏离官方」）。
+     *
+     * 玩家在墙钟告警里答「继续」后，VM 把本 run 的生效阈值翻倍再跑。这一步必须能被事后看见：
+     * 否则一份 `可能进入了无限循环` 的上报里，「玩家点过一次继续之后又跑了 6 分钟」与
+     * 「一开始就跑了 6 分钟」长得一模一样。
+     *
+     * 契约与 [askDeviceBudgetContinue] 同一条纪律：**调用线程 = VM 线程**，实现方只写取证
+     * （生产 = `ProcessRuntime` → `GameSession.stageMark` → app `LoadTrace.mark`，落
+     * `loopalert.escalate base=… eff=… nth=…`），**不得抛出**、不得参与判定；
+     * 缺省空实现 = 宿主不要这条踪迹（装置 / 测试），语义零变化。
+     *
+     * @param baseMs 会话生效配置给的**原始**阈值（[VmConfig.infiniteLoopAlertTimeMs]，不翻倍）
+     * @param effectiveMs 本次翻倍后**将生效**的阈值
+     * @param nth 翻倍后下一次告警的序号（2 = 第二问，与 [InfiniteLoopAlert.attempt] 同口径）
+     */
+    fun loopAlertEscalated(baseMs: Long, effectiveMs: Long, nth: Int) {}
+
+    /**
+     * **累计后台毫秒**读数（取证用；判据不用它 —— 判据看 [VmConfig.monotonicMs]）。
+     *
+     * 写进 [InfiniteLoopAlert.backgroundMs]，让下一份上报自证「这段墙钟里有多少是后台」：
+     * `elapsedMs=190000 backgroundMs=0` ⇒ 真在跑 3 分钟；`backgroundMs=600000` ⇒ 慢机 + 后台
+     * 抢占。缺省 0 = 宿主不记账（装置 / 测试 / 不支持该维的平台）。
+     *
+     * 只读、可跨线程调用（生产由宿主自己的锁保护），实现方**不得抛出**。
+     */
+    fun loopGuardBackgroundMs(): Long = 0L
+
+    /**
      * 当前函数键对应的**源文件显示名**（死循环告警正文的第 0 位，原版
      * `currentLine.Position.Value.Filename`，skia `Process.cs:481`）。
      *
@@ -304,6 +423,25 @@ interface VmHost {
      * 只在告警真正触发时调用一次（每 10000 行至多一次），不是热路径。
      */
     fun infiniteLoopSourceName(functionKey: String?): String? = null
+
+    /**
+     * 帧下标（+函数键）对应的**源文件显示名** —— 运行期报错的文件维度
+     * （[CodeEE.scriptFile]，MODERN-R8-A）。
+     *
+     * 与 [infiniteLoopSourceName] 同一个侧车（`FuncMeta.position`），区别是**按帧下标**问：
+     * 报错点常常不是当前语句帧（表达式位调用的用户方法在嵌套 VM 里抛错，错误一路穿到
+     * 调用帧的语句层），按键反查会撞上「事件成员帧的函数名是 `KEY#defIndex` 形」那条
+     * （B6 FN-05），故宿主拿到的 [functionIndex] 是 VM 帧表原值（`funcStack[depth]`，
+     * 与 `FunctionTable.byFunctionIndex` 同坐标域），[functionKey] 只给注入通道按键查。
+     *
+     * 原版把文件名挂在**异常自己身上**（`CodeEE.cs:5-8` 的 `ScriptPosition? position`、
+     * `EmueraException.cs:7-13`），上屏时它优先于捕获点那一行（`Process.cs:598-606`），
+     * 因此本通道只在抛点被调（[VirtualMachine] 的 `errorAt` 一族），不在热路径。
+     *
+     * 缺省 null = 「本宿主没有文件表」：错误 `scriptFile` 留 null，其余字段逐字不变
+     * （既有测试宿主 / 裸 Program 装置零改动）。
+     */
+    fun scriptFileOf(functionIndex: Int, functionKey: String): String? = null
 
     /**
      * 指令循环的**周期检查点**（长页自救口）：每 [SHUTDOWN_CHECK_MASK] + 1 条指令一次，
@@ -463,7 +601,15 @@ class StringHost(
 private class MutableStmtEnv : StmtEnv {
     override var functionKey: String = ""
     override var pc: Int = -1
-    override var line: Int = -1
+    /**
+     * 行号**延迟计算**（PERF 2026-11-09）：唯一读者是 `ProcessRuntime.stampPosition`，只在
+     * 抛错时进 —— 原先在 [VirtualMachine.envAt] 里每条语句预计算一次 `program.lineOf(pc)`，
+     * 而 `lineOf` 走 `LineTable.blocks.get` = `AtomicReferenceArray.get`（ART 上是 VarHandle
+     * 签名多态调用，JIT 内联不了）⇒ 冷数据热算。改成从已经存好的 [pc] 现算。
+     */
+    var lineOf: ((Int) -> Int)? = null
+
+    override val line: Int get() { val f = lineOf ?: return -1; return if (pc >= 0) f(pc) else -1 }
     override var functionName: String? = null
 }
 
@@ -694,6 +840,23 @@ class VirtualMachine(
     private var running = false
 
     /**
+     * VM run-loop 执行中的最小只读读数（[running] 的公开投影，进/出写点同位）。
+     *
+     * M5-3 活动期投射变更闸的 VM 层语义权威：蓝图 era-arch-v61u.md §7 Mutation
+     * Boundary 要求「投射/退场引发的行增删只允许在 VM 完全让出控制权的安全边界执行
+     * （不只查 depth==0——嵌套调用、事件回调、输入流程）」。本读数覆盖 run-loop 全程
+     * ——嵌套调用、事件回调、输入等待（TINPUT park 在语句里，run 未返回）期间恒 true，
+     * 页边界（run 返回）后 false——正是 [depth] 单独给不出的判据（depth==0 只在根帧
+     * 之外成立，事件回调/输入流程 depth>0 仍属活动期）。
+     *
+     * 生产会话层同语义判据 = 变量层帧活动（GameSession.isVmActive，经 store 可达；
+     * vm 实例因 ProcessRuntime.kt 禁触对装配层不可见）；本读数是 core 测试面钉
+     * 「判据语义」的权威锚，也是后续实体运行时生产实现点（裁定 3 挂账）接线时的
+     * VM 层直读口。
+     */
+    val isRunning: Boolean get() = running
+
+    /**
      * 「本页函数流水」记录面挂载点（观察面，缺省 null = 零行为）：由宿主在装配期挂
      * [PageFunctionTrail] 实例，VM 只在**建立帧的三处** `funcStack[...]` 写入点顺带
      * [PageFunctionTrail.record]（[run] 的入口帧、[callInto]、[jumpInto]，与
@@ -758,6 +921,15 @@ class VirtualMachine(
     var floatResult: Double? = null
         private set
 
+    /**
+     * TEMP(perf-probe) E0：为 true 时 [run] 记录 `Vm.kt:1140-1170` 状态重置段的耗时到
+     * [lastResetNanos]。缺省 false = 生产零行为（只多一次布尔读）。
+     */
+    @Volatile var runResetProbe: Boolean = false
+
+    /** 最近一次 [run] 的入口状态重置耗时（ns）；[runResetProbe] 为 false 时保持旧值。 */
+    var lastResetNanos: Long = 0L
+
     /** 最近一次 [run] 实际执行的指令数。 */
     var executedSteps: Long = 0L
         private set
@@ -781,7 +953,7 @@ class VirtualMachine(
      * 复用给 [VmHost.executeStatement] 的语句环境（契约 C4）。
      * 每执行一条语句刷新一次字段，见 [StmtEnv] 的"不得跨语句持有"约束。
      */
-    private val stmtEnv = MutableStmtEnv()
+    private val stmtEnv = MutableStmtEnv().also { it.lineOf = program::lineOf }
 
     /**
      * 语句池取指的 L1 直映备忘（PERF 2026-10-27）。
@@ -880,7 +1052,7 @@ class VirtualMachine(
      *
      * `StepLimitExceeded` 要构造 6 个参数，其中一个还是 `runCatching { host.frameSnapshotLines() }`
      * —— 这段代码内联在主循环体里，JIT 之后会让「全程序最热的几十个字节」明显变长。
-     * 提到独立方法后，热路径只剩一次 `steps > maxSteps` 比较 + 一次（几乎不走的）调用，
+     * 提到独立方法后，热路径只剩一次 `steps > stepBudget` 比较 + 一次（几乎不走的）调用，
      * 而抛错时的参数构造、行号解析、帧快照全部挪到冷路径。
      *
      * 语义零变化：`steps`/`pc`/`lineOf(pc)`/函数名/调用链/帧快照的来源与顺序逐字不变。
@@ -891,6 +1063,7 @@ class VirtualMachine(
     private fun stepLimitAt(pc: Int, steps: Long): Nothing = throw StepLimitExceeded(
         steps, program.lineOf(pc), pc, currentFunctionName(), currentCallChain(),
         runCatching { host.frameSnapshotLines() }.getOrDefault(emptyList()),
+        scriptFile = currentScriptFile(),
     )
 
     /**
@@ -905,7 +1078,93 @@ class VirtualMachine(
         steps, program.lineOf(pc), pc, currentFunctionName(), currentCallChain(),
         runCatching { host.frameSnapshotLines() }.getOrDefault(emptyList()),
         elapsedMs,
+        scriptFile = currentScriptFile(),
     )
+
+    /**
+     * **装置预算命中**的询问点（冷方法，理由同 [stepLimitAt]）：组装现场 + 问宿主 + 抬预算
+     * 三件事整块挪出主循环体，于是热路径只剩一次 `steps > stepBudget` 的局部比较。
+     *
+     * 语义（为什么不是直接抛）：官方唯一的死循环中止路径是**玩家点「是」**
+     * （`Process.cs:493-512`；`:505-507` 才 `throw CodeEE`，`:509-510` 点「否」复位继续）。
+     * 按指令数中止是移植层自造的兜底维（[LoopGuardCause.DeviceBudget]），它要保留「不把设备
+     * 钉死」的能力，就不该越过玩家替其作主 ⇒ 命中先按官方同形问一次：
+     * * [InfiniteLoopAnswer.Continue] ⇒ 返回抬高一整份的新预算（[grownStepBudget]），
+     *   由调用方原地续跑；轨迹行 `loopguard.device_budget_continue` 由宿主落
+     *   （见 [VmHost.askDeviceBudgetContinue]）；
+     * * [InfiniteLoopAnswer.Exit] / [InfiniteLoopAnswer.NoUi] ⇒ 走既有 [stepLimitAt]：
+     *   类型/文案/成因位/现场逐字不变（`执行步数超过上限(N)，疑似死循环 @ 链`），
+     *   headless 与装置因此保持**可诊断中止**，绝不静默。
+     *
+     * @param elapsedMs 段落墙钟读数 —— 只进告警现场，**不**进
+     *   [StepLimitExceeded.elapsedMs]（那条字段 `>= 0` 是「墙钟预算触发」的既有判据，
+     *   见 `RunMillisLimitTest` 的断言：步数闸的 elapsedMs 必须仍是 -1）
+     */
+    private fun deviceBudgetContinueAt(
+        pc: Int,
+        steps: Long,
+        budget: Long,
+        elapsedMs: Long,
+    ): Long {
+        val nextBudget = grownStepBudget(budget)
+        val answer = host.askDeviceBudgetContinue(
+            alert = infiniteLoopAlertAt(pc, elapsedMs, steps, budget, LangVariant.ZHS),
+            steps = steps,
+            budget = budget,
+            nextBudget = nextBudget,
+        )
+        return when (answer) {
+            InfiniteLoopAnswer.Continue -> nextBudget
+            InfiniteLoopAnswer.NoUi, is InfiniteLoopAnswer.Exit -> stepLimitAt(pc, steps)
+        }
+    }
+
+    /**
+     * 装置预算命中后「继续」的下一档预算：当前预算再加**一整份**基础预算
+     * （[VmConfig.maxStepsPerRun]）。
+     *
+     * 为什么是「加一份」而不是乘 2：官方的继续动作是 `state.lineCount = 0` +
+     * `startTime.Restart()`（`Process.cs:509-510`）—— 复位后重新给**满额**授权，不是指数放宽。
+     * 单调增是硬要求：不增会让 `steps > budget` 在下一轮立刻再次成立（原地反复问框、pc 不前进）。
+     * 基础预算 <= 0 的装置取值（预算 0 = 一条指令都不许）按 +1 处理，同样只为保证单调增；
+     * 饱和到 `Long.MAX_VALUE` 之后不再触发。
+     */
+    private fun grownStepBudget(budget: Long): Long {
+        if (budget >= Long.MAX_VALUE) return Long.MAX_VALUE
+        val step = config.maxStepsPerRun.let { if (it <= 0L) 1L else it }
+        return if (step >= Long.MAX_VALUE - budget) Long.MAX_VALUE else budget + step
+    }
+
+    /**
+     * 玩家答「继续」之后**下一问的生效阈值**：当前生效值 × 2，封顶
+     * [LOOP_ALERT_ESCALATE_CAP_MS]（30 分钟）。
+     *
+     * ## 这是**有意偏离官方**（写清取舍，别当免费）
+     * 官方 `Process.cs:486-487` 只做 `state.lineCount = 0` + `startTime.Restart()` ——
+     * 阈值一个字不动，于是同一段长链每 5 秒再问一次。桌面交互下这没问题（玩家离键盘近、
+     * 一段长链很少超过几秒）。安卓上不是：地图重修一条链 130 s，按官方口径同一段会连问
+     * 26 次，玩家被逼到只会点「是」（= 强制结束），而那正是最难诊断的结局 —— 现场只剩
+     * 一句「玩家选择退出」，看不出脚本其实完全正常。
+     * ⇒ 退避：`360 s → 720 s → 1440 s → …`，封顶 30 分钟。玩家点的每一次「继续」都把
+     * 下一次打扰推远一倍，一段 10 分钟的地图重修只问一次。
+     *
+     * ## 为什么翻倍而不是「一次授权到底」
+     * 真死循环仍然必须能被问出来（这是官方这条闸存在的唯一理由）。翻倍保留了这个能力，
+     * 只是把「同一段」的打扰次数从 O(时长/阈值) 压到 O(log) —— 而真死循环的现场在
+     * 30 分钟封顶后照样会再问，且 [InfiniteLoopAlert.attempt] 会如实记到第几次。
+     *
+     * ## 边界
+     * * 单调增是硬要求：不增会让下一个 10000 行采样点立刻再撞同一条线（原地反复问框）。
+     * * `alertTimeMs <= 0` 时整条判据已关（`Process.cs:989` 的开关位），本函数不会被调用；
+     *   仍按「0 → 0」处理，不为 0 造一个非 0 值。
+     * * 溢出饱和到 `Long.MAX_VALUE`（实际被上限常量拦住，走不到）。
+     */
+    private fun escalatedLoopAlertMs(currentMs: Long): Long {
+        if (currentMs <= 0L) return currentMs
+        if (currentMs >= LOOP_ALERT_ESCALATE_CAP_MS) return LOOP_ALERT_ESCALATE_CAP_MS
+        val doubled = if (currentMs > Long.MAX_VALUE / 2L) Long.MAX_VALUE else currentMs * 2L
+        return if (doubled > LOOP_ALERT_ESCALATE_CAP_MS) LOOP_ALERT_ESCALATE_CAP_MS else doubled
+    }
 
     /**
      * 死循环告警的**采样点**（冷方法，理由同 [stepLimitAt]）：组装现场 + 询问宿主整块挪出
@@ -930,8 +1189,10 @@ class VirtualMachine(
         elapsedMs: Long,
         lines: Long,
         alertTimeMs: Long,
+        attempt: Int,
+        backgroundMs: Long,
     ): InfiniteLoopAnswer = host.askInfiniteLoop(
-        infiniteLoopAlertAt(pc, elapsedMs, lines, alertTimeMs, LangVariant.ZHS),
+        infiniteLoopAlertAt(pc, elapsedMs, lines, alertTimeMs, LangVariant.ZHS, attempt, backgroundMs),
     )
 
     /**
@@ -951,6 +1212,8 @@ class VirtualMachine(
         lines: Long,
         alertTimeMs: Long,
         textVariant: LangVariant,
+        attempt: Int,
+        backgroundMs: Long,
     ): Nothing = throw StepLimitExceeded(
         steps = runSteps,
         line = program.lineOf(pc),
@@ -960,16 +1223,28 @@ class VirtualMachine(
         frameSnapshot = runCatching { host.frameSnapshotLines() }.getOrDefault(emptyList()),
         elapsedMs = elapsedMs,
         guardCause = LoopGuardCause.PlayerChoseExit,
-        alert = infiniteLoopAlertAt(pc, elapsedMs, lines, alertTimeMs, textVariant),
+        alert = infiniteLoopAlertAt(
+            pc, elapsedMs, lines, alertTimeMs, textVariant, attempt, backgroundMs,
+        ),
+        scriptFile = currentScriptFile(),
     )
 
-    /** 死循环告警的现场组装（[checkInfiniteLoopAt] 与 [infiniteLoopExitAt] 共用同一口径）。 */
+    /**
+     * 死循环告警的现场组装（[checkInfiniteLoopAt]、[infiniteLoopExitAt] 与
+     * [deviceBudgetContinueAt] 共用同一口径）。
+     *
+     * @param attempt 本次 run 内第几次告警（1 = 首问）；与
+     *   [VmHost.loopAlertEscalated] 的 `nth` 同一序号
+     * @param backgroundMs 宿主累计后台毫秒（取证位，见 [InfiniteLoopAlert.backgroundMs]）
+     */
     private fun infiniteLoopAlertAt(
         pc: Int,
         elapsedMs: Long,
         lines: Long,
         alertTimeMs: Long,
         textVariant: LangVariant,
+        attempt: Int = 1,
+        backgroundMs: Long = 0L,
     ): InfiniteLoopAlert = InfiniteLoopAlert(
         sourceName = runCatching { host.infiniteLoopSourceName(currentFunctionKey) }.getOrNull(),
         functionName = currentFunctionName(),
@@ -982,6 +1257,8 @@ class VirtualMachine(
         elapsedMs = elapsedMs,
         alertTimeMs = alertTimeMs,
         textVariant = textVariant,
+        attempt = attempt,
+        backgroundMs = backgroundMs,
     )
 
     /**
@@ -999,7 +1276,13 @@ class VirtualMachine(
      * （输入等待 / AWAIT）都应立刻看到它。
      */
     private fun shutdownInterruptedAt(pc: Int): Nothing =
-        throw CodeEE("执行被中断（宿主正在关闭）", currentFunctionName(), program.lineOf(pc), pc)
+        throw CodeEE(
+            "执行被中断（宿主正在关闭）",
+            currentFunctionName(),
+            program.lineOf(pc),
+            pc,
+            scriptFile = currentScriptFile(),
+        )
 
     /** 取第 [index] 条语句：先查 L1 备忘，未命中再走 [Program.statement] 并回填。 */
     private fun statementOf(index: Int): Statement {
@@ -1119,6 +1402,7 @@ class VirtualMachine(
             )
         }
         val entry = program.functions[entryFunctionIndex]
+        val resetT0 = if (runResetProbe) System.nanoTime() else 0L
         depth = 0
         frameBase = 0
         frameSlotCount = entry.slotCount
@@ -1143,6 +1427,7 @@ class VirtualMachine(
         stringResult = null
         floatResult = null
         funcStackAtThrowSnapshot = null
+        if (resetT0 != 0L) lastResetNanos = System.nanoTime() - resetT0
 
         // 入口函数也是一帧：作用域必须成对进入/离开（finally 统一兜底）。
         // [running] 的复位放在最外层 finally：unwindScopes 自己也可能抛（宿主 onFunctionExit
@@ -1240,7 +1525,15 @@ class VirtualMachine(
         // 的 `startTime.ElapsedMilliseconds`），而 `startTime` 只在 `UpdateCheckInfiniteLoopState()`
         // （:464-468，被 `EmueraConsole.Await` 调用，EmueraConsole.cs:849）、「玩家选择继续」
         // （:487）与每次 `DoScript` 重进（:417）时重启 ⇒ 度量边界同样是让出点。
-        var segStartNanos = System.nanoTime()
+        //
+        // 这把尺是**全段落唯一**的一把（[VmConfig.monotonicMs]）：本文件的墙钟读数只剩
+        // `clock()` 一处来源，绝不在两个闸里各读一次 `System.nanoTime()`。缺省 =
+        // [FALLBACK_MONOTONIC_MS]（与改造前的 `System.nanoTime()` 同口径），宿主可注入
+        // 一把「已扣掉后台累计」的尺 —— 那样两条闸都只量「VM 真在跑」的时间。
+        val clock = config.monotonicMs ?: FALLBACK_MONOTONIC_MS
+        // 宿主自带尺 ⇒ 后台时长已由它扣过，下面暂停分支**不能再**平移段落起点（会重复扣）。
+        val hostOwnedClock = config.monotonicMs != null
+        var segStartMs = clock()
         // 段落**行数**（ENGFIX-3 · 官方死循环闸的计数单位）：原版 `state.lineCount` 由
         // `ProcessState.ShiftNextLine` 等六处 `lineCount++` 逐**逻辑行**累加
         // （`ProcessState.cs:126/:132/:341/:365/:379/:460`），移植侧的同行单位 = 语句 marker
@@ -1296,13 +1589,22 @@ class VirtualMachine(
         var pageLimit = pageLen - Instruction.WORDS
         // 装置预算的阈值：`config.maxStepsPerRun` 是 `config` 的只读 val，但每条指令都要穿过
         // 一层引用读一次字段；提到循环外对语义零影响（VmConfig 在 run 期间不可变）。
-        val maxSteps = config.maxStepsPerRun
-        // 段落墙钟阈值（0 = 不限）。同 [maxSteps] 提到循环外：`VmConfig` 在 run 期间不可变。
+        // 是 `var` 而不是 `val`：玩家在装置预算的告警框里答「继续」后本值抬高一整份
+        // （见 [grownStepBudget]）。段落边界**不**回退 —— 那次作答是对本次 run 的授权，
+        // 不该在下一个让出点作废（否则长链每段都要再问一次）。
+        var stepBudget = config.maxStepsPerRun
+        // 段落墙钟阈值（0 = 不限）。同 [stepBudget] 提到循环外：`VmConfig` 在 run 期间不可变。
         val maxRunMillis = config.maxRunMillis
-        // 死循环告警的阈值（= 原版 `Config.InfiniteLoopAlertTime`；0 = 整条判据关闭，
+        // 死循环告警的**生效**阈值（= 原版 `Config.InfiniteLoopAlertTime`；0 = 整条判据关闭，
         // skia `Process.cs:989` 的开关位）。唯一真源是会话生效配置里的同名条目，
-        // 本处只是把它读成一个循环外常量，不另立第二把尺（口径见 [VmConfig.infiniteLoopAlertTimeMs]）。
-        val loopAlertMs = config.infiniteLoopAlertTimeMs
+        // 本处只是把它读成一个循环外局部量，不另立第二把尺（口径见 [VmConfig.infiniteLoopAlertTimeMs]）。
+        //
+        // 是 `var`：玩家答「继续」后本 run 的生效阈值**翻倍**（有意偏离官方，见本文件
+        // `escalatedLoopAlertMs` 与 [VmHost.loopAlertEscalated]）。run 结束（`execute` 返回）
+        // 即随局部量一起复位：退避只对**这一次 run** 生效，下一局从会话配置值重新起算。
+        var loopAlertMs = config.infiniteLoopAlertTimeMs
+        // 本次 run 内第几次告警（1 = 首问）。只进现场 / 轨迹（[InfiniteLoopAlert.attempt]）。
+        var loopAlertNth = 1
         // 段落墙钟要不要维护（暂停时长平移、让出边界重启起点）：两个用它的闸
         // （[maxRunMillis] 预算 / [loopAlertMs] 告警）任一启用就得维护。两处比较都在冷路径。
         val wallClockTracked = maxRunMillis > 0L || loopAlertMs > 0L
@@ -1326,16 +1628,26 @@ class VirtualMachine(
             }
             steps++
             runSteps++
-            if (steps > maxSteps) {
-                // 抛错走冷方法：`StepLimitExceeded` 的参数构造 + 帧快照 lambda 内联在
-                // 循环体里会让最热的那几十个字节变长（见 [stepLimitAt]）。
-                stepLimitAt(pc, steps)
+            if (steps > stepBudget) {
+                // 走冷方法（见 [deviceBudgetContinueAt]）：先按官方同形问玩家一次 ——
+                // 答「继续」⇒ 抬预算原地续跑（≙ 官方 `Process.cs:509-510` 的复位后继续）；
+                // 答「退出」/ 宿主没有弹框通道 ⇒ 才抛（文案与成因位逐字不变）。
+                // 热路径因此仍只有一次局部比较，不碰时钟、不建现场。
+                val budgetElapsedMs = clock() - segStartMs
+                stepBudget = deviceBudgetContinueAt(pc, steps, stepBudget, budgetElapsedMs)
+                // 同一次作答兼作段落的行数/计时复位（官方那条「行数与计时双双归零」）：
+                // 玩家刚点过「继续」，不该在下一个 10000 行采样点上立刻再撞墙钟闸。
+                if (wallClockTracked) segStartMs = clock()
+                if (loopAlertMs > 0L) {
+                    loopLines = 0L
+                    nextLoopCheckLine = INFINITE_LOOP_CHECK_LINES
+                }
             }
             // 段落墙钟闸（[VmConfig.maxRunMillis]）：每 65536 步读一次 `System.nanoTime()`。
             // 放在步数闸**之后**、取指之前，热路径只多一次 `maxRunMillis > 0` 的常量为假的比较
             // （缺省 0 ⇒ 装置与纯测试完全不走这段），不碰指令译码。
             if (maxRunMillis > 0L && (steps and RUN_MILLIS_CHECK_MASK) == 0L) {
-                val elapsedMs = (System.nanoTime() - segStartNanos) / 1_000_000L
+                val elapsedMs = clock() - segStartMs
                 if (elapsedMs > maxRunMillis) timeLimitAt(pc, steps, elapsedMs)
             }
             // 宿主关闭闸（2026-10-31 玩家「切到 QQ 再回来启动失败」）：GameHost.close() 只能
@@ -1444,23 +1756,36 @@ class VirtualMachine(
                     setInt(a, getInt(b) * getInt(c)); pc++
                 }
 
+                // 4.981 SafeArithmetic.SafeDivide / SafeModulo（SafeArithmetic.cs:67-84）：
+                // b == 0 时 PrintWarning 并返回 0，不再抛 DivideByZero。
+                // 与 Expr.getIntValue 的整型支同一语义 —— ADR-001「语义契约以 core.expr
+                // 为准」，表达式池通道与槽码通道不许分叉（同一脚本换产物结果必须一致）。
                 Opcode._DIV -> {
                     val r = getInt(c)
-                    if (r == 0L) throw errorAt(DIVIDE_BY_ZERO_TEXT, pc)
                     val l = getInt(b)
-                    // `long.MinValue / -1` 是 .NET 唯一会溢出的整除：C# 抛 OverflowException
-                    // （spec: OperatorMethodManager.cs:136），JVM 的 ldiv 静默回绕成 MIN_VALUE。
-                    // 按原版抛 CodeEE，不回绕。取余（_MOD）不在此列：两边都得 0。
-                    if (l == Long.MIN_VALUE && r == -1L) {
-                        throw errorAt("除算溢出：-9223372036854775808 / -1", pc)
+                    if (r == 0L) {
+                        host.print(zeroDivideWarning(l, isModulo = false) + "\n")
+                        setInt(a, 0L); pc++
+                    } else {
+                        // `long.MinValue / -1` 是 .NET 唯一会溢出的整除：C# 抛 OverflowException
+                        // （spec: OperatorMethodManager.cs:136），JVM 的 ldiv 静默回绕成 MIN_VALUE。
+                        // 按原版抛 CodeEE，不回绕。取余（_MOD）不在此列：两边都得 0。
+                        if (l == Long.MIN_VALUE && r == -1L) {
+                            throw errorAt("除算溢出：-9223372036854775808 / -1", pc)
+                        }
+                        setInt(a, l / r); pc++
                     }
-                    setInt(a, l / r); pc++
                 }
 
                 Opcode._MOD -> {
                     val r = getInt(c)
-                    if (r == 0L) throw errorAt(DIVIDE_BY_ZERO_TEXT, pc)
-                    setInt(a, getInt(b) % r); pc++
+                    val l = getInt(b)
+                    if (r == 0L) {
+                        host.print(zeroDivideWarning(l, isModulo = true) + "\n")
+                        setInt(a, 0L); pc++
+                    } else {
+                        setInt(a, l % r); pc++
+                    }
                 }
 
                 Opcode._NEG -> {
@@ -1684,8 +2009,8 @@ class VirtualMachine(
                                 throw errorAt("运行期调用实参数($argc)超出当前帧槽上限($frameSlotCount)", pc)
                             }
                             // 分桶序 = 编译期 stageArgs 同源：int 桶 / str 桶各自 R0.. 递增，
-                            // argc = **实参位置数**（不是桶数）——requireArgCount/checkTooManyArgs
-                            // 依赖该口径（ProcessRuntime.kt:1582-1609）。
+                            // argc = **实参位置数**（不是桶数）——逐位元数据按位置给出，
+                            // 绑定点据此对形参位（ProcessRuntime.kt 的 bindCallArgs）。
                             val meta = ArrayList<CallArg>(argc)
                             var intBucket = 0
                             var strBucket = 0
@@ -1824,7 +2149,7 @@ class VirtualMachine(
                         try {
                             program.expr(a).getFloatValue(ctx)
                         } catch (e: ExprEvalException) {
-                            throw errorAt(e.message ?: "表达式求值失败", pc)
+                            throw errorAt(e, pc)
                         }
                     }
                     floatResult = value
@@ -1869,10 +2194,20 @@ class VirtualMachine(
                     val v = try {
                         evalIntFast(program.expr(a), ctx)
                     } catch (e: ExprEvalException) {
-                        throw errorAt(e.message ?: "表达式求值失败", pc)
+                        throw errorAt(e, pc)
                     }
                     setInt(b, v)
                     pc++
+                }
+
+                Opcode._LT_JZ -> {
+                    // 循环条件融合（PERF-LOOP）：`_LT a,b` + `_JUMP_IF_FALSE` 的语义，
+                    // c 是相对下一条指令的偏移；比较走同一套 getInt 槽守卫。
+                    pc = if (getInt(a) < getInt(b)) pc + 1 else pc + 1 + c
+                }
+
+                Opcode._GT_JZ -> {
+                    pc = if (getInt(a) > getInt(b)) pc + 1 else pc + 1 + c
                 }
 
                 Opcode._EVAL_INT_JZ -> {
@@ -1885,7 +2220,7 @@ class VirtualMachine(
                     val v = try {
                         evalIntFast(program.expr(a), ctx)
                     } catch (e: ExprEvalException) {
-                        throw errorAt(e.message ?: "表达式求值失败", pc)
+                        throw errorAt(e, pc)
                     }
                     setInt(b, v)
                     pc = if (v == 0L) pc + 1 + c else pc + 1
@@ -1898,7 +2233,7 @@ class VirtualMachine(
                     val s = try {
                         evalStrFast(program.expr(a), ctx)
                     } catch (e: ExprEvalException) {
-                        throw errorAt(e.message ?: "表达式求值失败", pc)
+                        throw errorAt(e, pc)
                     }
                     setStr(b, s)
                     pc++
@@ -1932,9 +2267,13 @@ class VirtualMachine(
                         // 「本段落算了太久」而撞 maxRunMillis 预算，更不该凭空攒出一次
                         // 死循环告警（原版没有「暂停」这一维，`startTime` 只在让出点重启）。
                         // 两者都不启用时（wallClockTracked 为假）不读时钟。
-                        val pauseStartNs = if (wallClockTracked) System.nanoTime() else 0L
+                        // 宿主自带时钟（[VmConfig.monotonicMs] 非 null）时**不平移**：
+                        // 宿主尺已经把这段后台时间扣掉了，再平移就是同一段扣两次
+                        // （会把 `maxRunMillis` 也一并放宽一倍）。缺省尺则照旧平移 ——
+                        // 这是没有宿主记账时的唯一兜底，纯测试 / 装置行为因此逐条不变。
+                        val pauseStartMs = if (wallClockTracked && !hostOwnedClock) clock() else 0L
                         host.awaitResume()
-                        if (wallClockTracked) segStartNanos += System.nanoTime() - pauseStartNs
+                        if (wallClockTracked && !hostOwnedClock) segStartMs += clock() - pauseStartMs
                         // 暂停期间宿主关闭（GameHost.close → interrupt）：awaitResume 立即返回，
                         // 这里再看到中断位就退出本次 run，让 close 能把 VM 线程收回去。
                         // 只有「暂停 → 中断」这条路径读中断位，正常执行的结束语义不变。
@@ -1959,17 +2298,37 @@ class VirtualMachine(
                             // 下一采样界 = 当前行 + 10000（与原版 `lineCount % 10000 == 0` 同义，
                             // 省掉热路径上的一次取模）。
                             nextLoopCheckLine = loopLines + INFINITE_LOOP_CHECK_LINES
-                            val elapsedMs = (System.nanoTime() - segStartNanos) / 1_000_000L
+                            val elapsedMs = clock() - segStartMs
                             // skia :473-476 —— 墙钟不足阈值直接返回，连当前行都不看。
                             if (elapsedMs >= loopAlertMs) {
-                                val answer = checkInfiniteLoopAt(pc, elapsedMs, loopLines, loopAlertMs)
+                                val answer = checkInfiniteLoopAt(
+                                    pc, elapsedMs, loopLines, loopAlertMs, loopAlertNth,
+                                    host.loopGuardBackgroundMs(),
+                                )
                                 when (answer) {
                                     // 玩家选「否」⇒ `state.lineCount = 0` + `startTime.Restart()`
                                     //（skia :486-487），两者必须同一处、成对归零。
                                     InfiniteLoopAnswer.Continue -> {
                                         loopLines = 0L
                                         nextLoopCheckLine = INFINITE_LOOP_CHECK_LINES
-                                        segStartNanos = System.nanoTime()
+                                        segStartMs = clock()
+                                        // 本次继续 ⇒ 下一问的阈值翻倍（封顶
+                                        // [LOOP_ALERT_ESCALATE_CAP_MS]）。官方每次都问同一阈值
+                                        // （`Process.cs:486-487` 只重启计时器），这是**有意偏离**：
+                                        // 安卓上一段 10 分钟的地图重修会被问四次，玩家只会被逼着
+                                        // 点「是」——那才是最难诊断的结局。翻倍 + 留痕让
+                                        // 「同一段反复轰炸」变成「一问就到底」。
+                                        val base = config.infiniteLoopAlertTimeMs
+                                        val effective = escalatedLoopAlertMs(loopAlertMs)
+                                        loopAlertNth++
+                                        if (effective != loopAlertMs) {
+                                            loopAlertMs = effective
+                                            host.loopAlertEscalated(
+                                                baseMs = base,
+                                                effectiveMs = effective,
+                                                nth = loopAlertNth,
+                                            )
+                                        }
                                     }
                                     // 没有可用 UI ⇒ skia :478 的 `view.Enabled` 为假时整个 if 块
                                     // 跳过：不弹框、不归零、更不中止，下一个 10000 行边界照旧再看。
@@ -1977,7 +2336,8 @@ class VirtualMachine(
                                     // 玩家选「是」⇒ `throw new CodeEE(...)`（skia :484）。
                                     is InfiniteLoopAnswer.Exit -> infiniteLoopExitAt(
                                         pc, runSteps, elapsedMs, loopLines, loopAlertMs,
-                                        answer.textVariant,
+                                        answer.textVariant, loopAlertNth,
+                                        host.loopGuardBackgroundMs(),
                                     )
                                 }
                             }
@@ -2003,7 +2363,7 @@ class VirtualMachine(
                     if (boundaries != seenBoundaries) {
                         seenBoundaries = boundaries
                         steps = 0L
-                        if (wallClockTracked) segStartNanos = System.nanoTime()
+                        if (wallClockTracked) segStartMs = clock()
                         if (loopAlertMs > 0L) {
                             loopLines = 0L
                             nextLoopCheckLine = INFINITE_LOOP_CHECK_LINES
@@ -2096,7 +2456,14 @@ class VirtualMachine(
             return pc + 1
         }
         if (depth + 1 > config.maxCallDepth) {
-            throw CallStackOverflow(config.maxCallDepth, program.lineOf(pc), pc, currentFunctionName(), currentCallChain())
+            throw CallStackOverflow(
+                config.maxCallDepth,
+                program.lineOf(pc),
+                pc,
+                currentFunctionName(),
+                currentCallChain(),
+                currentScriptFile(),
+            )
         }
         val callee = program.functions[funcIndex]
         // 实参复制上界三重夹取（契约 + 健壮性，见 [jumpInto] 同款说明）：
@@ -2409,10 +2776,15 @@ class VirtualMachine(
             }
 
             Opcode._STK_DIV -> {
-                // 先判除数（= Expr 的求值序：右操作数先取），再判 .NET 唯一会溢出的整除。
+                // 4.981 钳制路径**必须保持栈平衡**：左右操作数都弹掉、结果压回一个。
+                // 旧实现抛错时把被除数留在栈上（peek 取证）无所谓；现在不中断了，
+                // 若只弹 r 就会让后续 _STK_POP_SLOT_I 读到被除数而不是 0。
                 val r = popInt()
-                if (r == 0L) throw errorAt(DIVIDE_BY_ZERO_TEXT, pc)
                 val l = popInt()
+                if (r == 0L) {
+                    host.print(zeroDivideWarning(l, isModulo = false) + "\n")
+                    pushInt(0L); return pc + 1
+                }
                 if (l == Long.MIN_VALUE && r == -1L) {
                     throw errorAt("除算溢出：-9223372036854775808 / -1", pc)
                 }
@@ -2421,9 +2793,13 @@ class VirtualMachine(
 
             Opcode._STK_MOD -> {
                 val r = popInt()
-                if (r == 0L) throw errorAt(DIVIDE_BY_ZERO_TEXT, pc)
+                val l = popInt()
+                if (r == 0L) {
+                    host.print(zeroDivideWarning(l, isModulo = true) + "\n")
+                    pushInt(0L); return pc + 1
+                }
                 // `long.MinValue % -1` 在 C# 与 JVM 都得 0，不复刻溢出（同 _MOD）。
-                pushInt(popInt() % r); return pc + 1
+                pushInt(l % r); return pc + 1
             }
 
             Opcode._STK_NEG -> {
@@ -2617,7 +2993,7 @@ class VirtualMachine(
                 vars.readInt(name, indices)
             }
         } catch (e: ExprEvalException) {
-            throw errorAt(e.message ?: "表达式求值失败", pc)
+            throw errorAt(e, pc)
         }
     }
 
@@ -2635,7 +3011,7 @@ class VirtualMachine(
                 vars.readStr(name, indices)
             }
         } catch (e: ExprEvalException) {
-            throw errorAt(e.message ?: "表达式求值失败", pc)
+            throw errorAt(e, pc)
         }
     }
 
@@ -2654,7 +3030,7 @@ class VirtualMachine(
                 vars.plusInt(name, indices, delta.toLong())
             }
         } catch (e: ExprEvalException) {
-            throw errorAt(e.message ?: "表达式求值失败", pc)
+            throw errorAt(e, pc)
         }
     }
 
@@ -2685,7 +3061,7 @@ class VirtualMachine(
             }
             writer.writeInt(name, indices, value)
         } catch (e: ExprEvalException) {
-            throw errorAt(e.message ?: "表达式求值失败", pc)
+            throw errorAt(e, pc)
         }
     }
 
@@ -2714,7 +3090,7 @@ class VirtualMachine(
             }
             writer.writeStr(name, indices, value)
         } catch (e: ExprEvalException) {
-            throw errorAt(e.message ?: "表达式求值失败", pc)
+            throw errorAt(e, pc)
         }
     }
 
@@ -2832,7 +3208,6 @@ class VirtualMachine(
         // `name.uppercase()`（ART 上逐字符 ICU 分配）；值与原实现相同（同一大写结果）。
         stmtEnv.functionKey = f.upperKey
         stmtEnv.pc = pc
-        stmtEnv.line = program.lineOf(pc)
         stmtEnv.functionName = f.name
         return stmtEnv
     }
@@ -2933,9 +3308,31 @@ class VirtualMachine(
         return raw
     }
 
-    /** 构造一条带当前位置（函数/行/pc）的脚本错误。 */
+    /** 构造一条带当前位置（函数/行/pc）与**抛点帧文件**的脚本错误。 */
     private fun errorAt(message: String, pc: Int): CodeEE =
-        CodeEE(message, currentFunctionName(), program.lineOf(pc), pc)
+        CodeEE(message, currentFunctionName(), program.lineOf(pc), pc, scriptFile = currentScriptFile())
+
+    /**
+     * 求值期错误 → 带现场与**算术取证面**的脚本错误（2026-11-09 lane bug-divzero）。
+     *
+     * 为什么不能继续写 `errorAt(e.message ?: ..., pc)`：那样会在这里把
+     * [ExprEvalException.operandA] / [CodeEE.operandB] / [CodeEE.exprText] 三件取证静默丢掉，
+     * 症状是「抛点填了、报告里没有」。转换口径在 `ExprEvalException.toCodeEE` 一处，
+     * 与语句层（`ProcessRuntime`，另一路文件所有权）共用同一个函数。
+     */
+    private fun errorAt(e: ExprEvalException, pc: Int): CodeEE =
+        e.toCodeEE(
+            "表达式求值失败",
+            currentFunctionName(),
+            program.lineOf(pc),
+            pc,
+            currentScriptFile(),
+        )
+
+    // 2026-11-12：整数除零按 4.981 SafeArithmetic 改为「钳制返回 0 + 警告」后，
+    // 原先只服务抛错路径的 arithmeticErrorAt / slotValueOrNull / stackTopOrNull 一并撤除。
+    // 取证面（CodeEE.operandA/B/exprText）仍由浮点除零与 Expr.renderSourceText 使用，
+    // 见 core/expr/Expr.kt 的 divModByZero —— 不在这里留第二套无人调用的取证代码。
 
     /**
      * 帧槽扩容：把两套槽数组都扩到至少 [need] 槽。
@@ -2950,7 +3347,13 @@ class VirtualMachine(
      */
     private fun ensureFrameSlots(need: Long) {
         if (need < 0) {
-            throw CodeEE("帧槽需求为负($need)：槽数回绕", currentFunctionName(), -1, lastPc)
+            throw CodeEE(
+                "帧槽需求为负($need)：槽数回绕",
+                currentFunctionName(),
+                -1,
+                lastPc,
+                scriptFile = currentScriptFile(),
+            )
         }
         if (need <= frameInts.size.toLong()) return
         if (need > MAX_FRAME_SLOTS) {
@@ -2959,6 +3362,7 @@ class VirtualMachine(
                 currentFunctionName(),
                 -1,
                 lastPc,
+                scriptFile = currentScriptFile(),
             )
         }
         var cap = frameInts.size.toLong()
@@ -2972,6 +3376,27 @@ class VirtualMachine(
         // （`IntArray` 的 AIOOBE，非 CodeEE），不能让它从 `errorAt` / 诊断口冒出去。
         if (depth < 0) return null
         return program.functions.getOrNull(funcStack[depth])?.name
+    }
+
+    /**
+     * **当前帧**的源文件显示名（运行期报错的文件维度，MODERN-R8-A）：`funcStack[depth]` +
+     * `program.functions[idx].upperKey` 经 [VmHost.scriptFileOf] 问宿主。
+     *
+     * 为什么在抛点取而不是让语句层事后猜：原版的错误位置挂在异常自己身上
+     * （`CodeEE.cs:5-8`、`EmueraException.cs:7-13`），上屏时它优先于捕获点那一行
+     * （`Process.cs:598-606`）；跨帧时（`_EVAL_*` 里调的用户方法抛错）捕获点是**调用帧**的
+     * 语句层，按它查文件会写出错的文件名。
+     *
+     * 无帧 / 帧下标未登记 → null（与 [currentFunctionName] 同一道 `depth < 0` 守卫）。
+     * 宿主若在本通道上抛错，**不能**让它顶替本来要抛的那条脚本错误：整段 `runCatching`
+     * 兜住，失败按「没有文件表」处理（口径同 [infiniteLoopAlertAt] 的取名字那一路）。
+     * 只在错误路径调用，不是热路径。
+     */
+    private fun currentScriptFile(): String? {
+        if (depth < 0) return null
+        val idx = funcStack[depth]
+        val key = program.functions.getOrNull(idx)?.upperKey ?: return null
+        return runCatching { host.scriptFileOf(idx, key) }.getOrNull()
     }
 
     /**
@@ -3040,6 +3465,15 @@ class VirtualMachine(
          * 取模会在归零后错过对齐点，越线判定与原版逐次等距的观感一致。
          */
         const val INFINITE_LOOP_CHECK_LINES = 10_000L
+
+    /**
+     * 「继续」后退避的**封顶**（毫秒）= 30 分钟。
+     *
+     * 为什么不封顶到无限：真死循环必须仍能被问出来（见 `escalatedLoopAlertMs` 的取舍）。
+     * 30 分钟 = 实测最坏合法链（130 s）的 13.8 倍，且短于任何「挂一夜」的尺度 ——
+     * 玩家真把手机晾在那儿，回来时最多只多问过一次。
+     */
+    const val LOOP_ALERT_ESCALATE_CAP_MS = 1_800_000L
 
         /**
          * 宿主关闭闸的检查间隔掩码（[VirtualMachine.execute] 主循环）：每 65536 条指令读一次

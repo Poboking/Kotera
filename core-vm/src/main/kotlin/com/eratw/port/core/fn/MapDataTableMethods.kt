@@ -2096,6 +2096,36 @@ internal object EmDataPools {
         return out
     }
 
+
+    /**
+     * [snapshot] 的**发射版**（SAVE-STREAM 波，生产存档路）：同样三条池、同样名字表过滤，
+     * 但条目直接写进 [writer] —— 不建 `SaveEntry`、MAP 不复制成 `List<Pair>`。
+     *
+     * 顺序与 [snapshot] 逐条相同（maps → xmls → dts，各自按 [EmDataNames] 的表序；
+     * 池里没有的名字不产出条目，`VariableData.cs:3936-3959` 的 `ContainsKey` 守卫）。
+     * MAP 直接遍历活表：`LinkedHashMap` 的插入序就是原版 .NET Dictionary 无删除时的枚举序。
+     */
+    internal fun emitSnapshot(
+        store: VariableStore,
+        names: EmDataNames,
+        writer: com.eratw.port.core.data.save.SaveFormat.SaveWriter,
+    ) {
+        val maps = mapPoolOf(store).maps
+        for (n in names.maps) {
+            val m = maps[n] ?: continue
+            writer.mapValue(n, m)
+        }
+        val xmls = xmlPoolOf(store)
+        for (n in names.xmls) {
+            val doc = xmls[n] ?: continue
+            writer.xmlValue(n, doc.outerXml())
+        }
+        val dts = dtPoolOf(store).tables
+        for (n in names.dts) {
+            val t = dts[n] ?: continue
+            writer.dataTableValue(n, dtSchemaXml(t), dtDataXml(t))
+        }
+    }
     /**
      * 读档前清空（`RemoveEMSaveData`，`:4006-4029`；`RemoveEMGlobalData`，`:4031-4054`）。
      *

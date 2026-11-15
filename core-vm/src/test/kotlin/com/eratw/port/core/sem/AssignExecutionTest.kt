@@ -73,11 +73,14 @@ class AssignExecutionTest {
     }
 
     @Test
-    fun `除零走表达式口径报错`() {
+    fun `除零走表达式口径钳制为零`() {
+        // 4.981 SafeArithmetic.cs:67-77：整数零除不再抛 DivideByZero，整式求值与普通
+        // 表达式仍同源（Expr.getIntValue），但落库值是钳制后的 0。
         val env = SemTestEnv()
         env.run(parseLine("DAY = 10"))
         val e = kotlin.runCatching { env.run(parseLine("DAY /= 0")) }.exceptionOrNull()
-        assertEquals("除数为0的除法运算", e?.message, "整式求值与普通表达式同源（OperatorMethodManager.cs:121-157）")
+        assertEquals(null, e, "4.981 整数零除不再中断脚本，实际 ${e?.javaClass?.name}: ${e?.message}")
+        assertEquals(0L, env.store.readInt("DAY", longArrayOf(0)), "整式 10 / 0 钳制为 0 并写回 DAY")
     }
 
     @Test

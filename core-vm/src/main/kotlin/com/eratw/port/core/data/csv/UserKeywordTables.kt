@@ -98,7 +98,10 @@ object UserKeywordTables {
         if (Files.isDirectory(erbDir)) {
             runCatching {
                 Files.walk(erbDir).use { s ->
-                    s.filter { Files.isRegularFile(it) }
+                    // 先筛后缀候选再 stat：语料 ERB 树有 4,920 条，把 isRegularFile（一次 stat）
+                    // 留到后缀命中之后，省掉绝大多数系统调用。过滤条件与 collect 同形、顺序不变
+                    // （sorted() 仍在 filter 之后 ⇒ 文件序与改前逐项一致）。
+                    s.filter { isCandidate(it, ".erd") }
                         .sorted()
                         .forEach { collect(out, it, ".erd") }
                 }
@@ -108,7 +111,7 @@ object UserKeywordTables {
         if (Files.isDirectory(csvDir)) {
             runCatching {
                 Files.list(csvDir).use { s ->
-                    s.filter { Files.isRegularFile(it) }
+                    s.filter { isCandidate(it, ".csv") }
                         .sorted()
                         .forEach { collect(out, it, ".csv") }
                 }
@@ -116,6 +119,9 @@ object UserKeywordTables {
         }
         return out
     }
+
+    private fun isCandidate(path: Path, suffix: String): Boolean =
+        path.fileName.toString().endsWith(suffix, ignoreCase = true) && Files.isRegularFile(path)
 
     private fun collect(out: MutableMap<String, MutableList<Path>>, path: Path, suffix: String) {
         val name = path.fileName.toString()
@@ -216,26 +222,57 @@ object UserKeywordTables {
     fun foldSnapshot(
         gameRoot: Path,
         systemNames: Set<String> = emptySet(),
+        discovered: Map<String, List<Path>>? = null,
     ): Map<String, Map<String, Int>> {
-        val groups = discover(gameRoot)
+        // T8：调用侧可复用同一份 [discover] 结果（GameSession 的 tables 与 keywords 两段
+        // 本来就用同源清单），避免对整棵 ERB 树重复 Files.walk。
+        val groups = discovered ?: discover(gameRoot)
         if (groups.isEmpty()) return emptyMap()
         val cache = HashMap<Path, Map<Int, String>>()
         val out = LinkedHashMap<String, Map<String, Int>>()
         for ((name, files) in groups) {
-            if (name.startsWith("_")) continue
-            if (name.uppercase() in systemNames) continue
-            var extent = 0
-            for (f in files) {
-                val byIndex = cache.getOrPut(f) { namesByIndex(f) }
-                val max = byIndex.keys.maxOrNull() ?: -1
-                if (max + 1 > extent) extent = max + 1
-            }
+            if (name.startsWith("_") || name.uppercase() in systemNames) continue
+            val extent = maxExtent(files, cache)
             if (extent <= 0) continue
             val table = runCatching { load(files, name, extent, cache) }.getOrNull() ?: continue
             if (table.isNotEmpty()) out[name] = table
         }
         return out
     }
+
+    /** 组内各表文件的最大下标 + 1（= 折叠口径的长度上界，见 [foldSnapshot] 的已知差异）。 */
+    private fun maxExtent(files: List<Path>, cache: MutableMap<Path, Map<Int, String>>): Int {
+        var extent = 0
+        for (file in files) {
+            val max = cache.getOrPut(file) { namesByIndex(file) }.keys.maxOrNull() ?: -1
+            if (max + 1 > extent) extent = max + 1
+        }
+        return extent
+    }
+
+    /**
+     * ERD 表键：多维声明的第 [position] 位（**1 起**）→ `NAME@position`
+     * （`install` 的 `erdName` 与 `ConstantKeywordResolver` 的反查候选共用这一处构造）。
+     */
+    fun tableKey(varNameUpper: String, position: Int): String = "$varNameUpper@$position"
+
+    /**
+     * 由「字符串下标所在的下标位 `dim`（0 起）」**反查**可能的 ERD 表键。
+     *
+     * 与 [install] 的正向键生成同口径（原版 `erdNameToIntDics` 的键 = `NAME` / `NAME@n`，
+     * `ConstantData.cs:783-792`）：
+     * - 1 维声明：键 = `NAME`，dim = 0（CHARADATA 声明则 dim = 1）；
+     * - 多维声明：键 = `NAME@(e+1)`，dim = e（CHARADATA 声明则 dim = e+1）。
+     *
+     * 编译期只知道 `(变量名, dim)`，不知道该变量是 1 维 / 多维 / 是否 CHARADATA，
+     * 故返回全部可能键；消费方（`ConstantKeywordResolver`）在多个候选给出不同下标时
+     * 一律**不折**，保持运行期查表语义，绝不猜。
+     */
+    fun candidateTableKeys(varNameUpper: String, dim: Int): List<String> = buildList {
+        add(varNameUpper)                                   // 1 维声明
+        if (dim >= 1) add(tableKey(varNameUpper, dim))      // 多维 + CHARADATA：e = dim-1
+        add(tableKey(varNameUpper, dim + 1))                // 多维：e = dim
+    }.distinct()
 
     /**
      * 把 `<gameRoot>` 下所有匹配的 ERD 表挂到 [store] 的用户变量上。
@@ -263,43 +300,67 @@ object UserKeywordTables {
         gameRoot: Path,
         warnings: MutableList<String> = mutableListOf(),
         checkDuplicateIdentifier: Boolean = false,
+        discovered: Map<String, List<Path>>? = null,
     ) {
-        val files = discover(gameRoot)
+        // T8：同 [foldSnapshot]，复用调用侧已算好的 [discover] 结果（缺省 null = 自行扫描，
+        // 行为与改前逐字一致）。
+        val files = discovered ?: discover(gameRoot)
         if (files.isEmpty()) return
-        val cache = HashMap<Path, Map<Int, String>>()
-        val vars: Collection<UserVar> =
-            store.allUserVars() + store.allPrivateUserVars()
-        val seen = HashSet<String>()
+        val sink = InstallSink(store, files, HashMap(), HashSet(), HashSet(), warnings)
         // 原版 erdNameToIntDics（ConstantData.cs:783-792）：键 = `NAME` / `NAME@n`。
-        val registered = HashSet<String>()
-        // 已登记的表（erd 名 → 关键字表），`isDefinedErd` 的扫描面（ConstantData.cs:795-806）。
+        // 已登记的表（erd 名 → 关键字表）由 [attach] 回填，`isDefinedErd` 的扫描面（ConstantData.cs:795-806）。
         val loaded = ArrayList<Pair<String, Map<String, Int>>>(8)
-        for (v in vars) {
-            val spec = v.spec
+        for (v in store.allUserVars() + store.allPrivateUserVars()) {
             // spec: UserDefinedVariableData.cs:269-272 —— 判据在 `Create()` 里、**本行自己的表装载之前**，
             // 所以「声明名 == 自己表里的关键字」不会告警（那张表此刻还没登记），
             // 而「声明名 == 后声明的表的某关键字」也不会告警（顺序敏感，原样复刻）。
-            if (checkDuplicateIdentifier) checkDefinedErd(spec.name, loaded, warnings)
-            if (spec.isRef) continue
-            val dims = spec.dims
-            if (dims.isEmpty()) continue
-            val nameUpper = spec.name.uppercase()
-            if (dims.size == 1) {
-                val group = files[nameUpper] ?: continue
-                val dim = if (spec.isCharaData) 1 else 0
-                val table = attach(store, v, nameUpper, dim, dims[0], group, cache, seen, registered, warnings)
-                if (table != null) loaded += nameUpper to table
-            } else {
-                for (e in dims.indices) {
-                    val erdName = "$nameUpper@${e + 1}"
-                    val group = files[erdName] ?: continue
-                    val dim = e + if (spec.isCharaData) 1 else 0
-                    val table = attach(store, v, erdName, dim, dims[e], group, cache, seen, registered, warnings)
-                    if (table != null) loaded += erdName to table
-                }
-            }
+            if (checkDuplicateIdentifier) checkDefinedErd(v.spec.name, loaded, warnings)
+            loaded += installVar(sink, v)
         }
     }
+
+    /** [install] 的共享可变状态：表文件清单、解析缓存、去重清单与登记清单。 */
+    private class InstallSink(
+        val store: VariableStore,
+        val files: Map<String, List<Path>>,
+        val cache: MutableMap<Path, Map<Int, String>>,
+        val seen: MutableSet<String>,
+        val registered: MutableSet<String>,
+        val warnings: MutableList<String>,
+    )
+
+    /**
+     * 单条已声明 `#DIM` 的挂表：1 维取 `NAME`，多维逐维取 `NAME@(e+1)`，返回本次真正
+     * 登记进 `erdNameToIntDics` 等价物的 (erd 名, 关键字表) 清单（供 [checkDefinedErd] 扫描）。
+     */
+    private fun installVar(sink: InstallSink, v: UserVar): List<Pair<String, Map<String, Int>>> {
+        val spec = v.spec
+        if (spec.isRef || spec.dims.isEmpty()) return emptyList()
+        val nameUpper = spec.name.uppercase()
+        val out = ArrayList<Pair<String, Map<String, Int>>>(spec.dims.size)
+        if (spec.dims.size == 1) {
+            sink.files[nameUpper]?.let { group ->
+                val request = TableRequest(nameUpper, if (spec.isCharaData) 1 else 0, spec.dims[0], group)
+                attach(sink, spec.name, request)?.let { out += nameUpper to it }
+            }
+        } else {
+            for (e in spec.dims.indices) {
+                val erdName = tableKey(nameUpper, e + 1)
+                val group = sink.files[erdName] ?: continue
+                val request = TableRequest(erdName, e + if (spec.isCharaData) 1 else 0, spec.dims[e], group)
+                attach(sink, spec.name, request)?.let { out += erdName to it }
+            }
+        }
+        return out
+    }
+
+    /** 一次挂表的入参：erd 名、下标位、声明长度与表文件组。 */
+    private class TableRequest(
+        val erdName: String,
+        val dim: Int,
+        val extent: Int,
+        val group: List<Path>,
+    )
 
     /**
      * `ConstantData.isDefinedErd`（ConstantData.cs:795-806）：对**每张**已登记的表各查一次关键字，
@@ -331,49 +392,28 @@ object UserKeywordTables {
      * 重复登记被 `seen` 吸掉、或判定失败时返回 null。**空表照样返回**（原版登记是无条件的，
      * 见 [register]）—— 空字典在 [checkDefinedErd] 的 `containsKey` 上恒为假，扫描面不受影响。
      */
-    private fun attach(
-        store: VariableStore,
-        v: UserVar,
-        erdName: String,
-        dim: Int,
-        extent: Int,
-        group: List<Path>,
-        cache: MutableMap<Path, Map<Int, String>>,
-        seen: MutableSet<String>,
-        registered: MutableSet<String>,
-        warnings: MutableList<String>,
-    ): Map<String, Int>? = try {
-        register(store, v, erdName, dim, extent, group, cache, seen, registered)
+    private fun attach(sink: InstallSink, specName: String, request: TableRequest): Map<String, Int>? = try {
+        register(sink, specName, request)
     } catch (e: CodeEE) {
-        warnings += "$erdName#$dim: ${e.message}"
+        sink.warnings += "${request.erdName}#${request.dim}: ${e.message}"
         null
     }
 
-    private fun register(
-        store: VariableStore,
-        v: UserVar,
-        erdName: String,
-        dim: Int,
-        extent: Int,
-        group: List<Path>,
-        cache: MutableMap<Path, Map<Int, String>>,
-        seen: MutableSet<String>,
-        registered: MutableSet<String>,
-    ): Map<String, Int>? {
+    private fun register(sink: InstallSink, specName: String, request: TableRequest): Map<String, Int>? {
         // 同名多份声明（私有 #DIM 共用一张表）在这里就返回，够不到下面的守卫。
         // 分隔符用 NUL：路径里不会出现，避免 `A|B` 这种文件名把清单串拼成同一个键。
-        val dedupe = "$erdName#$dim\u0000${group.joinToString("\u0000")}"
-        if (!seen.add(dedupe)) return null
-        val table = load(group, erdName, extent, cache)
+        val dedupe = "${request.erdName}#${request.dim}\u0000${request.group.joinToString("\u0000")}"
+        if (!sink.seen.add(dedupe)) return null
+        val table = load(request.group, request.erdName, request.extent, sink.cache)
         // 守卫位置与原版一致：文件循环之后、登记之前（ConstantData.cs:783-786）。
-        if (!registered.add(erdName)) throw CodeEE(duplicateVariableDefine(erdName))
+        if (!sink.registered.add(request.erdName)) throw CodeEE(duplicateVariableDefine(request.erdName))
         // 空表**照样登记**：原版 `erdNameToIntDics.Add(varname, dictionary2)` 是无条件执行的
         // （ConstantData.cs:783-792 —— `dictionary2` 由 `dictionary` 投影而来，可以是空字典）。
         // 差别只落在报错文案上，而且两者都是原版文案、只是归属不同：
         //   登记了空表 ⇒ `keywordToInteger` 走到「<NAME>.csv 中未定义关键字」（表在、键不在）；
         //   不登记     ⇒ 提前报「不能用字符串指定（未找到 ERD 表）」（该变量压根没有表）。
         // 旧实现在这里 `return null`，把「表是空的」误报成「没有表」。
-        store.registerKeywordTable(v.spec.name, dim, table)
+        sink.store.registerKeywordTable(specName, request.dim, table)
         return table
     }
 

@@ -7,12 +7,21 @@ import com.eratw.port.render.GlyphKey
  *
  * - [REQUESTED]：请求字体自己画出来了（空字体名先归一到默认字体，那一跳也算请求字体，
  *   spec: `FontFactory.cs:13-17`）
- * - [DEFAULT]：请求字体不可用或不覆盖该码位，由默认字体补上
+ * - [FALLBACK]：**随包兜底族命中** —— 请求族缺字，由
+ *   [com.eratw.port.render.font.GlyphFallback.chainFor] 给的兜底段里某一族画出来
+ *   （成员与顺序与度量尺同一权威，见 [com.eratw.port.render.font.GlyphFallback]）。
+ *   [GlyphEntry.servedFont] 就是命中的那一族
+ * - [DEFAULT]：链上都没命中，由**后端自己的默认族**（`GlyphRaster.defaultFontName`）补上
  *   （对应原版启动期的字体替换，spec: `Config.cs:501-523`）
- * - [NOTDEF]：两跳都拿不到字形，画方框占位
+ * - [NOTDEF]：连默认族也拿不到字形，画方框占位
+ *
+ * 前两档（REQUESTED / FALLBACK）的跳序由族链定义；[DEFAULT] 只在后端默认族**不在**链里时
+ * 才是一个独立跳（真机后端把默认族选成链上成员时它恒不出现，见 [GlyphCache.build] 的
+ * 「缺字回退链」一节）。
  */
 enum class GlyphSource {
     REQUESTED,
+    FALLBACK,
     DEFAULT,
     NOTDEF,
 }
@@ -27,7 +36,8 @@ enum class GlyphSource {
  *
  * @property key 当初的**请求键**（原样保留，含大小写、空字体名与未归一的 `size`；
  *   缓存桶可能已归一，见 [GlyphCache.bucketOf] 的口径）
- * @property servedFont 实际出图的字体名；[GlyphSource.NOTDEF] 时为默认字体名
+ * @property servedFont 实际出图的字体名（[GlyphSource.FALLBACK] 时是命中的兜底族）。
+ *   [GlyphSource.NOTDEF] 时为默认字体名
  * @property servedBy 回退链命中的第几跳
  * @property sizePx 本条字形的**生效字号**（已归一：`<= 0` 换成默认字号，低于
  *   [CellMetrics.MIN_FONT_PIXEL_SIZE] 抬到下限，见 [GlyphCache.normalizeSize]）——

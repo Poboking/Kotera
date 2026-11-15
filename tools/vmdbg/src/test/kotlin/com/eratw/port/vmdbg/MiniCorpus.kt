@@ -28,6 +28,9 @@ import java.nio.file.Path
  *   CheckUserVarName → VarNameAlreadyUsed），CORE-06 保留名对齐后本装置会原地踩雷；
  * - `EVENTFIRST`：事件函数 —— sweep 必须跳过（isEvent），且 erbcc 合成的事件入口 meta
  *   （position = ·event-entry·，CorpusCompile.kt:855）同样必须跳过；
+ * - `MINI_TOTAL`：`PRINTVL GLOBAL_TOTAL` —— `--sets` 注入面的可读回执；
+ * - `MINI_DB_INIT` / `MINI_DB_MAX`：真 SQLite 建表/参数化写入/`MAX` 读回 ——
+ *   `--sandbox` 跨进程复用与 `sql` 命令的断言面；
  * - `GLOBAL_TOTAL`：**ERH** 里的全局 `#DIM`（CMP-89：ERB 函数外的 #DIM 被原版语义丢弃、
  *   全局用户变量只从 ERH 装载，SystemVariableBootstrap.kt:171-179）—— var/vars 命令的
  *   数据面（私有 #DIM 出帧即失，不能当 var 的断言对象）。
@@ -67,6 +70,22 @@ object MiniCorpus {
 
 @EVENTFIRST
 	PRINTL mini-event
+
+@MINI_TOTAL
+	PRINTVL GLOBAL_TOTAL
+
+@MINI_DB_INIT
+	SQL_CONNECT "MINI_DB", "Data Source=plugins/mini.db"
+	SQL_EXECUTE_NONQUERY "MINI_DB", "CREATE TABLE IF NOT EXISTS MINI_T (id INTEGER PRIMARY KEY, v INTEGER)"
+	SQL_P_EXECUTE_NONQUERY "MINI_DB", "INSERT OR REPLACE INTO MINI_T (id, v) VALUES (@0, @1)", "1", "42"
+
+@MINI_DB_MAX
+	#FUNCTION
+	RETURNF SQL_P_EXECUTE_SCALAR_LONG("MINI_DB", "SELECT MAX(v) FROM MINI_T")
+
+@MINI_DB_MAX_CALL
+	SQL_CONNECT "MINI_DB", "Data Source=plugins/mini.db"
+	RESULT = MINI_DB_MAX()
 """
 
     /** 装置产物：游戏根（只读面）+ erbc.v1 目录。 */

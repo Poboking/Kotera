@@ -1,6 +1,7 @@
 package com.eratw.port.render.adapter
 
 import com.eratw.port.core.host.Alignment
+import com.eratw.port.core.host.DisplayDivBlock
 import com.eratw.port.render.RenderLine
 import com.eratw.port.render.RunKind
 import com.eratw.port.render.TextRun
@@ -283,5 +284,138 @@ class ImageBandMergeTest {
         )
         val lines = listOf(mixed) + List(34) { blank() }
         assertSame(lines, ImageBandMerge.merge(lines, 43, 20f, 2400, 648))
+    }
+
+    // ==================================================================
+    // div 覆盖块守卫（2026-11-10 玩家报「幻存神签仍然错位」的根修回归）
+    // ==================================================================
+
+    /** 最小 div 覆盖块（几何足够让守卫判「在场」即可；细节归 DivOverlayTest）。 */
+    private fun divBlock(widthPx: Int, heightPx: Int): DisplayDivBlock = DisplayDivBlock(
+        altHeadTag = "<div>",
+        anchorCol = 0,
+        anchorPointXPx = 0,
+        xOffsetPx = 0,
+        divXOffsetPx = 0,
+        pointYPx = 0,
+        yOffsetPx = 0,
+        widthPx = widthPx,
+        heightPx = heightPx,
+        subDivisionWidthPx = 0,
+        depth = 0,
+        backgroundColor = null,
+        margin = emptyList(),
+        padding = emptyList(),
+        border = emptyList(),
+        radius = emptyList(),
+        borderColors = emptyList(),
+        isRelative = true,
+        isEscaped = true,
+        children = emptyList(),
+        sourceRange = IntRange.EMPTY,
+    )
+
+    /**
+     * 真机档的神签行：`DLC 神签目录 神签.ERB:64/:80` 一行 HTML_PRINT 同时铺
+     * `<img height='IMG_H_PX'>` + `<div height='IMG_H_PX'>`（两者同高），脚本按
+     * `IMG_H_PX / 行高` 预留空行、底部文字落在预留区之后。真机实测（2026-11-10 截图）：
+     * 行高 19、图 569px、块高预算 431（内容高 60%）⇒ 此前 img 被缩到 431、预留行被塌缩，
+     * div 盒仍按 569 全尺寸画，盒底悬进上移后的底部文字区。
+     */
+    private fun omikujiRow(): RenderLine = RenderLine(
+        runs = listOf(
+            TextRun(
+                text = "",
+                fore = 0xC0C0C0,
+                back = 0,
+                styleMask = 0,
+                fontName = "黑体",
+                kind = RunKind.IMAGE,
+                graphic = InlineGraphic.Image(
+                    resource = "神签_76",
+                    widthPx = 404,
+                    heightPx = 569,
+                    yOffsetPx = 0,
+                    widthCells = 41,
+                ),
+            ),
+        ),
+        isLogicalLine = true,
+        isLineEnd = true,
+        divBlocks = listOf(divBlock(widthPx = 622, heightPx = 569)),
+    )
+
+    @Test
+    fun `带div覆盖块的超高图行不参与塌缩`() {
+        val lines = listOf(omikujiRow()) + List(30) { blank() } + List(4) { textLine("底部文字$it") }
+        assertSame(
+            lines,
+            ImageBandMerge.merge(lines, 19, 10f, 1554, 431),
+            "img+覆盖块+预留行是三件一体的脚本排版：不缩图、不塌行，宁可漏合",
+        )
+    }
+
+    @Test
+    fun `同几何不带覆盖块的行照旧塌缩`() {
+        // 对照组：守卫只挡「带覆盖块」的行；神签以外的超高图（标题图一族）必须仍走塌缩，
+        // 否则等于把 2026-10-30 的标题图修复整段退掉。
+        val bare = listOf(omikujiRow().copy(divBlocks = emptyList())) +
+            List(30) { blank() } + List(4) { textLine("底部文字$it") }
+        val out = ImageBandMerge.merge(bare, 19, 10f, 1554, 431)
+        val g = out[0].runs.single().graphic as InlineGraphic.Image
+        assertEquals(431, g.heightPx, "不带覆盖块：img 照旧缩到块高预算")
+        assertTrue(g.heightPx < 569, "塌缩确实发生（569 → 431），守卫不是判据失效")
+    }
+
+    @Test
+    fun `带div覆盖块的横带行不参与合并`() {
+        val banded = (0 until 12).map {
+            band(1000, 40, "TW_title%03d".format(it)).copy(divBlocks = listOf(divBlock(widthPx = 1000, heightPx = 40)))
+        }
+        assertSame(
+            banded,
+            ImageBandMerge.merge(banded, 40, 20f, 1000, 200),
+            "覆盖块的锚行序不能被折行合并挪动：带块行整段原样（第一趟同口径）",
+        )
+    }
+
+    // ==================================================================
+    // 预留区混入带 div 的空行（2026-11-10 深审补，与图行 div 守卫同一根因的另一入口）
+    // ==================================================================
+
+    /**
+     * 只印 div 不印文字的行：runs 为空（`isBlankLine` 的旧判据会把它当「空白」消费掉，
+     * 换成不带 divBlocks 的 SPACER —— 覆盖块随行凭空消失）。
+     */
+    private fun blankWithDiv(): RenderLine = RenderLine(
+        runs = emptyList(),
+        isLogicalLine = true,
+        isLineEnd = true,
+        divBlocks = listOf(divBlock(widthPx = 622, heightPx = 569)),
+    )
+
+    @Test
+    fun `预留区混入带div的空行时整段不塌缩`() {
+        // 图行本身不带块（图行守卫不拦），但脚本预留区里有一条挂 div 的空行：
+        // 覆盖块锚定在这条空行上、与图同属一段脚本排版。塌缩若动手，这条空行要么被删、
+        // 要么被换成 SPACER（块凭空消失），锚行序也随之漂移 ⇒ 预留区一见带块行，
+        // 整张图原样放行（宁可漏合）。
+        val lines = listOf(omikujiRow().copy(divBlocks = emptyList())) +
+            List(3) { blank() } + blankWithDiv() + List(27) { blank() } +
+            List(4) { textLine("底部文字$it") }
+        assertSame(
+            lines,
+            ImageBandMerge.merge(lines, 19, 10f, 1554, 431),
+            "预留区带 div 覆盖块：img 与全部预留行一行不动，覆盖块不得随行消失",
+        )
+    }
+
+    @Test
+    fun `预留区首行就带div时同样整段不塌缩`() {
+        // 边界：带块空行是图行后面第一条 —— 扫描在 j=i+1 就撞上，不得误走
+        // 「没有预留空行」分支之外的缩图路径（两分支在这里等价：都原样放行）。
+        val lines = listOf(omikujiRow().copy(divBlocks = emptyList())) +
+            blankWithDiv() + List(29) { blank() } + List(4) { textLine("底部文字$it") }
+        assertSame(lines, ImageBandMerge.merge(lines, 19, 10f, 1554, 431))
     }
 }

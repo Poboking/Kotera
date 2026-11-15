@@ -184,6 +184,115 @@ object UpdatePolicy {
     fun dataUpdateNeeded(stagedVersion: Long, installedVersion: Long): Boolean =
         stagedVersion > installedVersion
 
+    /**
+     * 随包解包要不要进入**让位档**：盘上数据版本**高于** APK 随包版本 ⇒ 盘上内容来自
+     * 更高版本的数据包，本轮随包解包不得把它的文件打回 APK 内旧版。
+     *
+     * ## 这条判据只能由装载相位消费
+     *
+     * 本函数返回的是「这份盘是不是比随包数据新」这一个**事实**，不是「本轮要不要解包」。
+     * 调用方（`GameAssetInstaller.plan`）拿它去逐文件裁决：让位档下已在位的资产一律不碰
+     * （见 [bundledAssetNeedsCopy]），目标缺失的照常补齐。**禁止**在更上层（如 `LoadPipeline`）
+     * 用本函数把整轮解包短路 —— 那会把配置缺键补齐、出厂值迁移、内置 RT2 投递、摘要维护
+     * 一起跳过，且 `disk == bundled` 时恒不成立（marker 被回拨后循环不收敛）。
+     * `4c20b57b9` 的整轮短路正是这一形态，按 AGENTS.md §3.1 判据 6 属掩盖，已由本波删除。
+     *
+     * ## 为什么必须单列
+     *
+     * 首启档解包的逐文件判据是「目标存在且长度相同 ⇒ 跳过」，长度不同的文件一律被 APK 内
+     * 那份覆盖 —— 盘上是数据包更新过的新语料、APK 里还是旧语料时，这个判据会把更新
+     * **打回旧版**，且每轮冷启把整棵约 919 MiB 的语料树重写一遍。erbc 配对产物有 digest
+     * 版本防护（`GameAssetInstaller.compressedPairStale`），普通语料/资源条目没有。
+     * 判「大于」与 [dataUpdateNeeded] 同口径：相等（同版重装/幂等解包）与盘上更旧
+     * （换新 APK）都不让位，随包语料照常落盘。
+     *
+     * @param diskDataVersion 盘上 `update/data-version.txt` 读数（没装过 = 0）
+     * @param bundledVersionCode APK 的 versionCode（随包数据的版本）
+     */
+    fun unpackSuppressedByNewerDiskData(diskDataVersion: Long, bundledVersionCode: Long): Boolean =
+        diskDataVersion > bundledVersionCode
+
+    /**
+     * 随包/更新解包的**逐文件判据表**：一条资产本轮要不要重拷。
+     *
+     * 三档统一在这里裁决，不各写一份 —— [forceReplace] 是既有「更新档」（包里有就一律重写），
+     * [defersToDisk] 是本次补上的「让位档」（盘上数据版本更高，见
+     * [unpackSuppressedByNewerDiskData]）。把两者放进同一张表，是为了让随包解包复用解包器
+     * 已有的档位机制，而不是在调用方另起一条 if 把整轮跳过。
+     *
+     * 优先级与代价：
+     * - `forceReplace`（更新档）最高：新立绘与旧的恰好同长也必须换掉，让位档不得拦它；
+     * - `defersToDisk` 次之：**只在目标已在位时跳过**，不比长度、不看 sha 漂移；
+     *   目标缺失仍要补拷（玩家手删了一个 CSV，随包解包该把它补回来）；
+     * - 都不是 ⇒ 回到首启档的形状判据（[shapeStale] 由调用方按长度/内容算好）。
+     *
+     * 判错的代价不对称：漏让位 = 每轮冷启把约 919 MiB 新语料打回旧版并把版本标记拨回；
+     * 误让位（换新 APK 也判成让位）= 新包语料永远落不了盘。故让位与否只看版本大小，
+     * 不猜内容。
+     *
+     * @param shapeStale 首启档的形状判据（长度不符 / 压缩条目为空 / 内容对账不符）
+     */
+    fun bundledAssetNeedsCopy(
+        forceReplace: Boolean,
+        defersToDisk: Boolean,
+        targetPresent: Boolean,
+        shapeStale: Boolean,
+    ): Boolean = when {
+        forceReplace -> true
+        defersToDisk -> !targetPresent
+        else -> !targetPresent || shapeStale
+    }
+
+    /**
+     * 数据版本标记（`update/data-version.txt`）可信读数的上界：1_000_000。
+     *
+     * 依据 = **versionCode 量级**：数据包版本与整包 versionCode 同源对齐（`emit_update.py`
+     * 缺省把 assets-version 对齐到 APK versionCode），本工程 versionCode 两位数起步、一年涨
+     * 几号，给到一百万已覆盖版本号自然增长几个数量级的天花板。超过它不可能是合法读数，只
+     * 可能是写坏/被改 —— 而一个巨值 marker 会让 [unpackSuppressedByNewerDiskData] 对任何
+     * 未来的 versionCode 都判「盘上更新」，连换新 APK 的随包自愈路都被关死（玩家覆盖安装
+     * 新包也无法解包），所以按坏值归 0（fail-open：解包照常）。
+     */
+    const val DATA_VERSION_MARKER_MAX: Long = 1_000_000L
+
+    /**
+     * 数据版本标记的坏值对称化：解析失败、负值、超 [DATA_VERSION_MARKER_MAX] 一律归 0。
+     *
+     * 为什么单独一拍（而不是在读文件的调用点就地 `?: 0L`）：marker 的读数是
+     * [unpackSuppressedByNewerDiskData] 与更新通道选包的共同输入，坏值方向必须与「没装过」
+     * 相同 —— 归 0 = 判「盘上没数据」，随包解包照常落盘、更新通道按全量自愈，这是新装机
+     * 唯一安全的 fail-open 方向。判 0 的代价只是「多落一遍盘 / 白下一遍全量」，而把坏值当
+     * 巨量版本放行的代价是自愈路永久关死。词法保持与旧内联链逐字相同（`trim` + `toLongOrNull`）：
+     * 空白已剥、`+` 号宽容、其余 junk 与溢出巨串都解析不出 ⇒ 0。
+     */
+    fun sanitizeDataVersionMarker(raw: String): Long {
+        val parsed = raw.trim().toLongOrNull() ?: return 0L
+        return if (parsed in 1..DATA_VERSION_MARKER_MAX) parsed else 0L
+    }
+
+    /**
+     * 随包解包让位用的**盘上数据版本有效读数**：marker 与文件级摘要两个来源**取大**，
+     * 两源各过 [DATA_VERSION_MARKER_MAX] 同一道坏值界。
+     *
+     * 为什么必须取大而不能单信 marker：数据包应用段先落摘要、marker 最后改名（改名失败只记
+     * 日志不回滚），marker 停在旧版而摘要已是新版是一个真实可达的中间态 —— 此时若只读
+     * marker，随包解包会把新版语料逐个覆盖回 APK 内旧版，「下载完更新、重启后还是旧版」
+     * 的循环以另一种形状复发。摘要的版本行由 `GameAssetInstaller.parseDataDigest` 以
+     * `toLongOrNull` 宽容读入、无上界，所以坏摘要的巨值也要在进判据前过同一道界归 0
+     * （fail-open 方向不变：界外 = 没装过 = 解包照常）。
+     *
+     * 两条 lane 合流后，这个读数同时供给 `LoadPipeline.unpackSuppressed`（空间预检）
+     * 与 `GameAssetInstaller.diskDataVersion`（逐文件让位档），不许两处各算一份。
+     *
+     * @param markerVersion `update/data-version.txt` 读数（读不出 = 0）
+     * @param digestVersion 文件级摘要的 version（缺失/解析失败 = 0）
+     */
+    fun effectiveDiskDataVersion(markerVersion: Long, digestVersion: Long): Long {
+        val marker = if (markerVersion in 1..DATA_VERSION_MARKER_MAX) markerVersion else 0L
+        val digest = if (digestVersion in 1..DATA_VERSION_MARKER_MAX) digestVersion else 0L
+        return maxOf(marker, digest)
+    }
+
     /** 整包是否需要更新：清单版本**严格大于**本地版本才算有新版（相等不下载，回退安装也不催）。 */
     fun apkUpdateNeeded(currentVersionCode: Long, info: UpdateInfo): Boolean {
         val apk = info.apk ?: return false

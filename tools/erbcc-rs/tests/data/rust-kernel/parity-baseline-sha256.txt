@@ -6,7 +6,7 @@
 # 只登记三件套：manifest.txt 的 corpus-root 行是本机绝对路径（机器相关），逐字节判据由
 #   tests/compile_parity.rs 用「腿 A/腿 B 同一份语料」现场对拍，不走登记值。
 # 刷新条件：core-vm 编译器源码变了导致产物字节变化时，重跑上面那条命令并重新登记。
-# 最近一次重生成：2026-11-02 00:15:20 · python devtools/erbcc_rs_parity.py regen --lane rust-kernel
-erbc.v1/program.erbc 157227 a7f1afb4c6640d990e86266b4bba66807da917f8ac759bdec24a03d44643a4b7
-erbc.v1/program.meta 11143 da6c18e35673b93fb43579f3ae32c8513f89abfe30932eff7fe757d5061df26b
+# 最近一次重生成：2026-11-11 02:21:57 · python devtools/erbcc_rs_parity.py regen --lane rust-kernel
+erbc.v1/program.erbc 156694 c5385509888b56e9b9d090f220637c979d5357c35965f6b3be7f73afa7c706ef
+erbc.v1/program.meta 11215 e713a534df4ed2bd561376eb75cdb898c5f3523bf0ebff12c205e5c7a91914d8
 erbc.v1/program.stmt.idx 4332 aa5c76dea11d1530c9eb0aac8860901f1c5bed3502c2c68799b6e61f914a624d

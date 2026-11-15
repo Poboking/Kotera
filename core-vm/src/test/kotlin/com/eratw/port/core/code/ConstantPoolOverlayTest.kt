@@ -59,6 +59,10 @@ class ConstantPoolOverlayTest {
             return items[index]
         }
 
+        override fun scanStatementHeaders(visit: (codeName: String, line: Int) -> Unit) {
+            for (s in items) visit(s.code.name, s.line)
+        }
+
         override fun releaseRaws() = Unit
 
         override fun seedInterning(roots: List<Expr?>): ArgInterner.Stats =

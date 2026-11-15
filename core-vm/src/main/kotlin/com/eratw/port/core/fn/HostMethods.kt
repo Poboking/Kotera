@@ -1,6 +1,9 @@
 package com.eratw.port.core.fn
 
 import com.eratw.port.core.err.CodeEE
+import com.eratw.port.core.err.RAND_METHOD_CLAMP_KIND
+import com.eratw.port.core.err.clampWarnings
+import com.eratw.port.core.err.randMethodClampMessage
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.Value
@@ -26,7 +29,8 @@ internal fun registerHostMethods(r: BuiltinRegistry) {
 
     // ---- 随机 ----
 
-    // spec: FunctionMethodCreator.cs:4027-4074 RandMethod。
+    // spec: 4.981 Creator.Method.cs:3793-3857 RandMethod（1.824 的
+    // FunctionMethodCreator.cs:4027-4074 抛 CodeEE，12.2.0 起改为钳制，见 CHANGELOG.md:105-112）。
     // ADR-001：必须走注入的 RandProvider（store.randProvider），不得自建 Random。
     r.register(BuiltinMethod("RAND", I, 1, 2) { c, a ->
         val rng = c.store.randProvider
@@ -34,10 +38,16 @@ internal fun registerHostMethods(r: BuiltinRegistry) {
         val min = if (a.size == 2 && a[0] != null) iv(a[0]!!) else 0L
         val max = if (a.size == 2) iv(a[1]!!) else iv(a[0]!!)
         if (max <= min) {
-            if (min == 0L) throw CodeEE("函数 RAND：最大值 $max 必须为正数")
-            throw CodeEE("函数 RAND：最大值 $max 不得小于最小值 $min")
+            // 4.981 12.2.0：空区间钳制为下界 min，首次 PrintError 一次、之后静默钳制。
+            // 顺序同 Creator.Method.cs:3827 / :3851 —— return min 之前不调 GetNextRand，
+            // 非法参数不得消耗随机数序列（否则后续抽取结果整条漂移）。
+            val message = randMethodClampMessage("RAND", max)
+            c.store.aux.clampWarnings().once(RAND_METHOD_CLAMP_KIND, message)
+                ?.let { c.printSystemLine(it) }
+            Value.IntV(min)
+        } else {
+            Value.IntV(rng.next(max - min) + min)
         }
-        Value.IntV(rng.next(max - min) + min)
     })
 
     // ---- 存档槽探测 ----

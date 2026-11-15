@@ -18,6 +18,7 @@ import com.eratw.port.core.stmt.SymbolTable
 import com.eratw.port.core.vars.DimParser
 import com.eratw.port.core.vars.DimSpec
 import com.eratw.port.core.vars.VariableStore
+import java.util.Locale
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
@@ -162,6 +163,14 @@ internal object ErbSnippetHarness {
     /**
      * 编译并执行 [entry] 函数，返回运行后的变量池。
      *
+     * 片段里的 `#FUNCTION` / `#FUNCTIONS` 标记（紧跟 `@label` 之后）会被自动识别：
+     * 对应函数按用户方法编译（`FuncSig.isMethod`，`RETURNF` 才放行，spec:
+     * FunctionIdentifier.cs:3455-3458），并在解析面双登记（funcs 放行右值表达式位调用，
+     * Parser.kt functionCall 只查 resolveFunction；methods 放行行首 METHOD 语句分派，
+     * LineParser.kt:187）+ [FuncMeta.isMethod] 置位（运行期 `isUnloweredUserMethod`
+     * 才能重入执行，ProcessRuntime.kt:1037-1042）。生产链这三件事分别由 CorpusScan
+     * 预扫描 / erbc methodTypes 元数据承担；不含 `#FUNCTION` 的既有片段行为逐位不变。
+     *
      * @param store 目标变量池；默认新建
      * @param decls 声明表；null = 从 [lines] 现抽
      * @param registerNew true = 先把 [decls] 注册进 [store]（首次跑）；false = 池子已建好
@@ -178,10 +187,15 @@ internal object ErbSnippetHarness {
         predeclare: SymbolTable.() -> Unit = {},
     ): VariableStore {
         val allDecls = decls ?: declarations(lines)
+        val methodKeys = scanMethodKeys(lines)
         // 解析面预声明：所有 #DIM/#DIMF 名先可见，再逐行解析（SymbolTable 不是
         // DefinitionScopedResolver，不会替 #DIMF 即时登记，故这里必须预扫一遍）。
         val symbols = SymbolTable().apply {
             predeclare()
+            for (key in methodKeys) {
+                declareMethod(key)
+                declareFunction(key, OperandType.INT)
+            }
             for ((_, spec) in allDecls) {
                 declareVariable(
                     spec.name,
@@ -196,7 +210,37 @@ internal object ErbSnippetHarness {
         }
         if (registerNew) for ((fn, spec) in allDecls) store.declareUserVar(spec, fn)
 
-        val parser = LineParser(symbols)
+        val fragment = parseFragment(lines, LineParser(symbols))
+        return buildAndRun(fragment, store, entry.uppercase(), stepCap, methodKeys)
+    }
+
+    /**
+     * 预扫 `#FUNCTION` / `#FUNCTIONS` 标记 → 方法名集合（大写）。口径与 CorpusScan 的
+     * pendingLabel 同源：标记行必须位于某个 `@label` 之后才生效。
+     */
+    private fun scanMethodKeys(lines: List<String>): Set<String> {
+        val out = HashSet<String>()
+        var current: String? = null
+        for (raw in lines) {
+            val t = raw.trimStart()
+            if (t.isEmpty() || t.startsWith(";")) continue
+            if (t.startsWith("@")) {
+                current = labelName(t)
+                continue
+            }
+            if (t.startsWith("#") && current != null) {
+                val kw = t.drop(1).trim().takeWhile { !it.isWhitespace() }.uppercase(Locale.ROOT)
+                if (kw == "FUNCTION" || kw == "FUNCTIONS") out.add(current)
+            }
+        }
+        return out
+    }
+
+    /** 片段行分派：`@label` 切函数、语句进体。产出函数体与形参表。 */
+    private fun parseFragment(
+        lines: List<String>,
+        parser: LineParser,
+    ): Pair<LinkedHashMap<String, MutableList<Statement>>, HashMap<String, List<String>>> {
         val functions = LinkedHashMap<String, MutableList<Statement>>()
         val params = HashMap<String, List<String>>()
         var current: String? = null
@@ -213,7 +257,7 @@ internal object ErbSnippetHarness {
             val stmt = parser.parseLogicalLine(LogicalLine(kind, "e2e.erb", i + 1, t))
             when (stmt) {
                 null -> {}
-                is SharpStmt -> {} // 声明已在上面登记，不进函数体
+                is SharpStmt -> {} // 声明已在 run 里登记，不进函数体
                 is FuncLabelStmt -> {
                     current = stmt.name.uppercase()
                     functions.getOrPut(current!!) { ArrayList() }
@@ -224,17 +268,38 @@ internal object ErbSnippetHarness {
                 }.add(stmt)
             }
         }
+        return functions to params
+    }
 
+    /** 编译全部函数 → 建 [FunctionTable] → 执行 [entry]。 */
+    private fun buildAndRun(
+        fragment: Pair<LinkedHashMap<String, MutableList<Statement>>, HashMap<String, List<String>>>,
+        store: VariableStore,
+        entry: String,
+        stepCap: Long,
+        methodKeys: Set<String>,
+    ): VariableStore {
+        val (functions, params) = fragment
         val compiler = ErbProgramCompiler()
         val known = functions.keys.toSet()
         for ((key, body) in functions) {
             val ps = params[key].orEmpty()
-            compiler.compileFunction(FuncSig(key, ps.size, isMethod = false, returnsStr = false, paramNames = ps), body, known)
+            compiler.compileFunction(
+                FuncSig(key, ps.size, isMethod = key in methodKeys, returnsStr = false, paramNames = ps),
+                body,
+                known,
+            )
         }
-        val program: Program = compiler.build(entry.uppercase())
+        val program: Program = compiler.build(entry)
         val table = FunctionTable(
             program.functions.mapIndexed { i, f ->
-                FuncMeta(index = i, key = f.name.uppercase(), argIntCount = f.arity, argStrCount = f.arity)
+                FuncMeta(
+                    index = i,
+                    key = f.name.uppercase(),
+                    argIntCount = f.arity,
+                    argStrCount = f.arity,
+                    isMethod = f.name.uppercase() in methodKeys,
+                )
             },
         )
         ProcessRuntime(program, store, table, VmConfig(maxStepsPerRun = stepCap)).execute()

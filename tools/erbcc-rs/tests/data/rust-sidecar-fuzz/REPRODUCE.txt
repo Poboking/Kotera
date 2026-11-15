@@ -1,9 +1,9 @@
 # rust-sidecar-fuzz 复现配方（与 kotlin-vs-rust.tsv 同批入库；畸形档本体不入库）
 #
-# 环境（Haruki 机；整段可直接复制，AGENTS.md §5）
-#   export JAVA_HOME='C:\DSH\eratw-安卓移植计划\.tooling\jdk-17.0.20.1+1'
+# 环境（上游工作区；公开仓不带本机路径，按本机布局自行替换）
+#   export JAVA_HOME=<JDK17>
 #   export PATH="$JAVA_HOME/bin:$PATH"
-#   cd C:/DSH/eratw-android-fixbug-haruki/eratw-android
+#   cd <仓库根>/eratw-android
 #
 # 1) 种子怎么来的（改过 core-vm/** 之后必须重生成，否则 compiler-digest 判据两侧同红 = 基准过期）
 #    tools/erbcc-rs/target/release/erbcc.exe compile ^
@@ -11,11 +11,13 @@
 #      --out    <绝对路径>/tools/erbcc-rs/build/sidecar-fuzz/seedgen
 #    然后把产出的 erbc.v1 整份（真拷贝，不许 cp -l 硬链接）拷进
 #      tools/erbcc-rs/tests/data/rust-sidecar-fuzz/seed/erbc.v1/
-#    种子读数：program.erbc 1606 B / sha256 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe9
-#              program.meta 1352 B（40 行：labels 3、files 3、data-sections 1、functions 3、
+#    种子读数（2026-11-11 R13-FRESH 保鲜重出；digest 7ddbe30b…/325源 = RUST2 收口后源树继续进账；
+#    四件套里 erbc/meta/stmt.idx 与 2026-11-10 RUST2 版逐字节同，manifest 只差 digest/sources 行）：
+#              program.erbc 1606 B / sha256 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe9
+#              program.meta 1354 B（40 行：labels 3、files 3、data-sections 1、functions 3、
 #              global-dims 4、private-dims 1、dim-config、macros 1、constants 2、str-constants 1、
 #              load-warnings 1、param-defaults 1、method-types 1、end）
-#              program.stmt.idx 64 B（v2、10 条偏移）、manifest.txt 1293 B（artifact 3 条 + source 4 条）
+#              program.stmt.idx 64 B（v2、10 条偏移）、manifest.txt 1284 B（artifact 3 条 + source 4 条）
 #
 # 2) 两侧腿命令（**每档都要两条腿都跑**；`-cp` 的通配必须整体加引号，否则 MSYS 展开成
 #    一串 jar 路径、Java 把第一个 jar 当主类，得出一条假的「Kotlin rc=1」）

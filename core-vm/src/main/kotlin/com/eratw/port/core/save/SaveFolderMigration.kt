@@ -37,6 +37,17 @@ interface SaveFolderIo {
     fun rootSaveFileNames(): List<String>
 
     /**
+     * RT2 M43R（裁定 3）：根目录顶层**全部普通文件**名（不做形状过滤；原版没有对应物 ——
+     * 枚举伴生件做孤儿 GC 是移植侧自研相位，权威 = era-arch-v61u.md:204/:222 的
+     * 「一个逻辑存档单元统管全部生命周期」）。
+     *
+     * 缺省空表的纪律与 [SaveFileIo.isReadOnly] 的缺省 false 同一条兼容口径：宿主没有
+     * 目录枚举能力 = 看不见任何伴生件 ⇒ 孤儿 GC 一步都不走（fail-safe：绝不因能力缺失
+     * 而误删）。返回相对根的文件名（顶层，不含分隔符），只含普通文件；排序仅求可复现。
+     */
+    fun rootFileNames(): List<String> = emptyList()
+
+    /**
      * 原版 `File.Move(src, dst)`（Config.cs:577 搬 global.sav、:583 搬 save 档）。
      *
      * 目标已存在时 .NET 抛 `IOException` ⇒ 本方法返回 false，**不覆盖**
@@ -254,24 +265,57 @@ object SaveFolderMigration {
     /**
      * 跑一次迁移判定（[SaveFolderMigration] 类 KDoc 的 6 步，逐条带 Config.cs 行号）。
      *
+     * ## RT2 M43R 的两段自研扩展（都挂在搬运相位之后/之内，原版 6 步本身逐句不动）
+     *
+     * 1. **配对随迁**（裁定 1；era-arch-v61u.md:204/:222「一个逻辑存档单元统管全部生命周期」）：
+     *    每个本体（global 精确名 + save 通配命中）搬进 sav 之后，其六件伴生
+     *    （[sidecarCompanionPaths]，与 M4-3 删除相位同一份清单：rt2、journal、两成员的
+     *    part 与 bak）一并随迁。伴生件后缀不命中本体通配 ⇒ 原版枚举看不见它们，
+     *    随迁是纯增量；**本体缺失的伴生件（孤儿）永不进这一步** —— 不随迁、不删除、原地不动。
+     *    global.sav 在原版迁移面内（Config.cs:562 的 File.Exists + :575-578 的精确名搬运），
+     *    故其侧车同样随迁（裁定 2 的取证结论）。
+     * 2. **孤儿 GC post-step**（裁定 3；MODGC2 裁定 2 扩到四出口）：[SaveMigrationOutcome.Completed] /
+     *    [SaveMigrationOutcome.MoveFailed] / [SaveMigrationOutcome.FolderAlreadyExists] /
+     *    [SaveMigrationOutcome.NothingToMove] 四条出口收尾时对旧目录（游戏根）扫一遍，
+     *    「本体在根**且**在生效目录都缺失 && 伴生件在根」的伴生件逐件删除。
+     *    判据里的生效目录 = `sav/`（[SaveConfig.saveFolderPrefix]）：本体已迁进 sav、侧车随迁失败
+     *    留在根的那一半**不是**孤儿（它还有本体可配），删了只会让玩家少一件扩展状态。
+     *    **关态门** = [sidecarGcGate]，生产传 `SidecarSaveWiring.of(store) != null` 的现读 ——
+     *    与 delData 的开关语义同一条：门不开一个伴生件都不碰。其余五条出口（SwitchOff /
+     *    IoNotFolderCapable / FolderCreateFailed / Declined / FolderMissing）**一个伴生件都不碰**：
+     *    开关为假（原版 :478-481 连目录都不看）、宿主无目录能力、建目录失败（原版 :553-561 只弹框）、
+     *    玩家选了「不搬」、弹框期间目录被人删掉 —— 这五条下旧目录仍是玩家在用的目录，不是「被废弃目录」。
+     *
      * @param io 存档 IO；只有同时实现 [SaveFolderIo] 的宿主（生产 = [RootedSaveFileIo]）才真搬，
      *   其余假体回 [SaveMigrationOutcome.IoNotFolderCapable] 且**一个字节都不碰**。
      * @param config 生效的落盘策略：[SaveConfig.useSaveFolder] = false 时原样退出（Config.cs:478-481），
      *   目录与落地名都取 [SaveConfig.saveFolderPrefix] / [SaveConfig.globalPath]（同一条 SavDir 口径）。
      * @param prompt 原版 `Dialog.ShowPrompt`（Config.cs:564）；缺省 [AUTO_ACCEPT]。
      *   只在「根下有东西可搬」时才被调用（原版 :564 的短路顺序：先判空再弹框）。
+     * @param sidecarGcGate 孤儿 GC 的关态门（裁定 3）；null 或返回 false = 关态
+     *   （缺省 null ⇒ 直调 migrate 的既有调用方与既有测试零变化）。生产由 [FileSystemOps]
+     *   传侧车接线的现读。
      */
     fun migrate(
         io: SaveFileIo,
         config: SaveConfig,
         prompt: (title: String, message: String) -> Boolean = AUTO_ACCEPT,
+        sidecarGcGate: (() -> Boolean)? = null,
     ): SaveFolderMigrationResult {
         // Config.cs:478-481 + :482 —— 开关为假时连目录都不建。
         if (!config.useSaveFolder) return SaveFolderMigrationResult(SaveMigrationOutcome.SwitchOff)
         if (io !is SaveFolderIo) return SaveFolderMigrationResult(SaveMigrationOutcome.IoNotFolderCapable)
 
-        // Config.cs:482 —— 目录已存在 ⇒ 整段跳过（幂等）。
-        if (io.saveFolderExists()) return SaveFolderMigrationResult(SaveMigrationOutcome.FolderAlreadyExists)
+        // Config.cs:482 —— 目录已存在 ⇒ 整段跳过（幂等）。MODGC2 裁定 2：这一出口也要清纯孤儿 ——
+        // 它是最常见的常态出口（sav 早已建好），历史遗留的孤儿侧车只有在这里才可回收。
+        if (io.saveFolderExists()) {
+            return afterMigrationPhase(
+                io,
+                config,
+                SaveFolderMigrationResult(SaveMigrationOutcome.FolderAlreadyExists),
+                sidecarGcGate,
+            )
+        }
 
         // Config.cs:553-561 —— 建目录失败只弹框、不搬。
         if (!io.createSaveFolder()) {
@@ -285,7 +329,16 @@ object SaveFolderMigration {
         val hasGlobal = io.exists(GLOBAL_FILE)
         val candidates = io.rootSaveFileNames()
         // Config.cs:564-567 —— 没东西 ⇒ 静默 return；有东西才弹框，选 No ⇒ 目录留着、文件不动。
-        if (!hasGlobal && candidates.isEmpty()) return SaveFolderMigrationResult(SaveMigrationOutcome.NothingToMove)
+        // MODGC2 裁定 2：本批虽然一个本体都没有，但根下可能只剩孤儿侧车（历史遗留 / 随迁残留），
+        // 这是它们最后一次能被回收的时机（下一次多半直接走 FolderAlreadyExists）。
+        if (!hasGlobal && candidates.isEmpty()) {
+            return afterMigrationPhase(
+                io,
+                config,
+                SaveFolderMigrationResult(SaveMigrationOutcome.NothingToMove),
+                sidecarGcGate,
+            )
+        }
         if (!prompt(TITLE_DATA_TRANSFER, MES_SAV_FOLDER_CREATED)) {
             return SaveFolderMigrationResult(SaveMigrationOutcome.Declined)
         }
@@ -301,15 +354,41 @@ object SaveFolderMigration {
         val moved = ArrayList<String>()
         if (hasGlobal) {
             if (!io.moveToFile(GLOBAL_FILE, config.globalPath())) {
-                return moveFailed(moved, GLOBAL_FILE)
+                return afterMigrationPhase(io, config, moveFailed(moved, GLOBAL_FILE), sidecarGcGate)
             }
             moved += config.saveFolderPrefix + GLOBAL_FILE
+            moveCompanionsOf(io, GLOBAL_FILE, config)
         }
         for (name in io.rootSaveFileNames()) {
-            if (!io.moveToFile(name, config.saveFolderPrefix + name)) return moveFailed(moved, name)
+            if (!io.moveToFile(name, config.saveFolderPrefix + name)) {
+                return afterMigrationPhase(io, config, moveFailed(moved, name), sidecarGcGate)
+            }
             moved += config.saveFolderPrefix + name
+            moveCompanionsOf(io, name, config)
         }
-        return SaveFolderMigrationResult(SaveMigrationOutcome.Completed, moved)
+        return afterMigrationPhase(
+            io,
+            config,
+            SaveFolderMigrationResult(SaveMigrationOutcome.Completed, moved),
+            sidecarGcGate,
+        )
+    }
+
+    /**
+     * 孤儿 GC 的出口面（MODGC2 裁定 2）：[migrate] 真正挂 GC 的那四条出口。
+     *
+     * 单源在这里，是为了让 [FileSystemOps] 的「接线未装 ⇒ 登记一次性待办」与迁移面的挂载面
+     * **同一份判据**：两处各写一份 when，迟早会一处扩面一处没跟上（M43R 就是这样漏掉
+     * 常态出口的）。其余五条出口恒 false。
+     */
+    fun runsOrphanGc(outcome: SaveMigrationOutcome): Boolean = when (outcome) {
+        SaveMigrationOutcome.Completed,
+        SaveMigrationOutcome.MoveFailed,
+        SaveMigrationOutcome.FolderAlreadyExists,
+        SaveMigrationOutcome.NothingToMove,
+        -> true
+
+        else -> false
     }
 
     /** Config.cs:586-589：catch 全部异常 ⇒ 只弹一条框，已搬不回滚、剩余不重试。 */
@@ -320,4 +399,97 @@ object SaveFolderMigration {
             failedFile = failed,
             notice = SaveMigrationDialog(TITLE_DATA_TRANSFER_FAILURE, MES_FAILED_MOVE_SAV_FILES),
         )
+
+    // ----------------------------------------------------------------------
+    // RT2 M43R：配对随迁（裁定 1）与孤儿侧车 GC post-step（裁定 3）
+    // ----------------------------------------------------------------------
+
+    /**
+     * 迁移相位收尾：先跑孤儿侧车 GC post-step（裁定 3 / MODGC2 裁定 2），再**原样**交出迁移结局。
+     *
+     * 挂载面 = 四条「本会话已经/曾经把旧目录当废弃目录看」的出口：
+     * [SaveMigrationOutcome.Completed] / [SaveMigrationOutcome.MoveFailed]（搬运相位真跑过）
+     * + [SaveMigrationOutcome.FolderAlreadyExists] / [SaveMigrationOutcome.NothingToMove]
+     * （两处常态出口，根下不归 sav 管的残留只剩孤儿侧车）。其余五条出口**不挂**：那五条下
+     * 旧目录仍是玩家在用的目录（开关关着 / 宿主无目录能力 / 建目录失败 / 玩家选了不搬 /
+     * 目录被删），GC 的前提不成立 ⇒ 一个伴生件都不碰。GC 本身永不抛
+     * （见 [gcOrphanSidecarCompanions]），结局原样透传。
+     */
+    private fun afterMigrationPhase(
+        io: SaveFileIo,
+        config: SaveConfig,
+        result: SaveFolderMigrationResult,
+        sidecarGcGate: (() -> Boolean)?,
+    ): SaveFolderMigrationResult {
+        if (sidecarGcGate?.invoke() == true) gcOrphanSidecarCompanions(io, config)
+        return result
+    }
+
+    /**
+     * 配对随迁（裁定 1）：本体搬进 sav 之后，把它的六件伴生（[sidecarCompanionPaths]，
+     * M4-3 删除相位**同一份清单**，不复制第二份）逐件随迁到同一落点前缀。
+     *
+     * - 只在**本体搬成功之后**调用 ⇒ 本体缺失的伴生件（孤儿）永远不会被这一步碰：
+     *   孤儿不随迁、不删除、原地不动（原版语义零干扰）。
+     * - 伴生件缺席 = 正常态（无侧车的旧档、清理干净的槽），跳过即可。
+     * - 不进 [SaveFolderMigrationResult.moved]：moved 是原版搬运清单（宿主据此计
+     *   movedCount / 决定要不要提示玩家），伴生随迁是移植侧自研相位，混入会放大其语义。
+     * - 随迁失败只经 [SaveDiagnostics.note] 留痕并原地保留：九出口的成败只由本体搬运决定
+     *   （与删除相位「附属失败不新增异常形状」同一条纪律）。
+     */
+    private fun moveCompanionsOf(io: SaveFileIo, body: String, config: SaveConfig) {
+        val folder = io as? SaveFolderIo ?: return // migrate 的调用序保证命中；兜底 = 不搬
+        for (companion in sidecarCompanionPaths(body)) {
+            if (!tryMoveCompanion(io, folder, companion, config)) {
+                SaveDiagnostics.note("SIDECAR_MOVE", companion, "迁移随迁失败，伴生件原地保留（本体已搬进 sav 文件夹）")
+            }
+        }
+    }
+
+    /** true = 无需搬（伴生件缺席 = 正常态）或已搬成；false = 搬失败（留原地，调用方留痕）。 */
+    private fun tryMoveCompanion(io: SaveFileIo, folder: SaveFolderIo, companion: String, config: SaveConfig): Boolean =
+        !io.exists(companion) || folder.moveToFile(companion, config.saveFolderPrefix + companion)
+
+    /**
+     * 孤儿侧车 GC post-step（裁定 3；执行点 = [afterMigrationPhase]，对**旧目录**即游戏根）。
+     *
+     * 判据 = 本体缺失 && 伴生件在场：[sidecarCompanionBodyOf] 反推本体名 +
+     * [isLogicalSaveBodyName] 验形状。**「本体缺失」要同时看两处**（MODGC2 裁定 2）：
+     * 根下没有 **且** 生效目录（[SaveConfig.saveFolderPrefix] + 本体名）也没有 ——
+     * 只搬了本体、侧车随迁失败留在根的那一半仍有本体可配，删掉等于把玩家的扩展状态
+     * 悄悄丢掉（导出面的跨目录配对做的正是把这半套救回来）。删除走 [SaveFileIo.delete]
+     * （M4-3 删除相位同一删除原语），关态门在 [afterMigrationPhase] 判定 —— 与 delData
+     * 相同开关语义。每个删除动作（成功或失败）都经 [SaveDiagnostics.note] 留痕
+     * （取证面，非玩家可见文案）。GC 全程 runCatching，不抛、不改 [SaveMigrationOutcome]；
+     * 枚举面 = [SaveFolderIo.rootFileNames]（缺省空表 ⇒ 没有目录枚举能力的宿主一步都不走）。
+     */
+    internal fun gcOrphanSidecarCompanions(io: SaveFileIo, config: SaveConfig) {
+        val folder = io as? SaveFolderIo ?: return // migrate 的调用序保证命中；兜底 = 不枚举不删
+        val orphans = folder.rootFileNames().filter { name ->
+            val body = sidecarCompanionBodyOf(name)
+            body != null &&
+                isLogicalSaveBodyName(body) &&
+                !io.exists(body) &&
+                !io.exists(config.saveFolderPrefix + body)
+        }
+        for (name in orphans) {
+            val removed = runCatching { io.delete(name) }.getOrDefault(false)
+            SaveDiagnostics.note(
+                "SIDECAR_GC",
+                name,
+                if (removed) "孤儿伴生件已删除（本体缺失）" else "孤儿伴生件删除失败，原地保留",
+            )
+        }
+    }
+
+    /**
+     * 名字若是某逻辑存档单元的伴生件，给出其**本体名**；不是伴生件形状 ⇒ null。
+     * 委托 [SidecarSaveInventory.companionBodyOf]（单源，不复制第二份后缀表）。
+     */
+    internal fun sidecarCompanionBodyOf(name: String): String? =
+        SidecarSaveInventory.companionBodyOf(name)
+
+    /** 逻辑存档本体形状；委托 [SidecarSaveInventory.isLogicalSaveBody]（单源）。 */
+    private fun isLogicalSaveBodyName(name: String): Boolean =
+        SidecarSaveInventory.isLogicalSaveBody(name)
 }

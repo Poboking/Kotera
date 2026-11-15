@@ -1,17 +1,21 @@
 package com.eratw.port.core.sem
 
+import com.eratw.port.core.data.save.SaveUnclaimedPassthrough
 import com.eratw.port.core.err.CodeEE
+import com.eratw.port.core.expr.EvalContext
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.OperatorCode
 import com.eratw.port.core.expr.VarRef
 import com.eratw.port.core.expr.langCodecOf
+import com.eratw.port.core.lexer.longFromScaledDouble
 import com.eratw.port.core.expr.strLenLang
 import com.eratw.port.core.host.Alignment
 import com.eratw.port.core.host.CellWidth
 import com.eratw.port.core.host.InputOutcome
 import com.eratw.port.core.host.InputRequest
 import com.eratw.port.core.host.InputRequest.InputType
+import com.eratw.port.core.host.LineBufferConsoleSink
 import com.eratw.port.core.host.SPRITE_SLOT
 import com.eratw.port.core.host.SaveLoadHandoff
 import com.eratw.port.core.host.SpritePool
@@ -78,6 +82,7 @@ import com.eratw.port.core.stmt.StrAsignArgument
 import com.eratw.port.core.stmt.Statement
 import com.eratw.port.core.stmt.StrDataArgument
 import com.eratw.port.core.stmt.VarDeclStmt
+import com.eratw.port.core.save.SaveDiagnostics
 import com.eratw.port.core.save.SaveWiring
 import com.eratw.port.core.vars.VariableStore
 import com.eratw.port.core.vars.oorInstructionArg
@@ -537,9 +542,12 @@ class StatementExecutor {
                 a.expr() // 第二槽（opt）本语句不消费，仍按 encode 顺序跳过
                 if (!ctx.skipPrint) {
                     val text = evalStr(strTerm, ctx)
-                    ctx.console.printHtml(
+                    // 走定宽制表专用入口：fork 在写每一项前按「当前行 + 列宽」判界，
+                    // 超宽先把已有网格行落表，再写这一项（见 ConsoleSink.printHtmlC）。
+                    // 旧路径直接 printHtml(..., true) 会把整张网格攒成 1 个逻辑行。
+                    ctx.console.printHtmlC(
                         padHtmlColumn(ctx, text, rightAlign = code == FunctionCode.HTML_PRINTC),
-                        true,
+                        htmlColumnCells(ctx),
                     )
                 }
                 ExecResult.Normal
@@ -693,8 +701,9 @@ class StatementExecutor {
                 execInputsFlat(code, a, ctx); ExecResult.Normal
             }
             FunctionCode.TINPUT, FunctionCode.TONEINPUT, FunctionCode.TINPUTS, FunctionCode.TONEINPUTS,
-            // 4.981 上游新增：与 TINPUT/TINPUTS 全等价（语料只有「限时 + 默认值」用法，
-            // `TITLE.ERB:88` 与 `魔改内容/qol/qol_MAP.ERB:54` 等，见 ArgBuilders 的 SP_TINPUT 记录）。
+            // 4.981 上游新增：参数表与 TINPUT/TINPUTS 同形，但请求带 noFocus ⇒ 等待入口
+            // 走 WaitInputNoFocus（Instraction.Child.cs:1126-1127/:1179-1180）。语料只有
+            // 「限时 + 默认值」用法（TITLE.ERB:88、魔改内容/qol/qol_MAP.ERB:54 等）。
             FunctionCode.TINPUTNF, FunctionCode.TINPUTSNF,
             -> {
                 execTInputsFlat(code, a, ctx); ExecResult.Normal
@@ -1082,6 +1091,24 @@ class StatementExecutor {
                     EmDataPools.clear(ctx.variables, em.global)
                     EmDataPools.clear(ctx.variables, em.staticSets)
                 }
+                // L32（ADR-005 例外收口）：原版 `ResetGlobalData`（VariableEvaluator.cs:1746-1755）
+                // 把 GLOBAL/GLOBALS、用户 GLOBAL 变量、EM Global 池与 EM Static 池**一起**复位
+                // （RemoveEMGlobalData :1749 / RemoveEMStaticData :1750 / SetDefaultGlobalValue
+                // :1754 → VariableData.cs:620-624、:1320、:1344）；移植侧 L15/L28 新增的未认领
+                // 切片槽不在这条链上，RESETGLOBAL 之后第一次 SAVEGLOBAL 会把重置前的未知顶层键
+                // 与未知 EM 容器原样写回（SaveCapture.emitGlobal 的切片回写支）。normal 槽不在此列：
+                // 它随 ResetData 的 RemoveEMSaveData（VariableEvaluator.cs:1727-1732）与 LOADDATA
+                // 走，故这里只清 global 顶层 + EM 槽。清槽失败只留痕、不翻转本语句成功语义；
+                // OutOfMemoryError 上抛（与 FileSystemOps.recordUnclaimed 同型）。
+                runCatching { SaveUnclaimedPassthrough.of(ctx.variables)?.clearGlobal() }
+                    .onFailure { e ->
+                        if (e is OutOfMemoryError) throw e
+                        SaveDiagnostics.note(
+                            "RESETGLOBAL",
+                            "global",
+                            "未认领 global 槽未清空（保留原切片）：${e.javaClass.simpleName}: ${e.message}",
+                        )
+                    }
                 ExecResult.Normal
             }
             FunctionCode.PUTFORM -> {
@@ -1586,7 +1613,10 @@ class StatementExecutor {
                 // 复用读路径的访问点句柄与下标借还池 —— 这是语料里 99.9% 的语句执行，
                 // 旧实现每次现分配一个 `LongArray` 再按名查一次表。
                 if (dest.operandType == OperandType.INT) {
-                    val value = if (isConst) a.constInt else term?.getIntValue(ctx.eval) ?: 0L
+                    // 语料换代 261111 校准（同 execAssign 注记）：浮点右值在整型目的地 = 截断
+                    //（Instraction.Child.cs:696 + Term.cs:117-120）。静态 INT 项走原快路径。
+                    val value = if (isConst) a.constInt
+                    else intValueOfOpt(term, ctx.eval)
                     if (addConst) dest.addIntValue(ctx.eval, value)
                     else dest.setIntValue(ctx.eval, value)
                 } else if (dest.operandType == OperandType.FLOAT) {
@@ -1618,7 +1648,7 @@ class StatementExecutor {
                 val idx = resolveIndices(dest, ctx)
                 if (dest.operandType == OperandType.INT) {
                     val vals = if (constIntList != null) constIntList
-                    else terms.map { it?.getIntValue(ctx.eval) ?: 0L }.toLongArray()
+                    else terms.map { intValueOfOpt(it, ctx.eval) }.toLongArray()
                     ctx.variables.setValues(name, idx, vals)
                 } else if (dest.operandType == OperandType.FLOAT) {
                     // 浮点批量形态：没有 constDoubleList 槽（Argument.kt 非本路文件）⇒ 恒逐项求值。
@@ -1802,8 +1832,9 @@ class StatementExecutor {
         code: FunctionCode,
         ctx: ExecContext,
     ): ExecResult {
-        // 本游戏 setting.json `UseScopedVariableInstruction:false`：原版在**标识符解析期**即抛
-        // CodeEE（CanNotUseVAR，spec: IdentifierDictionary.cs:624-627），语料零使用 ⇒ 语义按禁用处理。
+        // 开关 = 本游戏目录 `setting.json` 的 `UseScopedVariableInstruction`（原版
+        // JSONConfigData.cs:13；GameSession 注入，见 SemConfig 字段 KDoc）。关闭时原版在
+        // **标识符解析期**即抛 CodeEE（CanNotUseVAR，spec: IdentifierDictionary.cs:624-627）。
         // 解析期门控已落地（`StmtParseConfig.useScopedVariableInstruction`，LineParser 构造参数，
         // M3-A A3）；本处是执行层兜底，覆盖"语句由其它来源构造/未走解析器门控"的路径。
         if (!ctx.config.useScopedVariableInstruction) {
@@ -1954,7 +1985,14 @@ class StatementExecutor {
         else ctx.variables.writeInt(RESULT, longArrayOf(0), o.intValue)
     }
 
-    /** TINPUT/TINPUTS/TONEINPUT/TONEINPUTS 直读 —— [execTInputs] 逐字复刻。spec: FunctionIdentifier.cs:1003-1099 */
+    /**
+     * TINPUT/TINPUTS/TONEINPUT/TONEINPUTS 直读 —— [execTInputs] 逐字复刻。spec: FunctionIdentifier.cs:1003-1099
+     *
+     * 4.981 `NF` 后缀两位（[FunctionCode.TINPUTNF] / [FunctionCode.TINPUTSNF]）参数表同形，
+     * 但请求必须带 `noFocus`：原版两个指令类按 `_noFocus` 填 `InputRequest.NoFocus`
+     * （`Instraction.Child.cs:1100` / `:1154`），控制台据此走 `WaitInputNoFocus`
+     * （`Instraction.Child.cs:1126-1127` / `:1179-1180`，`EmueraConsole.cs:780-818`）。
+     */
     private fun execTInputsFlat(code: FunctionCode, a: FlatArgs, ctx: ExecContext) {
         openTag(a, code, ErbcFormat.ArgTag.SP_TINPUTS)
         val timeTerm = a.expr()
@@ -1965,6 +2003,7 @@ class StatementExecutor {
         val canSkip = a.expr()
         val isStr = code == FunctionCode.TINPUTS || code == FunctionCode.TONEINPUTS ||
             code == FunctionCode.TINPUTSNF
+        val isNoFocus = code == FunctionCode.TINPUTNF || code == FunctionCode.TINPUTSNF
         if (canSkip != null && ctx.mesSkip) {
             val mouse = mouseTerm?.getIntValue(ctx.eval) ?: 0L
             val slot = longArrayOf(if (mouse == 0L) 0L else 1L)
@@ -1982,6 +2021,7 @@ class StatementExecutor {
             displayTime = (disp?.getIntValue(ctx.eval) ?: 1L) != 0L,
             timeUpMessage = timeout?.let { evalStr(it, ctx) } ?: ctx.config.timeupLabel,
             mouseInput = mouseTerm?.getIntValue(ctx.eval) == 1L,
+            noFocus = isNoFocus,
         )
         val o = waitInput(ctx, req)
         updateIsTimeout(ctx, req, o)
@@ -2692,10 +2732,15 @@ class StatementExecutor {
      *    **装载趟预填**（GameHost 装配段 `wireCorpusNativeMethods` → `prefillSharpLinks`，
      *    source/erbc 两路同一裁决），未预填的非常量名行裁决点在「该行第一次执行」，
      *    机制与不重查口径见 [com.eratw.port.core.fn.SharpLinkTable]：
-     *    - 未命中：把 `No native method {name} found`（官方英文原样，ADR-005）
-     *      **记进行级错误态**再抛 —— 后续走到该行照记录值重抛，注册表再长出同名也不复活
-     *      （预填行装载期即记，警告经 `GameSession.sharpLoadWarnings` 上屏 ≡ 原版
-     *      ParserMediator.cs:143-158 的 warningList 装载完统一显示）；
+     *    - 未命中：本移植版**不抱错**（通用策略，2026-11-09；有意偏离 ADR-005，登记见
+     *      `specs/verify-notes.md` §35）。装载期照旧把 `No native method {name} found`
+     *      （官方英文原样）记进行级错误态并收警告（预填行装载期即记，警告经
+     *      `GameSession.sharpLoadWarnings` 上屏 ≡ 原版 ParserMediator.cs:143-158 的
+     *      warningList 装载完统一显示）；**执行期不抛**，改为把同一句经 [noticeSharpUnavailable]
+     *      打一行错误行，然后**跳过整条语句**（实参不求值、不回写 ⇒ 无副作用，变量保持原值），
+     *      脚本继续往下跑。原版此处的 `CodeEE`（`Process.cs:1017-1019`）会中断整段脚本 ——
+     *      真机上就是 0.2.39 上报簇 `9bcc9efd`「No native method ModelSet found」
+     *      那一类崩溃面，本波按通用策略收口，不再为任何插件写 per-plugin 实现。
      *    - 命中：方法本体进联结缓存，此后不再查表（= 原版绑死 CallFunc，
      *      `NativeMethodRegistry.clear` 也不影响已绑定行）。
      *    非常量名一侧原版保持 `CallFunc == null`，运行期即 NRE（`:1217` 无空检查）；
@@ -2716,12 +2761,32 @@ class StatementExecutor {
      * 4.980 语料零处 CALLSHARP ⇒ 无可比读数；4.981 起 AI对话补丁 3 处
      * （`对话调用.erb:35-36`），宿主侧接线见 app GameHost.wireCorpusNativeMethods。
      *
+     * 策略缺席（PLUGIN-POLICY，2026-11-07）：名字打过 `NativeMethodRegistry.markPolicyAbsent`
+     * （宿主目录，app `PluginPolicyCatalog`）时整句**静默空转** —— 不抛、不求实参、不回写
+     * （[resolveSharpMethod] 返回 null 即早退，出参变量保持原值，屏面零噪声）；
+     * 目录外未知名字仍走上面第 1 步的官方拒载形态。
+     *
      * @param rowKey 行级联结记录的行键：扁平通道 = 语句池下标（装箱 Long，
      *   [execCallSharpFlat]），对象树通道 = `SpCallSharpArgument` 实例身份
      *   （[execCallSharp]；两种键同表，见 [com.eratw.port.core.fn.SharpLinkTable]）。
      */
+    /**
+     * 本实例已经**提示过**的 CALLSHARP 行（行键 = [SharpLinkTable] 的同一套行键）。
+     *
+     * 未提供本机方法的行每执行一次都提示会把控制台刷满 —— 4.981 的 `@CHAT_ACTION` 挂在
+     * `EVENTCOMEND` 上，一段对话就可能走到十几次。故「打官方文案」这一发**每行只出一次**；
+     * 跳过语句本身每次都生效（不缓存执行结果，也不因此改变后续行级裁决）。
+     *
+     * 为什么不挂 `store.aux`：这是**呈现去重**、不是引擎状态；`aux` 槽按内容进 L3 StateHash
+     * （`StateHash.kt` 的 `aux:<槽名>` 簇表），为一行提示平白分叉不值得。执行器实例与本运行
+     * 实例同生命周期，放这里足够。
+     */
+    private val sharpUnavailableNoticed = HashSet<Any>()
+
     private fun callSharpRows(funcNameTerm: Expr?, rowArgs: List<Expr?>, ctx: ExecContext, rowKey: Any) {
-        val method = resolveSharpMethod(ctx, funcNameTerm, rowKey)
+        // 策略缺席 = 整句空转；目录外未提供本机方法 ⇒ 提示已出、跳过（实参不求值、不回写）。
+        // 见 resolveSharpMethod。
+        val method = resolveSharpMethod(ctx, funcNameTerm, rowKey) ?: return
         val params = Array(rowArgs.size) { i -> toNativeParam(rowArgs[i], ctx) }
         method.execute(params)
         for (i in rowArgs.indices) {
@@ -2743,9 +2808,33 @@ class StatementExecutor {
     }
 
     /**
+     * 让玩家看见「这行没跑」的唯一出口：**每行键只打一次**，文案就是装载趟记下的那句。
+     *
+     * 走 `ConsoleSink.printError`（spec: `EmueraConsole.PrintError`，`ConsoleSink.kt:412` /
+     * `EmueraConsole.cs:3098-3115`）：强制左对齐、默认样式、不折行的错误行 —— 与官方把
+     * 脚本错误呈上控制台是同一个呈现面，差别只在**官方随后中断脚本、我们不中断**。
+     */
+    private fun noticeSharpUnavailable(ctx: ExecContext, rowKey: Any, message: String) {
+        if (!sharpUnavailableNoticed.add(rowKey)) return
+        ctx.console.printError(message)
+    }
+
+    /**
      * CALLSHARP 名字 → 方法本体的**行级联结裁决**（两条通道共用一份逻辑，B5 收敛）。
      * 机制与不重查口径见 [com.eratw.port.core.fn.SharpLinkTable]；
-     * 文案 = 官方英文原样（`FunctionIdentifier.cs:1204`，ADR-005）。
+     * 文案 = 官方英文原样（`FunctionIdentifier.cs:1204`）。
+     *
+     * ## 未命中 ⇒ 返回 null（通用策略，2026-11-09）
+     *
+     * 官方在未命中时抛 `CodeEE(ErrMes)`（`Process.cs:1017-1019`），整段脚本就此中断；
+     * 移植侧**不抛**：先把同一句经 [noticeSharpUnavailable] 打一行错误行，再返回 null 让
+     * 调用方跳过该语句 —— 与插件名无关，以后任何补丁调用未提供的本机方法都走这一条，
+     * 不再需要 per-plugin 实现（`ChatCallSharpHost` 已于本波撤回）。
+     * 这是对 ADR-005 的**有意偏离**，登记见 `specs/verify-notes.md` §35。
+     *
+     * 为什么落在这层而不是「整单元不装载」：官方装载器对行级错误就是只记在该行上、
+     * 同文件其余函数照常装载（`ErbLoader.cs:1598-1600`，ENGFIX sharp 已复刻）；
+     * 单元级禁用要给 erbc 增「函数/语句 → 来源文件」归属并做跨单元引用闭包，偏离更大。
      *
      * const 名判定 = `funcNameTerm is [StrLiteral]`：原版 SP_CALLCSHARP_ArgumentBuilder
      * 的名字恒为 SingleStrTerm（ArgumentParser.cs:800）⇒ `:850-853` 的
@@ -2755,26 +2844,41 @@ class StatementExecutor {
      * （ExprTag.STR_LITERAL 往返，ErbcReader.kt:958）名字都是 StrLiteral；
      * 非 StrLiteral 只可能是装置手工构造，走「现求现查」不记行错（防御支，不可达自生产）。
      *
+     * 策略缺席（PLUGIN-POLICY，2026-11-07）：查表未命中但名字打过
+     * `NativeMethodRegistry.markPolicyAbsent`（宿主目录，app `PluginPolicyCatalog`）⇒
+     * 返回 null，调用方（[callSharpRows]）整句静默空转。缺席行**永不落裁决**
+     * （[com.eratw.port.core.fn.prefillSharpLinks] 同口径跳过），每执行现查策略位 ——
+     * 策略位由宿主装配段在装载趟之前定型、会话内不变，故与「裁决落笔固定」不变式
+     * 无冲突（该不变式只约束已落笔的行）。
+     *
      * @param rowKey 行键（语句池下标 / `SpCallSharpArgument` 实例），见 [SharpLinkTable]。
+     * @return 命中 = 方法本体；策略缺席 / 未命中 = **null**（策略缺席静默；未命中已提示，
+     *   调用方跳过该语句）。
      */
     private fun resolveSharpMethod(
         ctx: ExecContext,
         funcNameTerm: Expr?,
         rowKey: Any,
-    ): NativeMethod {
+    ): NativeMethod? {
         val links = sharpLinks(ctx.variables.aux)
         val cached = links.link(rowKey)
         if (cached != null) {
-            cached.errMes?.let { throw CodeEE(it) }
+            cached.errMes?.let { msg ->
+                noticeSharpUnavailable(ctx, rowKey, msg)
+                return null
+            }
             return cached.method!!
         }
         val literal = funcNameTerm as? com.eratw.port.core.expr.StrLiteral
         val name = literal?.value ?: funcNameTerm?.getStrValue(ctx.eval) ?: ""
-        val found = nativeMethods(ctx.variables.aux).find(name)
+        val registry = nativeMethods(ctx.variables.aux)
+        val found = registry.find(name)
         if (found == null) {
+            if (registry.isPolicyAbsent(name)) return null // 策略缺席：不记行错、不抛
             val msg = "No native method $name found"
             if (literal != null) links.bind(rowKey, SharpLinkTable.Link(null, msg))
-            throw CodeEE(msg)
+            noticeSharpUnavailable(ctx, rowKey, msg)
+            return null
         }
         if (literal != null) links.bind(rowKey, SharpLinkTable.Link(found, null))
         return found
@@ -3040,9 +3144,9 @@ class StatementExecutor {
             val arg = stmt.args as SpHtmlPrint
             if (!ctx.skipPrint) {
                 val text = evalStr(arg.str, ctx)
-                ctx.console.printHtml(
+                ctx.console.printHtmlC(
                     padHtmlColumn(ctx, text, rightAlign = code == FunctionCode.HTML_PRINTC),
-                    true,
+                    htmlColumnCells(ctx),
                 )
             }
             ExecResult.Normal
@@ -3195,6 +3299,7 @@ class StatementExecutor {
             execInputs(code, stmt, ctx); ExecResult.Normal
         }
         FunctionCode.TINPUT, FunctionCode.TONEINPUT, FunctionCode.TINPUTS, FunctionCode.TONEINPUTS,
+        // NF 两位与同族请求同参，但语句层必须置 noFocus（Instraction.Child.cs:1100/:1154）。
         FunctionCode.TINPUTNF, FunctionCode.TINPUTSNF,
         -> {
             execTInputs(code, stmt, ctx); ExecResult.Normal
@@ -3610,6 +3715,24 @@ class StatementExecutor {
                 EmDataPools.clear(ctx.variables, em.global)
                 EmDataPools.clear(ctx.variables, em.staticSets)
             }
+            // L32（ADR-005 例外收口）：原版 `ResetGlobalData`（VariableEvaluator.cs:1746-1755）
+            // 把 GLOBAL/GLOBALS、用户 GLOBAL 变量、EM Global 池与 EM Static 池**一起**复位
+            // （RemoveEMGlobalData :1749 / RemoveEMStaticData :1750 / SetDefaultGlobalValue
+            // :1754 → VariableData.cs:620-624、:1320、:1344）；移植侧 L15/L28 新增的未认领
+            // 切片槽不在这条链上，RESETGLOBAL 之后第一次 SAVEGLOBAL 会把重置前的未知顶层键
+            // 与未知 EM 容器原样写回（SaveCapture.emitGlobal 的切片回写支）。normal 槽不在此列：
+            // 它随 ResetData 的 RemoveEMSaveData（VariableEvaluator.cs:1727-1732）与 LOADDATA
+            // 走，故这里只清 global 顶层 + EM 槽。清槽失败只留痕、不翻转本语句成功语义；
+            // OutOfMemoryError 上抛（与 FileSystemOps.recordUnclaimed 同型）。
+            runCatching { SaveUnclaimedPassthrough.of(ctx.variables)?.clearGlobal() }
+                .onFailure { e ->
+                    if (e is OutOfMemoryError) throw e
+                    SaveDiagnostics.note(
+                        "RESETGLOBAL",
+                        "global",
+                        "未认领 global 槽未清空（保留原切片）：${e.javaClass.simpleName}: ${e.message}",
+                    )
+                }
             ExecResult.Normal
         }
         FunctionCode.PUTFORM -> {
@@ -4156,11 +4279,13 @@ class StatementExecutor {
      * TINPUT/TINPUTS/TONEINPUT/TONEINPUTS。spec: FunctionIdentifier.cs:1003-1099
      *
      * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execTInputsFlat]。
+     * `NF` 两位同 [execTInputsFlat]：置 `InputRequest.noFocus`（`Instraction.Child.cs:1100` / `:1154`）。
      */
     private fun execTInputs(code: FunctionCode, stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpTInputsArgument
         val isStr = code == FunctionCode.TINPUTS || code == FunctionCode.TONEINPUTS ||
             code == FunctionCode.TINPUTSNF
+        val isNoFocus = code == FunctionCode.TINPUTNF || code == FunctionCode.TINPUTSNF
         if (arg.canSkip != null && ctx.mesSkip) {
             val mouse = arg.mouse?.getIntValue(ctx.eval) ?: 0L
             val slot = longArrayOf(if (mouse == 0L) 0L else 1L)
@@ -4178,6 +4303,7 @@ class StatementExecutor {
             displayTime = (arg.disp?.getIntValue(ctx.eval) ?: 1L) != 0L,
             timeUpMessage = arg.timeout?.let { evalStr(it, ctx) } ?: ctx.config.timeupLabel,
             mouseInput = arg.mouse?.getIntValue(ctx.eval) == 1L,
+            noFocus = isNoFocus,
         )
         val o = waitInput(ctx, req)
         updateIsTimeout(ctx, req, o)
@@ -4770,6 +4896,20 @@ class StatementExecutor {
      *
      * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execSetFlat]。
      */
+    /**
+     * SET 整型目的地的右值求值（对象树/扁平两通道共用；2026-11-14 语料换代 261111 校准）：
+     * 静态 INT 项走原 getIntValue 快路径（热路径零新增开销）；静态 FLOAT 项 = 截断
+     * （蛇版 Instraction.Child.cs:696 `Term.GetIntValue(exm)`；SingleFloatTerm.GetIntValue =
+     * `(long)fValue`，Term.cs:117-120；双路径内建的 int 通道 = 算完再转型，
+     * 对本仓 compute-then-cast 面 ≡ 截断）。
+     */
+    private fun intValueOf(term: Expr, ctx: EvalContext): Long =
+        if (term.operandType == OperandType.FLOAT) longFromScaledDouble(term.getFloatValue(ctx))
+        else term.getIntValue(ctx)
+
+    /** [intValueOf] 的可空入口（可省实参位 = 0，与旧 `?: 0L` 形态同值）。 */
+    private fun intValueOfOpt(term: Expr?, ctx: EvalContext): Long =
+        term?.let { intValueOf(it, ctx) } ?: 0L
     private fun execAssign(stmt: AssignStmt, ctx: ExecContext) {
         when (val arg = stmt.args) {
             is SpSetArrayArgument -> {
@@ -4780,7 +4920,7 @@ class StatementExecutor {
                 val idx = resolveIndices(stmt.dest, ctx)
                 if (stmt.dest.operandType == OperandType.INT) {
                     val vals = if (arg.constIntList != null) arg.constIntList
-                    else arg.terms.map { it?.getIntValue(ctx.eval) ?: 0L }.toLongArray()
+                    else arg.terms.map { intValueOfOpt(it, ctx.eval) }.toLongArray()
                     ctx.variables.setValues(name, idx, vals)
                 } else if (stmt.dest.operandType == OperandType.FLOAT) {
                     // 浮点批量形态（`SET 倍率, 1.0, 2.0`）。没有 `constDoubleList` 槽
@@ -4812,7 +4952,13 @@ class StatementExecutor {
                 // 复用读路径的访问点句柄与下标借还池 —— 这是语料里 99.9% 的语句执行，
                 // 旧实现每次现分配一个 `LongArray` 再按名查一次表。
                 if (stmt.dest.operandType == OperandType.INT) {
-                    val value = if (arg.isConst) arg.constInt else arg.term?.getIntValue(ctx.eval) ?: 0L
+                    // 2026-11-14 语料换代 261111 校准：浮点右值在整型目的地 = 截断
+                    //（蛇版 Instraction.Child.cs:696 `Term.GetIntValue(exm)`；
+                    // SingleFloatTerm.GetIntValue = `(long)fValue`，Term.cs:117-120；
+                    // 双路径内建的 int 通道 = 算完再转型，对本仓 compute-then-cast 面 ≡ 截断）。
+                    // 静态 INT 项走原 getIntValue 快路径（热路径零新增开销）。
+                    val value = if (arg.isConst) arg.constInt
+                    else intValueOf(arg.term!!, ctx.eval)
                     if (arg.addConst) stmt.dest.addIntValue(ctx.eval, value)
                     else stmt.dest.setIntValue(ctx.eval, value)
                 } else if (stmt.dest.operandType == OperandType.FLOAT) {
@@ -4838,8 +4984,9 @@ class StatementExecutor {
      * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execVarDeclFlat]。
      */
     private fun execVarDecl(stmt: VarDeclStmt, ctx: ExecContext) {
-        // 本游戏 setting.json `UseScopedVariableInstruction:false`：原版在**标识符解析期**即抛
-        // CodeEE（CanNotUseVAR，spec: IdentifierDictionary.cs:624-627），语料零使用 ⇒ 语义按禁用处理。
+        // 开关 = 本游戏目录 `setting.json` 的 `UseScopedVariableInstruction`（原版
+        // JSONConfigData.cs:13；GameSession 注入，见 SemConfig 字段 KDoc）。关闭时原版在
+        // **标识符解析期**即抛 CodeEE（CanNotUseVAR，spec: IdentifierDictionary.cs:624-627）。
         // 解析期门控已落地（`StmtParseConfig.useScopedVariableInstruction`，LineParser 构造参数，
         // M3-A A3）；本处是执行层兜底，覆盖"语句由其它来源构造/未走解析器门控"的路径。
         if (!ctx.config.useScopedVariableInstruction) {
@@ -5155,26 +5302,50 @@ class StatementExecutor {
      * 这里同样不截断，超宽文本由折行侧按整段移行处理）。
      * TODO(verify)：fork 的第 2 参（可选单元格像素宽）端口不消费（语料 0 处传参，
      * `SpHtmlPrint` 第 2 槽是 HTML_PRINT 的 toPrintBuffer 位）；接语料传参前先对 fork-src 取证。
-     * 另：fork 在补齐前有「当前行 + 列宽超 DrawableWidth 则先 Flush 再写」的预折；
-     * 端口靠折行侧整段移行（HTML 段原子、ButtonWrap 同判）落到**同一行分布**，差异只在
-     * 「行何时落进显示行表」（fork 逐项预折、端口 PRINTL 时一次折）。等价性已全语料核实
-     * （2026-11-05）：直接使用 HTML_PRINTC/LC 的文件 3 个、经 `HTML_PRINTBUTTONC` /
-     * `PRINTBUTTON_EXC` 间接使用的调用方文件 6 个，其中含中途读行原语
-     * （LINECOUNT/HTML_GETPRINTEDSTR/LINEISEMPTY）的 **0 个**，含 CLEARLINE 的只有
-     * `QOL_USERCOM.ERB` 一处 `CLEARLINE 1`（:270，在 `@COM_OPTION` 弹窗函数里、与
-     * :115 的网格序列不在同一函数）——「预折与折叠落表时机」在语料全部网格屏上
-     * 不可观测，无需复刻预折。
+     *
+     * 预折：fork 在补齐前有「当前行 + 列宽超 DrawableWidth 则先 Flush 再写」，已由
+     * [printHtmlC] 复刻（`LineBufferConsoleSink.printHtmlC`）。旧裁定「无需复刻预折」的依据
+     * 是「含中途读行原语的文件 0 个、含 CLEARLINE 的只有 QOL_USERCOM.ERB 一处」，但那是
+     * **逐文件**统计，漏了同一屏跨文件的调用链：`@SHOW_STATUS` 里 `UI_STARTLINE = LINECOUNT`
+     * （INFO.ERB:25）、`@USERCOM` 里 `CLEARLINE 1` / `CLEARLINE LINECOUNT - UI_STARTLINE`
+     * （USERCOM.ERB:389/391）、`@COM_OPTION` 里 `CLEARLINE 1`（QOL_USERCOM.ERB:270），
+     * 以及引擎级 `deleteLine(1)/(2)`（BeginFlow）。按逻辑行删行时，整张网格若只是
+     * 1 个逻辑行会被一次摘光 —— 这正是「点某颗按钮后整批选项消失」的结构性来源。
      */
     private fun padHtmlColumn(ctx: ExecContext, text: String, rightAlign: Boolean): String {
         if (text.isEmpty()) return text
         val c = ctx.eval as? BuiltinContext ?: return text
         val columnCells = c.host.printCLength
         if (columnCells <= 0L) return text
-        val textCells = CellWidth.visibleHtmlCells(text, c.host.fontSize)
+        // 图形段的量宽基尺必须取 **sink 自持的那一份**，不能用 `BuiltinHost.fontSize`
+        // （出厂常量 18）：sink 折行 / 行内游标用的是 `scriptFontSize + imageSizeOf +
+        // frameAvailableOf`。玩家把字号调到 24、图元 miss、缺帧回落、或 HTML 里带
+        // 连续 rect 条带时，两处各折一次就会给出不同列宽 —— 与「进度条被折散」同源的
+        // 两把尺，落到 HTML_PRINTC 上就是逐项制表的列位漂移（2026-11-04 玩家反馈的
+        // 「选项左右斜斜」那条链）。sink 未接线（纯 JVM 装置 / erbcc 自检）时回落
+        // `c.host.fontSize`，既有读数逐位不变。
+        val sink = c.host.consoleSink as? LineBufferConsoleSink
+        val graphicFontPx = sink?.scriptFontSize?.toLong() ?: c.host.fontSize
+        val textCells = CellWidth.visibleHtmlCells(
+            text,
+            graphicFontPx,
+            sink?.imageSizeOf,
+            sink?.frameAvailableOf,
+        )
         val padCells = columnCells - textCells
         if (padCells <= 0L) return text
         val filler = " ".repeat(padCells.toInt())
         return if (rightAlign) filler + text else text + filler
+    }
+
+    /**
+     * HTML_PRINTC 判界用的单元格宽（半角格 = `Config.PrintCLength`，fork 的
+     * `cellWidthPx = PrintCLength * FontSize / 2` 折回格数）。取不到宿主配置
+     * （纯 sem 假体单测）时回 0 ⇒ [printHtmlC] 退化为普通追加，不改变既有装置。
+     */
+    private fun htmlColumnCells(ctx: ExecContext): Int {
+        val c = ctx.eval as? BuiltinContext ?: return 0
+        return c.host.printCLength.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
     }
 
 

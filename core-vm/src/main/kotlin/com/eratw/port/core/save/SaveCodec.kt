@@ -40,8 +40,7 @@ object SaveCodec {
 
     /**
      * @param kind 文本格式没有类别字节，必须由调用方给（见 [SaveTextFormat.read]）
-     * @param keepKey 二进制容器里哪些变量名要留下值（见 [SaveFormat.read]）；
-     *   生产读档传「当前游戏里存在的键」，旧版本存档里已删除的变量因此不建数组。
+     * @param filters 二进制的键筛选口径（[SaveReadFilters]）：变量谓词 + EM 段谓词。
      *   文本格式逐行解析、不存在按声明尺寸分配的问题，忽略本参数。
      * @param config 只取文本分支的两项：[SaveConfig.textExtensionSegments]（扩展区段集，
      *   二进制容器自带版本头，不受它影响）与 [SaveConfig.locale]（`null` = 现取
@@ -51,11 +50,11 @@ object SaveCodec {
         bytes: ByteArray,
         registry: VariableRegistry,
         kind: SaveFileKind,
-        keepKey: ((String) -> Boolean)? = null,
+        filters: SaveReadFilters = SaveReadFilters(),
         config: SaveConfig = SaveConfig.DEFAULT,
     ): SaveData =
         if (isBinary(bytes)) {
-            SaveFormat.read(bytes, keepKey)
+            SaveFormat.read(bytes, filters.keepKey, filters.emKeepKey)
         } else {
             SaveTextFormat.read(
                 bytes, registry, kind,
@@ -95,3 +94,21 @@ object SaveCodec {
     /** 「文化没配 ⇒ 每次调用现取 `Locale.getDefault()`」的落点，理由见 [SaveConfig.locale]。 */
     private fun localeOf(config: SaveConfig): Locale = config.locale ?: Locale.getDefault()
 }
+
+/**
+ * 二进制读档的**键筛选口径**（L15 / L17 / L28）：哪些名字要留下值、哪些只留原始切片。
+ *
+ * 两个谓词分开是因为它们作用在**两个不同的段**上、口径也不同：
+ * - [keepKey] = 变量名（`varTokenDic` / 用户静态变量），读侧判 false 的条目进
+ *   `SaveData.unclaimedVariables` / `SaveData.unclaimedCharacterVariables`；
+ * - [emKeepKey] = EM 段（Map / Xml / DataTable）的**容器名**（`EmSaveSets.loadAccept` =
+ *   `Save* ∪ Global*`），判 false 的条目进 `SaveData.unclaimedEmData`。
+ *
+ * 为什么是一个参数对象而不是 [SaveCodec.read] 的两个形参：参数表已到 detekt
+ * `LongParameterList` 阈值（6），再拆一参会直接报红；且两个谓词总是一起出现/一起缺省
+ * （生产读档两个都给，只读装置两个都不给），打包后调用点只多一对花括号。
+ */
+data class SaveReadFilters(
+    val keepKey: ((String) -> Boolean)? = null,
+    val emKeepKey: ((String) -> Boolean)? = null,
+)

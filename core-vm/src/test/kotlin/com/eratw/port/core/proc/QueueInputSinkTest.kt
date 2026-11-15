@@ -421,6 +421,80 @@ class QueueInputSinkTest {
     }
 
     // ------------------------------------------------------------------
+    // turn 边界信号（4.981 动态地图循环：超时自动推进的连续等待点没有提交起点）
+    // ------------------------------------------------------------------
+
+    /** 缺省 null = 装置/headless 逐字零行为（与 pageTrail / onTurnReady 同口径）。 */
+    @Test
+    fun `缺省不挂 onTurnBoundary 即零行为`() {
+        assertNull(QueueInputSink().onTurnBoundary)
+    }
+
+    /**
+     * 魔法之森「切图一直加载」的根因复现（qol_MAP.ERB:32-98）：`MAP_LOOP` 由 `TINPUTSNF`
+     * 超时逐帧推进，玩家点进地图之后整段循环再没有提交 ⇒ `onTurnReady` 只在第一帧响一次，
+     * 之后 2.9 分钟不响，宿主的页计时器与忙碌横带都收不了口。边界信号必须无条件每帧都响。
+     */
+    @Test
+    fun `onTurnBoundary 每个等待点一次 无提交起点的连续超时帧照样触发`() {
+        val sink = QueueInputSink()
+        val boundaries = AtomicLong(0L)
+        val turnReady = AtomicLong(0L)
+        sink.onTurnBoundary = { boundaries.incrementAndGet() }
+        sink.onTurnReady = { _ -> turnReady.incrementAndGet() }
+
+        sink.submit("enter-map")
+        repeat(5) {
+            assertEquals(
+                77L,
+                sink.waitInput(intRequest(hasDef = true, defInt = 77, timeLimit = 5)).intValue,
+            )
+        }
+        assertEquals(5L, boundaries.get(), "连续 5 个超时等待点 = 5 次 turn 边界")
+        assertEquals(1L, turnReady.get(), "onTurnReady 仍只在有提交起点的第一次等待触发")
+    }
+
+    /** 双通道一致：`readAnyKey` 与 `waitInput` 都发边界，且边界不消费翻页读数起点。 */
+    @Test
+    fun `readAnyKey 与 waitInput 都发边界 且边界回调不消费提交起点`() {
+        val sink = QueueInputSink()
+        val boundaries = AtomicLong(0L)
+        val ready = ConcurrentLinkedQueue<Long>()
+        sink.onTurnBoundary = { boundaries.incrementAndGet() }
+        sink.onTurnReady = { ready.add(it) }
+
+        sink.submit("a")
+        sink.readAnyKey()
+        assertEquals(1L, boundaries.get())
+        sink.submitInt(5)
+        assertEquals(5L, sink.waitInput(intRequest()).intValue)
+        assertEquals(2L, boundaries.get())
+        assertEquals(2, ready.size, "翻页读数语义不受边界信号影响")
+    }
+
+    /** 与 onTurnReady 同一条锁外纪律：边界回调里的宿主动作不得挡住 UI 线程的 submit。 */
+    @Test
+    fun `onTurnBoundary 回调期间其他线程能提交 不得持有输入锁`() {
+        val sink = QueueInputSink()
+        val probeDone = CountDownLatch(1)
+        val lockWasFree = AtomicReference<Boolean?>()
+        sink.onTurnBoundary = {
+            thread(name = "turn-boundary-probe") {
+                sink.submit("probe")
+                probeDone.countDown()
+            }
+            lockWasFree.set(probeDone.await(500, TimeUnit.MILLISECONDS))
+        }
+        sink.submit("go")
+        sink.readAnyKey()
+        assertEquals(true, lockWasFree.get(), "边界回调仍在持锁 ⇒ UI 线程的 submit 会被挡住")
+        assertEquals(1, sink.pendingCount, "探针提交应留在队列里")
+        sink.onTurnBoundary = null
+        sink.readAnyKey() // 清场：这次不再起探针线程
+        assertEquals(0, sink.pendingCount)
+    }
+
+    // ------------------------------------------------------------------
     // interrupt（宿主销毁收敛：恢复中断位后按关闭异常离开等待，禁止持锁热转）
     // ------------------------------------------------------------------
 

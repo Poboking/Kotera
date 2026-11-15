@@ -8,6 +8,7 @@ import kotlin.io.path.name
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 
 /**
  * `n-macrowire` —— `.ERH` 宏表的两条消费面与真实语料命中审计。
@@ -38,37 +39,47 @@ import kotlin.test.assertTrue
  * * 面 A 对本语料**零命中**：语料全部 `[IF 参数]`/`[ELSEIF 参数]` 的实参只有 `DEBUG` 与 `NDEBUG`
  *   （共 41 行），二者都不是 22 条 `#DEFINE` 宏名 ⇒ 装置把宏表传进 `LogicalLineReader`
  *   的 `macroNames` 与不传**逐行同值**，不构成行为差 ⇒ 按契约 2.6 条件 ① 不动装置。
- * * 面 B 对本语料**有实质命中**（22 条宏里 20 条出现在语句/表达式区，合计 142 行），
- *   但面 B 不是「把已有宏表传进已有可选参数」能接的（要新造词法期展开器）⇒ 只登记，见交付报告。
+ * * 面 B 对本语料**有实质命中**（22 条宏里 20 条出现在语句/表达式区：4.980 根合计 **142** 行、
+ *   4.981 根合计 **148** 行，见下表两列），但面 B 不是「把已有宏表传进已有可选参数」能接的
+ *   （要新造词法期展开器）⇒ 只登记，见交付报告。
  *
  * ## 22 条宏的代码区命中数（口径见 [CorpusMacroAudit]，独立反推脚本交叉验证过）
  *
- * | 宏名 | 声明处 | 代码区命中行 |
- * |---|---|---|
- * | DEF_CULC_RELATION_NULL | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:45 | 2 |
- * | DEF_COLUMN_IS_STR | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:46 | 4 |
- * | DEF_SORT_FOR_14 | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:47 | 4 |
- * | DEF_LIST_BOOLTRUE | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:57 | 2 |
- * | DEF_LIST_BOOLFALSE | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:58 | 2 |
- * | DEF_LIST_MARKPOSITIVE | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:59 | 2 |
- * | DEF_LIST_MARKNEGATIVE | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:60 | 2 |
- * | DEF_LIST_MARKNEUTRAL | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:61 | 2 |
- * | DEF_LIST_MARKHEART | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:63 | 2 |
- * | DEF_DT_KOJOEXIST | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:71 | 1 |
- * | DEF_DT_ADDNO | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:74 | 7 |
- * | DEF_DT_CID | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:75 | 9 |
- * | DEF_DT_NAME | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:76 | 3 |
- * | DEF_DT_CNAME | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:77 | 2 |
- * | 時間帯 | DIM.ERH:181 | 1 |
- * | 天候 | DIM.ERH:183 | 81 |
- * | 拠点_大家 | DIM_als.ERH:8 | 0（结案：无影响） |
- * | DT_VAGINA | fromEN/VARSET.ERH:4 | 2 |
- * | DT_ANUS | fromEN/VARSET.ERH:5 | 2 |
- * | キャラ画像表示サイズ比 | ステータス表示関連/キャラ描画共通.ERH:4 | 2 |
- * | デフォルトキャラ画像横幅 | ステータス表示関連/キャラ描画共通.ERH:5 | 10 |
- * | 各キャラ画像サイズ | ステータス表示関連/キャラ描画共通.ERH:6 | 0（结案：无影响） |
+ * 两列按 [CorpusProfile.detect] 判出的语料根取（L34 PINS-REFRESH-1，2026-11-14）：4.980 列 =
+ * 2026-10-21「宏表两面复核」的原钉值（该笔早于 4.981 成为 canonical，语料根自适应的
+ * corpusroot 波漏接本类 ⇒ 4.981 根曾恒红）；4.981 列 = 本波在 4.981 根实读。
+ * 两版语料是不同内容谱系，只有 **3 个键漂移**：`天候` 81→83、`キャラ画像表示サイズ比` 2→7、
+ * `デフォルトキャラ画像横幅` 10→9 —— 最后一个是 4.981 **降** 1，语料纪律「只增不改」
+ * （`eratw-kojo-pack` §10）⇒ 该降值只能来自两版语料的内容差，不是「4.981 加口上包」的增量。
  *
- * 语料不可改动；本用例只读，未设 `ERATW_CORPUS` 且自动发现失败时优雅跳过（与 [RealCorpus] 同口径）。
+ * | 宏名 | 声明处 | 4.980 代码区命中行 | 4.981 代码区命中行 |
+ * |---|---|---|---|
+ * | DEF_CULC_RELATION_NULL | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:45 | 2 | 2 |
+ * | DEF_COLUMN_IS_STR | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:46 | 4 | 4 |
+ * | DEF_SORT_FOR_14 | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:47 | 4 | 4 |
+ * | DEF_LIST_BOOLTRUE | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:57 | 2 | 2 |
+ * | DEF_LIST_BOOLFALSE | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:58 | 2 | 2 |
+ * | DEF_LIST_MARKPOSITIVE | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:59 | 2 | 2 |
+ * | DEF_LIST_MARKNEGATIVE | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:60 | 2 | 2 |
+ * | DEF_LIST_MARKNEUTRAL | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:61 | 2 | 2 |
+ * | DEF_LIST_MARKHEART | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:63 | 2 | 2 |
+ * | DEF_DT_KOJOEXIST | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:71 | 1 | 1 |
+ * | DEF_DT_ADDNO | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:74 | 7 | 7 |
+ * | DEF_DT_CID | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:75 | 9 | 9 |
+ * | DEF_DT_NAME | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:76 | 3 | 3 |
+ * | DEF_DT_CNAME | CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERH:77 | 2 | 2 |
+ * | 時間帯 | DIM.ERH:181 | 1 | 1 |
+ * | 天候 | DIM.ERH:183 | 81 | **83** |
+ * | 拠点_大家 | DIM_als.ERH:8 | 0（结案：无影响） | 0（同） |
+ * | DT_VAGINA | fromEN/VARSET.ERH:4 | 2 | 2 |
+ * | DT_ANUS | fromEN/VARSET.ERH:5 | 2 | 2 |
+ * | キャラ画像表示サイズ比 | ステータス表示関連/キャラ描画共通.ERH:4 | 2 | **7** |
+ * | デフォルトキャラ画像横幅 | ステータス表示関連/キャラ描画共通.ERH:5 | 10 | **9** |
+ * | 各キャラ画像サイズ | ステータス表示関連/キャラ描画共通.ERH:6 | 0（结案：无影响） | 0（同） |
+ *
+ * 语料不可改动；本用例只读，语料不可发现时用 `Assumptions.assumeTrue` 记为 **skip**
+ * （与 [RealCorpus] 的「找不到就不跑」同口径，但不再像旧版 `println + return` 那样静默绿；
+ * 未登记的语料版本仍由 [CorpusProfile.detect] 直接判红）。
  */
 object CorpusMacroAudit {
 
@@ -83,8 +94,8 @@ object CorpusMacroAudit {
         "キャラ画像表示サイズ比", "デフォルトキャラ画像横幅", "各キャラ画像サイズ",
     )
 
-    /** 宏名 → 代码区命中行数（钉桩值 = 本审计的量化读数）。 */
-    val expectedCodeRegionHitLines: Map<String, Int> = linkedMapOf(
+    /** 宏名 → 代码区命中行数，**4.980 列**（= 2026-10-21「宏表两面复核」原钉值，4.980 根实读）。 */
+    val expectedCodeRegionHitLines980: Map<String, Int> = linkedMapOf(
         "DEF_CULC_RELATION_NULL" to 2, "DEF_COLUMN_IS_STR" to 4, "DEF_SORT_FOR_14" to 4,
         "DEF_LIST_BOOLTRUE" to 2, "DEF_LIST_BOOLFALSE" to 2, "DEF_LIST_MARKPOSITIVE" to 2,
         "DEF_LIST_MARKNEGATIVE" to 2, "DEF_LIST_MARKNEUTRAL" to 2, "DEF_LIST_MARKHEART" to 2,
@@ -94,6 +105,37 @@ object CorpusMacroAudit {
         "DT_VAGINA" to 2, "DT_ANUS" to 2,
         "キャラ画像表示サイズ比" to 2, "デフォルトキャラ画像横幅" to 10, "各キャラ画像サイズ" to 0,
     )
+
+    /**
+     * 宏名 → 代码区命中行数，**4.981 列**（2026-11-14 L34 在 4.981 根实读，合计 148）。
+     * 与 4.980 列只差 3 个键：`天候` 81→83、`キャラ画像表示サイズ比` 2→7、
+     * `デフォルトキャラ画像横幅` 10→9（见类 KDoc 的漂移说明）。
+     */
+    val expectedCodeRegionHitLines981: Map<String, Int> = linkedMapOf(
+        "DEF_CULC_RELATION_NULL" to 2, "DEF_COLUMN_IS_STR" to 4, "DEF_SORT_FOR_14" to 4,
+        "DEF_LIST_BOOLTRUE" to 2, "DEF_LIST_BOOLFALSE" to 2, "DEF_LIST_MARKPOSITIVE" to 2,
+        "DEF_LIST_MARKNEGATIVE" to 2, "DEF_LIST_MARKNEUTRAL" to 2, "DEF_LIST_MARKHEART" to 2,
+        "DEF_DT_KOJOEXIST" to 1, "DEF_DT_ADDNO" to 7, "DEF_DT_CID" to 9,
+        "DEF_DT_NAME" to 3, "DEF_DT_CNAME" to 2,
+        "時間帯" to 1, "天候" to 83, "拠点_大家" to 0,
+        "DT_VAGINA" to 2, "DT_ANUS" to 2,
+        "キャラ画像表示サイズ比" to 7, "デフォルトキャラ画像横幅" to 9, "各キャラ画像サイズ" to 0,
+    )
+
+    /**
+     * 本根对应的命中数钉桩（两列都是**具体定值**，不是「两根都放过」的范围断言）。
+     * `when` 穷举枚举 ⇒ 将来新增根必须在这里显式补列，不会静默落到某一列。
+     */
+    fun expectedCodeRegionHitLines(profile: CorpusProfile): Map<String, Int> = when (profile) {
+        CorpusProfile.V4_980 -> expectedCodeRegionHitLines980
+        CorpusProfile.V4_981 -> expectedCodeRegionHitLines981
+    }
+
+    /** 代码区命中**总行数**钉桩（4.980=142、4.981=148）：与逐键钉桩互为叉乘校验（改任一列漏改另一处即红）。 */
+    fun expectedCodeRegionHitTotal(profile: CorpusProfile): Int = when (profile) {
+        CorpusProfile.V4_980 -> 142
+        CorpusProfile.V4_981 -> 148
+    }
 
     /** 语料 `[IF 参数]`/`[ELSEIF 参数]` 出现过的实参（大写归一）。 */
     val corpusPreprocessIfArgs: Set<String> = setOf("DEBUG", "NDEBUG")
@@ -226,18 +268,25 @@ object CorpusMacroAudit {
 
 class CorpusMacroTableAuditTest {
 
-    /** 语料可用时返回清单，否则返回 null（用例优雅跳过，与 corpusSmoke 的可选口径一致）。 */
-    private fun corpusFiles(): List<Path>? {
-        val c = RealCorpus.load() ?: run {
-            println("跳过：未找到真实语料（设置 ERATW_CORPUS）")
-            return null
-        }
-        return c.files
+    /**
+     * 本轮语料（含**根路径**：面 B 的钉桩按 [CorpusProfile] 逐档取列，判根必须用真实语料根）。
+     *
+     * 找不到语料 ⇒ **skip**（`Assumptions.assumeTrue`）：环境里没有语料时这几条审计无从执行，
+     * 但必须留下可见的 skipped 记录 —— 旧版的 `println + return` 会让本类四条用例静默绿，
+     * 闸门形同虚设（与 AGENTS §5 记的「动态用例看着像全绿」同型，CMP-68 已改口径）。
+     * 注意 skip 只针对「语料不可发现」；**语料版本不在册**由 [CorpusProfile.detect] 直接判红。
+     */
+    private fun corpus(): RealCorpus {
+        val c = RealCorpus.load()
+        assumeTrue(c != null, "未找到真实语料（设置 ERATW_CORPUS 或让自动发现命中游戏根），跳过语料审计")
+        return requireNotNull(c)
     }
+
+    private fun corpusFiles(): List<Path> = corpus().files
 
     @Test
     fun `语料宏表恰为 22 条 DEFINE 且与审计钉桩同名`() {
-        val files = corpusFiles() ?: return
+        val files = corpusFiles()
         val macros = CorpusMacroAudit.macroNames(files)
         assertEquals(
             CorpusMacroAudit.expectedMacroNames.sorted(),
@@ -248,7 +297,7 @@ class CorpusMacroTableAuditTest {
 
     @Test
     fun `面A 宏名零命中于 IF 预处理行 —— 装置传宏表是零行为差`() {
-        val files = corpusFiles() ?: return
+        val files = corpusFiles()
         val macros = CorpusMacroAudit.macroNames(files)
         val args = CorpusMacroAudit.allIfArgs(files)
         // 反向证明：若扫描器漏掉实参，下面的实参集合断言就会红；若语料真有 [IF 宏名]，hits 断言会红。
@@ -258,9 +307,11 @@ class CorpusMacroTableAuditTest {
     }
 
     @Test
-    fun `面B 逐条命中数钉桩 —— 20 条宏落在代码区共 142 行`() {
-        val files = corpusFiles() ?: return
-        val hits = CorpusMacroAudit.codeRegionHits(files, CorpusMacroAudit.expectedMacroNames.toList())
+    fun `面B 逐条命中数钉桩 —— 20 条宏落在代码区的行数按语料档取列（142 | 148）`() {
+        val corpus = corpus()
+        val profile = CorpusProfile.detect(corpus.root)
+        val expected = CorpusMacroAudit.expectedCodeRegionHitLines(profile)
+        val hits = CorpusMacroAudit.codeRegionHits(corpus.files, CorpusMacroAudit.expectedMacroNames.toList())
         val actual = LinkedHashMap<String, Int>()
         val detail = StringBuilder()
         for (n in CorpusMacroAudit.expectedMacroNames) {
@@ -268,14 +319,18 @@ class CorpusMacroTableAuditTest {
             actual[n] = l.size
             if (l.isNotEmpty()) detail.append(n).append(" → ").append(l.take(3).joinToString(", ")).append('\n')
         }
-        println("宏名代码区命中明细（前 3 处/宏）：\n$detail")
-        assertEquals(CorpusMacroAudit.expectedCodeRegionHitLines, actual, "宏名代码区命中行数与钉桩不一致")
-        assertEquals(142, actual.values.sum(), "代码区命中总行数")
+        println("宏名代码区命中明细（前 3 处/宏，${profile.name} 列，合计 ${actual.values.sum()} 行）：\n$detail")
+        assertEquals(expected, actual, "宏名代码区命中行数与钉桩不一致（${profile.name} 列）")
+        assertEquals(
+            CorpusMacroAudit.expectedCodeRegionHitTotal(profile),
+            actual.values.sum(),
+            "代码区命中总行数（${profile.name} 列）",
+        )
     }
 
     @Test
     fun `日文别名宏的宏体确实是 DIM 声明的变量`() {
-        val files = corpusFiles() ?: return
+        val files = corpusFiles()
         val dims = CorpusMacroAudit.dimDeclaredNames(files)
         // `#DEFINE 日文名 中文名` 是 eraTW 的重命名别名写法：展开后落到中文名变量上。
         for (body in listOf("默认角色画像横幅", "角色画像表示尺寸比", "各角色画像尺寸", "拠点_家主")) {

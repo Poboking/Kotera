@@ -83,28 +83,38 @@ class FuncMeta(
     /** 源码书写名（报错用）；与 [key] 同实例时不另占堆（装载侧 internKey 已共享）。 */
     val name: String = name
 
-    // ---- M13-MEM8 刀 B：五只 int 装下全部标量（56 B → 40 B/条，真产物 −1.68 MiB）----
-    // 每个取值域都由构造期 require 兜住（真语料实测：下标 < 2^17、argInt ≤ 25 / argStr ≤ 30、
-    // #LOCALSIZE ≤ 1000 / #LOCALSSIZE ≤ 10000、行号 ≤ 52,594），越域当场炸而不是静默截断。
+    // ---- M13-MEM8 刀 B：装下全部标量（56 B → 40 B/条，真产物 −1.68 MiB）。
+    // 取值域由构造期 require 兜住（真语料实测：下标 < 2^17、argInt ≤ 25 / argStr ≤ 30、
+    // 行号 ≤ 52,594），越域当场炸而不是静默截断。
+    //
+    // 三只尺寸域**不得**用窄位域：官方合法域是 1..int.MaxValue-1（<=0 与 >= int.MaxValue
+    // 才告警丢弃，spec: LogicalLineParser.cs:236-244；合法值原样写 LocalLength/LocalsLength，
+    // :259/:272）。既有 16 位域会把合法值判红 —— 真第三方语料 eratohoYMAEM
+    // `ERB/MAIN/CHARA_LIST.ERB:26` 的 `#LOCALSIZE 3000000` 实测踩中（erbcc 直接抛异常）。
+    // 故三域各占一整只 int（比五只 int 版 +4 B/条）。
     //
     // w0 = 下标(20 位) | 标志位(8 位)：下标上界与装载器 FUNC_COUNT_MAX = 1 shl 20 同源。
     // w1 = position 行号(16 位) | 整型形参数(8 位) | 字符串形参数(8 位)。
-    // w2 = #LOCALSIZE(16 位) | #LOCALSSIZE(16 位)。
+    // w2 = #LOCALSIZE，全 32 位。
     // w3 = 装载序号，全 32 位。
-    // w4 = #LOCALFSIZE(16 位)；w2 两半已用满，浮点局部长度单开一只。
+    // w4 = #LOCALSSIZE，全 32 位。
+    // w5 = #LOCALFSIZE，全 32 位。
     private var w0: Int
     private var w1: Int
     private val w2: Int
     private val w3: Int
     private val w4: Int
+    private val w5: Int
 
     init {
         require(index in 0..INDEX_MASK) { "函数下标越 ${INDEX_BITS} 位域: $index" }
         require(argIntCount in 0..ARG_MASK) { "整型形参个数越 8 位域: $argIntCount" }
         require(argStrCount in 0..ARG_MASK) { "字符串形参个数越 8 位域: $argStrCount" }
-        require(localSize in 0..SIZE16_MASK) { "#LOCALSIZE 越 16 位域: $localSize" }
-        require(localsSize in 0..SIZE16_MASK) { "#LOCALSSIZE 越 16 位域: $localsSize" }
-        require(floatLocalSize in 0..SIZE16_MASK) { "#LOCALFSIZE 越 16 位域: $floatLocalSize" }
+        require(localSize in 0 until Int.MAX_VALUE) { "#LOCALSIZE 越官方合法域(0..int.MaxValue-1): $localSize" }
+        require(localsSize in 0 until Int.MAX_VALUE) { "#LOCALSSIZE 越官方合法域(0..int.MaxValue-1): $localsSize" }
+        require(floatLocalSize in 0 until Int.MAX_VALUE) {
+            "#LOCALFSIZE 越官方合法域(0..int.MaxValue-1): $floatLocalSize"
+        }
         w0 = index or (((if (isEvent) F_EVENT else 0) or
             (if (isMethod) F_METHOD else 0) or
             (if (isOnly) F_ONLY else 0) or
@@ -114,9 +124,10 @@ class FuncMeta(
             (if (returnsStr) F_RETURNS_STR else 0) or
             (if (returnsFloat) F_RETURNS_FLOAT else 0)) shl INDEX_BITS)
         w1 = (argIntCount shl 16) or (argStrCount shl 24)
-        w2 = localSize or (localsSize shl 16)
+        w2 = localSize
         w3 = defIndex
-        w4 = floatLocalSize
+        w4 = localsSize
+        w5 = floatLocalSize
     }
 
     /** 程序函数表下标（= Program.functions 的 index，_CALL 的 a 操作数）。 */
@@ -136,13 +147,13 @@ class FuncMeta(
     val argStrCount: Int get() = (w1 ushr 24) and ARG_MASK
 
     /** #LOCALSIZE n；未声明 0（局部长度用注册表默认）。spec: LogicalLineParser.cs:218-262 */
-    val localSize: Int get() = w2 and SIZE16_MASK
+    val localSize: Int get() = w2
 
     /** #LOCALSSIZE n。spec: LogicalLineParser.cs:263-273 */
-    val localsSize: Int get() = w2 ushr 16
+    val localsSize: Int get() = w4
 
     /** `#LOCALFSIZE n`（4.981 fork）；未声明 0。spec: variables.yaml:99-101 */
-    val floatLocalSize: Int get() = w4
+    val floatLocalSize: Int get() = w5
 
     val isEvent: Boolean get() = flags and F_EVENT != 0
     val isMethod: Boolean get() = flags and F_METHOD != 0

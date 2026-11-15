@@ -4,7 +4,6 @@ import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.VmConfig
 import com.eratw.port.core.compile.ErbProgramCompiler
 import com.eratw.port.core.compile.FuncSig
-import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.fn.prefillSharpLinks
 import com.eratw.port.core.host.LineBufferConsoleSink
@@ -15,7 +14,6 @@ import com.eratw.port.core.stmt.SymbolTable
 import com.eratw.port.core.vars.VariableStore
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -28,13 +26,14 @@ import kotlin.test.assertTrue
  * ```
  * 9 参 Chat 变体（:54）整段被 SKIPSTART 包住，预处理期不编译 ⇒ 不进本钉。
  *
- * 本版不注册任何 CALLSHARP 本机方法（app `GameHost.wireCorpusNativeMethods` 的
- * `ModelSet` / `Chat` 两个降级桩已拆）⇒ **无桩 = 装载期拒载**：装载趟 [prefillSharpLinks]
- * 扫常量名查表未命中，按原版联结期相位记行级错误并收警告
+ * 本版不注册任何 CALLSHARP 本机方法（app `GameHost.wireCorpusNativeMethods` 恒为空表；
+ * 2026-11-09 起连 per-plugin 的 `ChatCallSharpHost` 也已撤回）⇒ **无桩 = 装载期拒载**：
+ * 装载趟 [prefillSharpLinks] 扫常量名查表未命中，按原版联结期相位记行级错误并收警告
  * （`FunctionIdentifier.cs:1201-1204` Warn(isError:true) → `ParserMediator.cs:125-136` 记
- * line.IsError 与 ErrMes、`:143-158` 装载完统一上屏），该行**不执行也见警告**；真走到那一行
- * 才抛记录值（`Process.cs:1017-1019`）。本用例把两半一起钉住：装载趟返回的警告文案与执行期
- * 抛出的 [CodeEE] 逐字同源。
+ * line.IsError 与 ErrMes、`:143-158` 装载完统一上屏），该行**不执行也见警告**。
+ * 执行期按**通用策略**（2026-11-09，有意偏离 ADR-005，登记见 `specs/verify-notes.md` §35）：
+ * 官方在 `Process.cs:1017-1019` 抛 CodeEE 中断脚本，本移植版**不抛** —— 把同一句打一行错误行
+ * 后跳过该语句，脚本继续。本用例把三半一起钉住：装载警告文案、执行期提示文案、**不中断**。
  *
  * 「只拒未注册的那条、同文件普通函数照常执行」的负控在 `core/fn/SharpLoadRejectTest`。
  */
@@ -85,17 +84,28 @@ class AiChatSharpStubTest {
         }
     }
 
-    private fun runtimeWith(program: Program, store: VariableStore): ProcessRuntime =
+    private fun runtimeWith(
+        program: Program,
+        store: VariableStore,
+        sink: LineBufferConsoleSink =
+            LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900),
+    ): ProcessRuntime =
         ProcessRuntime(
             program,
             store,
             FunctionTable(emptyList()),
             VmConfig(maxStepsPerRun = 100_000),
-            consoleSink = LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900),
+            consoleSink = sink,
         )
 
+    /** 控制台上屏的**错误行**文案（printError 通道；Kind.ERROR 段）。 */
+    private fun errorLines(sink: LineBufferConsoleSink): List<String> =
+        sink.snapshot().flatMap { it.segments }
+            .filter { it.kind == LineBufferConsoleSink.Kind.ERROR }
+            .map { it.text }
+
     @Test
-    fun `无桩时 装载趟拒载两处未命中 执行到首个才抛同一句`() {
+    fun `无桩时 装载趟拒载两处未命中 执行期各提示一次且不中断`() {
         val program = compileChatAction()
         assertTrue(program.flatStatementsEnabled, "本钉必须走 flat 生产链")
         val store = VariableStore()
@@ -106,8 +116,16 @@ class AiChatSharpStubTest {
             prefillSharpLinks(store.aux, program),
             "无桩 = 装载期拒载：警告按语句池序逐行收，不等执行",
         )
-        val rt = runtimeWith(program, store)
-        val e = assertFailsWith<CodeEE> { rt.execute() }
-        assertEquals("No native method ModelSet found", e.message, "执行期抛装载趟记录值，ModelSet 先于 Chat")
+        val sink = LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900)
+        val rt = runtimeWith(program, store, sink)
+        rt.execute() // 不抛：两行都跳过，脚本跑到底（官方此处抛 CodeEE 中断）
+        assertEquals(
+            listOf("No native method ModelSet found", "No native method Chat found"),
+            errorLines(sink),
+            "两行按语句池序各提示一次，文案 = 装载趟记录值原样",
+        )
+        // 再跑一遍：跳过照旧生效，提示不重复刷屏（每行键一次）。
+        rt.execute()
+        assertEquals(2, errorLines(sink).size, "同一批行重复执行不重复提示")
     }
 }

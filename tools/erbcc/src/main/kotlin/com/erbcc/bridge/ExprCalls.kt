@@ -2,6 +2,8 @@ package com.erbcc.bridge
 
 import com.eratw.port.core.compile.ExprCallTable
 import com.eratw.port.core.expr.OperandType
+import com.eratw.port.core.fn.CompileBuiltinView
+import com.eratw.port.core.fn.FullRegistryView
 import com.eratw.port.erbcc.LabelDef
 import com.eratw.port.erbcc.LabelTable
 import java.util.Locale
@@ -44,6 +46,13 @@ import java.util.Locale
 fun buildExprCallTable(
     defs: List<LabelDef>,
     methodTypes: Map<String, OperandType> = emptyMap(),
+    /**
+     * ENGC-3b 编译期内建查表视图（B6 `--engine-profile` 通道，组长接线 579240a3e）：
+     * 透传给 [ExprCallTable.classify] 的 BUILTIN 判定（被裁名不再判内建 → 走既有
+     * UsedNonMethodFunc/未定义路径）。**缺省 [FullRegistryView] = 直通注册表**，
+     * 无 profile 编译行为与改前逐位相同（I7）。
+     */
+    builtinView: CompileBuiltinView = FullRegistryView,
 ): ExprCallTable {
     // 生效定义 = 同键的**后装载者**（spec: LabelDictionary.cs:60-68 字典直接赋值；
     // erbcc 侧同口径见 com.eratw.port.erbcc.DuplicateGroup.winner）。
@@ -83,6 +92,7 @@ fun buildExprCallTable(
         strMethods = strMethods,
         nonMethodLabels = plainLabels,
         unknownMethods = unknownMethods,
+        builtinView = builtinView,
     )
 }
 
@@ -93,4 +103,5 @@ fun buildExprCallTable(
 fun buildExprCallTable(
     table: LabelTable,
     methodTypes: Map<String, OperandType> = emptyMap(),
-): ExprCallTable = buildExprCallTable(table.nameKeys.flatMap { table.defsOf(it) }, methodTypes)
+    builtinView: CompileBuiltinView = FullRegistryView,
+): ExprCallTable = buildExprCallTable(table.nameKeys.flatMap { table.defsOf(it) }, methodTypes, builtinView)

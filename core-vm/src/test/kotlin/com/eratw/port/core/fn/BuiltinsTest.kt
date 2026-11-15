@@ -402,12 +402,16 @@ class BuiltinPureTest {
         // specs 已在 76325d9e 补到 4.981 口径（1.824 的 271 + fork 新增 28 = 299 条），
         // 2026-11-06 fixcore 再补 1 条 `SPRITEANIMEFRAME`（fork 更新记录
         // 画蛇又添足版自改emuera相关说明.txt:236-239；无 C# 源）⇒ 300 条；
-        // 注册表 297 条，缺的 3 条是尚未落成表达式内建的条目：MAP_VALUES 未实现，
+        // RT2 移植侧扩展（entity 族）随 M4-2/M4-4/M4-5 逐条入表；M4-5 补 ENTITY_RAND
+        // ⇒ yaml 324 / 注册表 321。
+        // 2026-11-14 语料换代 261111：补蛇版 4.981 数学扩展 `ROUND`
+        //（Creator.Method.cs:4544-4577；锻税.ERB 四处实算使用）⇒ yaml 325 / 注册表 322。
+        // 注册表缺的 3 条是尚未落成表达式内建的条目：MAP_VALUES 未实现，
         // DISABLE_INPUT_MACRO / ENABLE_INPUT_MACRO 在 fork 里是 DO_NOTHING 语句别名
         // （OpcodeTable.kt 的 StatementAlias），本就不该进表达式内建表。
         val notBuiltinFunctions = setOf("MAP_VALUES", "DISABLE_INPUT_MACRO", "ENABLE_INPUT_MACRO")
-        assertEquals(300, yamlNames.size)
-        assertEquals(297, Builtins.registry.size())
+        assertEquals(325, yamlNames.size)
+        assertEquals(322, Builtins.registry.size())
         val missing = yamlNames - Builtins.registry.names()
         val extra = Builtins.registry.names() - yamlNames
         assertEquals(notBuiltinFunctions, missing, "注册表缺少的只应是尚未落地的上游条目")
@@ -851,8 +855,10 @@ class BuiltinVarTest {
         store.randProvider = com.eratw.port.core.vars.RandProvider { 0L }
         assertEquals(0L, iv(call(ctx, "RAND", iArg(5))))
         assertEquals(2L, iv(call(ctx, "RAND", iArg(2), iArg(5))))
-        assertFailsWith<CodeEE> { call(ctx, "RAND", iArg(0)) }
-        assertFailsWith<CodeEE> { call(ctx, "RAND", iArg(5), iArg(2)) }
+        // 4.981 `Creator.Method.cs:3819-3827` RandMethod：max <= min 时钳制返回下界 min，
+        // 首次 PrintError、之后静默（1.824 `FunctionMethodCreator.cs:4027-4074` 的抛错已作废）。
+        assertEquals(0L, iv(call(ctx, "RAND", iArg(0))))
+        assertEquals(5L, iv(call(ctx, "RAND", iArg(5), iArg(2))))
     }
 
     @Test

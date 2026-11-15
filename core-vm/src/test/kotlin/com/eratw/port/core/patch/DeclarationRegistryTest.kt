@@ -466,4 +466,162 @@ class DeclarationRegistryTest {
         assertTrue(!NamePolicy.isForbiddenShadow(DeclarationScope.FILE_PRIVATE, DeclarationScope.PACKAGE_GLOBAL))
         assertTrue(!NamePolicy.isForbiddenShadow(DeclarationScope.FUNCTION_LOCAL, DeclarationScope.BUILT_IN))
     }
+
+    @Test
+    fun jobTemplateDeclarationsKeepOrderAndFilterByPackage() {
+        val snap = registry()
+            .addPackage(
+                ModuleDescriptor(
+                    packageId = "mod.a",
+                    jobTemplateDeclarations = listOf(
+                        JobTemplateDeclaration("APPT", phase = "DAY_END"),
+                        JobTemplateDeclaration("GIFT", phase = "DAY_START", priority = 1),
+                    ),
+                ),
+            )
+            .addPackage(
+                ModuleDescriptor(
+                    packageId = "mod.b",
+                    jobTemplateDeclarations = listOf(JobTemplateDeclaration("MAIL")),
+                ),
+            )
+            .freeze()
+
+        assertEquals(
+            listOf("APPT", "GIFT", "MAIL"),
+            snap.jobTemplateDeclarations.map { it.declaration.templateKey },
+            "快照保链接序 + 包内声明序",
+        )
+        assertEquals(
+            listOf("APPT", "GIFT"),
+            snap.jobTemplatesFor("mod.a").map { it.declaration.templateKey },
+        )
+        assertEquals(
+            listOf("MAIL"),
+            snap.jobTemplatesFor("mod.b").map { it.declaration.templateKey },
+        )
+        assertTrue(snap.jobTemplatesFor("mod.c").isEmpty())
+        assertEquals("mod.a", snap.jobTemplateDeclarations.first().packageId)
+    }
+
+    @Test
+    fun duplicateTemplateKeyInSamePackageRejectsWholeTransactionWithPackageAndKey() {
+        val ex = assertFailsWith<DeclarationConflictException> {
+            registry()
+                .addPackage(
+                    ModuleDescriptor(
+                        packageId = "mod.a",
+                        jobTemplateDeclarations = listOf(
+                            JobTemplateDeclaration("APPT"),
+                            JobTemplateDeclaration("APPT", phase = "DAY_START"),
+                        ),
+                    ),
+                    source = "A.erbc",
+                )
+                .freeze()
+        }
+        val conflict = ex.conflicts.single()
+        assertEquals(DeclarationDomain.PHASE_JOB, conflict.domain)
+        assertTrue(conflict.key.contains("mod.a"))
+        assertTrue(conflict.key.contains("APPT"))
+        assertTrue(ex.message!!.contains("mod.a"))
+        assertTrue(ex.message!!.contains("APPT"))
+    }
+
+    @Test
+    fun jobTemplatePhaseAcceptsBuiltinAndTransactionDeclaredOnly() {
+        val builtin = registry()
+            .addPackage(
+                ModuleDescriptor(
+                    packageId = "mod.a",
+                    jobTemplateDeclarations = listOf(
+                        JobTemplateDeclaration("APPT", phase = "DAY_END"),
+                    ),
+                ),
+            )
+            .freeze()
+        assertEquals(1, builtin.jobTemplateDeclarations.size)
+
+        val declared = registry()
+            .addPackage(
+                ModuleDescriptor(
+                    packageId = "mod.a",
+                    phaseDeclarations = listOf(PhaseDeclaration("TICK")),
+                    jobTemplateDeclarations = listOf(
+                        JobTemplateDeclaration("APPT", phase = "tick"),
+                    ),
+                ),
+            )
+            .freeze()
+        assertEquals("tick", declared.jobTemplateDeclarations.single().declaration.phase)
+
+        val ex = assertFailsWith<DeclarationConflictException> {
+            registry()
+                .addPackage(
+                    ModuleDescriptor(
+                        packageId = "mod.a",
+                        jobTemplateDeclarations = listOf(
+                            JobTemplateDeclaration("APPT", phase = "NOPE"),
+                        ),
+                    ),
+                )
+                .freeze()
+        }
+        assertTrue(ex.conflicts.single().reason.contains("未声明的相位"))
+    }
+
+    @Test
+    fun jobTemplateCanReferencePhaseDeclaredByAnotherPackageInSameTransaction() {
+        val snap = registry()
+            .addPackage(
+                ModuleDescriptor(
+                    packageId = "mod.a",
+                    phaseDeclarations = listOf(PhaseDeclaration("TICK")),
+                ),
+            )
+            .addPackage(
+                ModuleDescriptor(
+                    packageId = "mod.b",
+                    jobTemplateDeclarations = listOf(
+                        JobTemplateDeclaration("APPT", phase = "TICK"),
+                    ),
+                ),
+            )
+            .freeze()
+        assertEquals("mod.b", snap.jobTemplatesFor("mod.b").single().packageId)
+    }
+
+    @Test
+    fun templateKeyAndJobIdDoNotShareNamespace() {
+        val snap = registry()
+            .addPackage(
+                ModuleDescriptor(
+                    packageId = "mod.a",
+                    jobDeclarations = listOf(JobDeclaration("SAME", phase = "DAY_END")),
+                    jobTemplateDeclarations = listOf(
+                        JobTemplateDeclaration("SAME", phase = "DAY_END"),
+                    ),
+                ),
+            )
+            .freeze()
+        assertEquals("SAME", snap.jobsOf("mod.a").single().declaration.jobId)
+        assertEquals("SAME", snap.jobTemplatesFor("mod.a").single().declaration.templateKey)
+
+        // templateKey 唯一性是包内的；跨包同名合法（与 jobId 各自独立寻址）。
+        val cross = registry()
+            .addPackage(
+                ModuleDescriptor(
+                    packageId = "mod.a",
+                    jobTemplateDeclarations = listOf(JobTemplateDeclaration("SAME")),
+                ),
+            )
+            .addPackage(
+                ModuleDescriptor(
+                    packageId = "mod.b",
+                    jobTemplateDeclarations = listOf(JobTemplateDeclaration("SAME")),
+                ),
+            )
+            .freeze()
+        assertEquals(2, cross.jobTemplateDeclarations.size)
+    }
 }

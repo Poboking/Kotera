@@ -155,4 +155,35 @@ class ArtRowOverflowTest {
         )
         assertTrue(plan.tops[glyphRow] - (plan.tops[row] + 410f) >= 0f, "图底在台词行顶之上")
     }
+
+    /**
+     * 挂图族的端到端判据（2026-11-03 立绘压字）：`ypos` 百分比按**行高**折后，
+     * 块内 20 行台词之后用 `ypos='-2000'` 挂回块首的立绘，图顶必须正好落在块首行顶。
+     *
+     * `-2000% × 43 / 100 = -860px = 20 × 43`；按字号折只有 -820，图顶低 40px，
+     * 图底就越进块内台词 —— 玩家报的「立绘有时会过大，遮住下面或者上面的字体」。
+     */
+    @Test
+    fun `挂 K 行的立绘图顶落在块首行顶`() {
+        val kRows = 20
+        val sink = LineBufferConsoleSink(clientWidth = 136)
+        repeat(4) { sink.printLine("立绘块之前的历史文字占位") }
+        repeat(kRows) { sink.printLine("块内第${it}行台词") }
+        sink.printHtml("<img src='立絵' height='1000' ypos='-2000'>", false)
+        val screen = ConsoleScreen(clientWidth = 136, maxLog = 400, heightLines = 60)
+        val feed = ConsoleFeed(sink, screen, GraphicsLayer(), metrics, FakeSizes(500, 700))
+        feed.pump()
+        val cmds = screen.list.render()
+        val plan = RowLayout.plan(cmds, screen.list.rowCount, 0f, 3000f, lineHeight, 6f)
+        val img = cmds.first { it.graphic is InlineGraphic.Image }
+        val g = img.graphic as InlineGraphic.Image
+        assertEquals(410, g.heightPx, "height='1000' ⇒ 10 × 字号 41 = 410px（height 不换尺）")
+        assertEquals(-860, g.yOffsetPx, "-2000% = 20 行 × 43px")
+        val top = plan.tops[img.row] + g.yOffsetPx
+        assertEquals(plan.tops[img.row - kRows], top, 1e-3f, "图顶必须正好是块首行顶")
+        assertTrue(
+            top + g.heightPx <= plan.tops[img.row] + 1e-3f,
+            "立绘不许越进它自己那一行之下（$top + ${g.heightPx} vs ${plan.tops[img.row]}）",
+        )
+    }
 }

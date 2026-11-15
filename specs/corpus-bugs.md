@@ -1,5 +1,7 @@
 # corpus-bugs —— 随包语料内容缺陷台账
 
+> **缺陷台账入口（2026-11-10 收敛）**：CB-* 的对外清单已并入 `docs/UPSTREAM-BUG-PR.md` A 类；新增 / 改判缺陷只写那份。本文件继续维护**补丁资产**（`.patch` / sha256 / 编译期通道）与 §5 出 PR 流程，原有判词作为证据链保留。
+
 > 源头：上报端点去重簇里判「语料内容侧」的缺陷。引擎语义与文案判定归 `verify-notes.md` 与
 > `error-texts.yaml`；本表只记**随包语料数据本体**（ERB/ERH/CSV 内容错误、相互不一致）的缺陷与处置。
 > 铁律：语料根一个字节不改（AGENTS §1）；官方 PC 同形的引擎一律不动（ADR-005）；
@@ -9,11 +11,24 @@
 
 | id | 簇（端点签名/读数） | 语料落点 | 病灶 | 判定 | 处置 | 证据 |
 |---|---|---|---|---|---|---|
-| CB-001 | `K51_EGG_SPECIAL_EVENT函数: 参数过多` · 6 起/4 机 · 全 0.2.39 | `ERB/口上・メッセージ関連/個人口上/051 Nitori [にとり]/Nitori/` | `M_KOJO_K51_special_events.ERB:806` 声明**零参**；`M_KOJO_K51_everyday_commmands.ERB:24`（`@M_KOJO_EGG_MESSAGE_COM_K51_300(Counter)`）`:64` **一参调用** `CALL K51_EGG_SPECIAL_EVENT(Counter)` | 内容缺陷（官方 PC 同炸：`CalledFunction.cs:138-141` `ConvertArg` 在 `topLabel.Arg.Length < srcArgs.Count` 时置 `Lang.Error.TooManyFuncArgs`（zhs reference:901 `{0}函数: 参数过多` / 根表:682 `函数{0}: 参数过多`，两表词序相反）⇒ 引擎判参正确、错在语料；4.980 语料无此函数，仅 4.981 引入，`Nitori/` 目录 4.980 实测不存在） | **已修（补丁 CB-001 随 wave/report-cb001）**：修法裁定 = 调用点去参（兄弟调用全带 Counter、唯此声明零参，系笔误；补参=替官方写新逻辑，越权）→ `devtools/corpus-patches/CB-001.patch` + `index.yaml`（病灶 sha `3482ab97…`，修后 sha `5a3a8c7b…`）；§3 编译期通道随本波落地（compileCorpus 执行前 staging 硬链接副本套补丁；4.980 无同名文件=缺席即跳过留痕）；玩家获得修复=重新出包（§3.5，节奏主人掌握） | raw2 `2026-11-05__1793845051968-*.txt`（调用栈 `ProcessRuntime.requireArgCount` ← `M_KOJO_EGG_MESSAGE_COM_K51_300`）；对照调用 `conversations.ERB:3269` 零参不炸 |
+| CB-001 | `K51_EGG_SPECIAL_EVENT函数: 参数过多` · 6 起/4 机 · 全 0.2.39 | `ERB/口上・メッセージ関連/個人口上/051 Nitori [にとり]/Nitori/` | `M_KOJO_K51_special_events.ERB:806` 声明**零参**；`M_KOJO_K51_everyday_commmands.ERB:24`（`@M_KOJO_EGG_MESSAGE_COM_K51_300(Counter)`）`:64` **一参调用** `CALL K51_EGG_SPECIAL_EVENT(Counter)` | 内容缺陷 + **引擎侧偏差（2026-11-12 订正判读）**：调用点是语料笔误（兄弟调用全带 Counter、唯此声明零参），但「官方 PC 同炸」只对 1.824 成立（`reference/emuera-cs` `CalledFunction.cs:138-141`）；**复刻目标 4.981 同形不炸** —— 蛇版 `ConvertArg` 已删 `array.Length < srcArgs.Count -> TooManyFuncArgs` 硬判，多余实参静默丢弃（`reference/emuera-skia-4.981/Emuera/Runtime/Script/Process.CalledFunction.cs:212-357`；fork 更新记录 CHANGELOG.md「ConvertArg() 多余参数静默丢弃：移除 TooManyFuncArgs 报错」）⇒ 端口当年按 1.824 复刻出的 `ProcessRuntime.requireArgCount` 是**引擎缺陷**，已于 2026-11-12 按 4.981 校准删除（同时 `ArgSignatureCheck` 不再对用户函数产 TOO_MANY；内建函数位仍保留 TooManyFuncArgs）。4.980 语料无此函数，仅 4.981 引入，`Nitori/` 目录 4.980 实测不存在 | **已修（补丁 CB-001 随 wave/report-cb001）**：修法裁定 = 调用点去参（兄弟调用全带 Counter、唯此声明零参，系笔误；补参=替官方写新逻辑，越权）→ `devtools/corpus-patches/CB-001.patch` + `index.yaml`（病灶 sha `3482ab97…`，修后 sha `5a3a8c7b…`）；§3 编译期通道随本波落地（compileCorpus 执行前 staging 硬链接副本套补丁；4.980 无同名文件=缺席即跳过留痕）；玩家获得修复=重新出包（§3.5，节奏主人掌握）；**2026-11-12 订正**：真根因含引擎侧（见原因列），引擎已按 4.981 校准（`ProcessRuntime` 删 arity 闸）；补丁保留不回退 —— 4.981 语义下「带 Counter 调用零参函数」本就把实参丢弃，补丁前后行为等价，仅让调用点与声明对齐（同一笔判读同时解释了 `GET_MONTH函数: 参数过多` 型玩家反馈，见 `specs/verify-notes.md` 新增版本校准条） | raw2 `2026-11-05__1793845051968-*.txt`（调用栈 `ProcessRuntime.requireArgCount` ← `M_KOJO_EGG_MESSAGE_COM_K51_300`）；对照调用 `conversations.ERB:3269` 零参不炸 |
 | CB-002 | `变量 ITEMNAME 的第 1 维下标 1000 越界（长度 1000）` · 2 起/2 机 · 0.2.39 | `魔改内容/qol/qol_item.ERB:113`（`FOR ITEM_ID, 1, 1200`）→ `:402`（`SIF ITEMNAME:ARG == ""`）；标题期 `stepTitle` 经 `strCompare` | erbc 按 4.981 语料编译、随包 CSV/resources 取自 4.980 游戏根（**混装包**）：4.981 的 QOL 循环按 1200 槽读 `ITEMNAME:ARG`，而 4.980 的 `CSV/VariableSize.csv:74` 只有 `ITEMNAME,1000` | **出包侧数据混装（非官方同形）**：同源 4.981 数据（`CSV/VariableSize.csv:74` = `ITEMNAME,1200`）下脚本 1..1200 与表长一致，PC 与移植侧均不越界；`VariableData.cs:30` 裸下标 / `VariableTerm.cs:70-76` rethrow 只说明「越界必崩」，不构成本簇的同形证据 | **已修（出包侧）**：`devtools/pack_release.py` 的 `fallback_game_root`（:155-162）+ `toolchain_env`（:259-277）让 `ERATW_GAMEDIR` 与 `ERATW_CORPUS` 恒同源，`data_source_alignment`（:427-465）不同源即 `return 2`（:1208-1216；dry-run 仅告警、`--skip-assets` 放行）；已装机靠 `GameAssetInstaller` 字节数比对换数据。语料与引擎均不动 | raw-500 `2026-11-03__1793712013906-*.txt`（Xiaomi 23127PN0CC，`BeginFlow.stepTitle`）；翻案见 `verify-notes.md §29:2416-2423`，D6 复核（2026-11-07）逐条回主源确认两版 `VariableSize.csv:74` = 1000 / 1200 |
 | CB-003 | `变量 SEMEN_MATRIX …（未找到 ERD 表 SEMEN_MATRIX.csv）` · 1 起 · 0.2.39 | `魔改内容/SEMEN_MATRIX.ERH` + `SEMEN_MATRIX@2.ERD`（4.981 随包两件；4.980 两件皆无；verify-notes §24 在册） | **证据不足**：报错串「未找到 ERD 表」在官方 `reference/` 全库**零命中**；官方缺表/维度不符走 `ConstantData.cs:1193/:1199/:1201` 的 `CanNotSpecifiedByString` / `CannotIndexSpecifiedByString`。随包只有 `@2.ERD`（2 维表）、无 `.csv`/`@1` ⇒ 报错若指向裸名，更像「脚本按第 1 维做字符串键」或「玩家装内缺 `@2.ERD`」二者之一 | 证据不足（原因与文案双缺证）——**不是**已定案的玩家缺件 | 挂 raw2 正文 + 该玩家装内 ERD 清单 + 脚本访问维度（第 1 维 vs 第 2 维）核查后再判；引擎/语料均不动 | verify-notes.md §24 表；raw2 无该正文（端点 stats 簇）；D6 复核（2026-11-07）：`ConstantData.cs:1193/1199/1201` 实测、报错串全库零命中 |
 | CB-004 | **不可达（`[SKIPSTART]` 禁用区）· 2026-11-07 复核撤销补丁候选**。附带仍有效的一条：官方屏上本应出 `GETBIT函数: 第2个参数(64)在从0到63的范围外`（reference:917 模板），移植侧即便走到也出 `函数 GETBIT：第 2 个参数 64 越界（0-63）`（自造第三形，见 `error-texts.yaml` 附三 §一.6)）——但这段**永不编译**，故不是线上现象 | `ERB/fromEN/_TR Lib.ERB:1406`（`IF GETBIT(STAIN:ARG:2,64)`，4.980/4.981 **同线**）；该行落在真配对 `[SKIPSTART]` `:1186` – `[SKIPEND]` `:2296` 内，`:1405 ;[SKIPSTART]` / `:1430 ;[SKIPEND]` 是**注释**（不是指令，见证据列） | 装载期即被丢弃，不生成逻辑行、不进编译 ⇒ **无屏上现象**；`@TINKO_TR`（声明 `:1394`）同样不注册 | **死代码，非内容缺陷、非移植偏差**。若哪天语料去掉这层 skip，官方 PC 与移植会同崩（`FunctionMethodCreator.cs:4783-4786`，`bit < 0 \|\| bit > 63` 即 throw CodeEE），届时才需要先核查 64 的语义（本段其余支用的是 1/4/8，64 疑为遗留位；全语料 `GETBIT(...,64)` 仅此一处） | **撤销 §3 补丁候选**：引擎与语料均不动 | 指令判定 `ErbLoader.cs:387-406`（首个非空白字符须是 `[` 且 `Next != '['`）+ `EraStreamReader.cs:96-129`（只跳空白、不剥 `;`）⇒ 带 `;` 的两行是普通注释，遮不住外层真配对。移植侧 `LogicalLineReader.kt:257` 同判。禁用区内代码不编译、标签不注册（`specs/loader.md` 附录）。**实证**：4.981 单文件 compat 编译产物 `program.meta` `labels 5`，恰等于按区间剔除后存活的 5 个标签（`:145` `:1041` `:2298` `:2310` `:4517` 五行），`TINKO_TR` 缺席；调用点 `:269/:909/:1537` 与 `Com_Stuff.ERB:307`（4.981 配对 21-185 / 202-1172）同样全在禁用区。另：线上 `GETBIT(x,150)` 簇与本行**不同源**（150 是 `SHOP.ERB:188` 的按钮值，`BONUS2.ERB` 126 处 GETBIT 字面最大 16、动态支 `FOR LOCAL,1,11` 上界 11 ⇒ 出厂链产不出 150），见 BOARD OBS2-L3 ③ |
 | CB-005 | **语料表缺键（非端点簇）· 2026-11-08 立项（裁定③）**：4.981 出包根 `CSV/_Rename.csv` 没有料理解名键，第三方口上的 4 行 `CASE [[旧译名]]` 与所属函数一起降级 | `CSV/_Rename.csv`（4.981 出包根）；病灶消费者 `ERB/口上・メッセージ関連/個人口上/016 Remilia [レミリア]/蕾米莉亚色情特化v1.3/M_KOJO_K16_5_日常系指令.ERB:6311/6365/6419/6473`（0 基） | 4.981 的改名表删掉了 4.980 的料理解名块（4.980 `CSV/_Rename.csv:1649-1652` 有 `351,油炸跳蛋` / `352,电动按摩风跳蛋湯引` / `353,夹子用跳蛋握手` / `354,飛機杯剪裁跳蛋水煮`）；料理本体仍在 4.981（`AutoConst_DISH.ERH:531-544`：351 揚げローター / 352 Eマッサージャ風ローターの湯引き / 353 クリキャップ用ローターの握り / 354 オナホール仕立てのローター煮込み），只是中文译名换新、旧名查 `[[…]]` 的键没登记 ⇒ 读行层查不到键、`[[` 漏到词法器 | **随包数据缺陷（出包根，非引擎）**：编号必须按 4.981 自身 DISH 表核（与 4.980 同编号同物、只换译名）；修法只补「旧译名 → 编号」4 键，不改第三方 ERB、不改 4.981 常量表 | **已修（补丁 CB-005）**：`devtools/corpus-patches/CB-005.patch` + `index.yaml`（`root: game` 新口径；病灶 sha `97fc9f66…` → 修后 `1a5e48d9…`；4.980 原表 sha 入 `skip-sha256`，别的 4.980 版式仍判红）；编译 staging 与出包资产 staging 同源应用，`applied_corpus_patches` 列随包留痕；严格档 13→8、`degraded-slices 8` | 4.980 `CSV/_Rename.csv:1649-1652`；4.981 `ERB/Headers/AutoConst_DISH.ERH:531-544`；消费者 `M_KOJO_K16_5_日常系指令.ERB:6312/6366/6420/6474`（1 基）。C# 锚：`EraStreamReader.cs:106-119`（`[[原名]]` → 替换名）+ `LexicalAnalyzer.cs:811-813`（键缺席时 `[[` 漏到词法器） |
+
+| CB-006 | `筛选器中包含意外的值 L_FILTER_TARGET_TEMP=处女` · 1 起 · 0.2.39（2026-11-09 OPPO PKB110） | `ERB/CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERB` | 换组标签路径 `:1117-1118` 未清 `L_FILTER_TARGET_TEMP/OPR/NUMBER`；同族箭头路径 `:1197-1200` 有清（注释「移动列组后，放弃正在创建的筛选器」）；下一帧 `:906-918` 在当前组 12 槽找不到该列名即 THROW | 语料侧（官方 PC 同形：THROW 原样抛 `Process.cs:1796-1797`；局部变量只在 CALL 建帧复位 `VariableEvaluator.cs:1339` / `VariableData.cs:3365-3383`） | **已修（补丁 CB-006，主人 11-10 裁定「发语料补」）**：`:1118` 的 `GOTO MOVE_PAGE` 前补 1 行注记 + 3 行置空（与按钮换组路径 `:1197-1200` 逐字同形，零删除）→ `devtools/corpus-patches/CB-006.patch` + `index.yaml`（病灶 sha `679db239…` → 修后 `8d8b8475…`），编译期 staging 套用、真语料零改动；`:1182` RELOAD_DT 路径同缺口**本波未收**（范围外，见 TODOs）；引擎零改动（禁止吞 CodeEE/白名单） | 屏证：屏上「当前显示类别：性素质」=group1(`TEMP_CHARA_LIST_BY_DT_FUNC.ERB:714/716`) 而 处女 只属 group0/5(`:702/:760`)；列定义 `TEMP_CHARA_LIST_BY_DT_DEFCOL.ERB:101-121`；按钮写值 `TEMP_CHARA_LIST_BY_DT.ERB:1347`；补丁自证：真 applier 跑 4.981 副本，staging 套用后 sha == `8d8b8475…`（= index fixed-sha256），真语料 sha 不变、`corpus-patches-applied.txt` 留痕两条；反向证明：删掉一条置空行（@@ 计数同步）⇒ 套用后 sha `1da98163…` ≠ fixed ⇒ 判红；单文件 compat 编译 exit 0（labels 1 = `SHOW_CHARA_LIST_DT`，`degraded-slices 39` 全为「未定义的标识符 <外部函数/全局>」，源于单文件语料缺兄弟/公共 ERB），与未打补丁同文件的失败集逐条相等（仅行号 +4）⇒ 补丁零新增编译错误 |
+| CB-007 | `变量 PANTS_TEMP 的第 2 维下标 35 越界（长度 34） @ PANTS_GETTING 行81` · 1 起 · 0.2.39（2026-11-09 OnePlus PKR110） | `ERB/DIM.ERH:221`（`#DIM CONST MAXPANTS = 34`）+ `:411`（`#DIM CHARADATA SAVEDATA PANTS_TEMP, MAXPANTS`）；`ERB/OBJ/CLASS/衣装セット.ERB:2984-2986`；同族越界字面量 `:2909-2910` | 胖次对象号空间到 35（`CSV/_Rename.csv:1457-1490`：0..33 常规、34=泳裤、35=特有泳裤），而 `PANTS_TEMP` 只开 0..33。衣装套装把泳装对象写进「下半身内衣２」槽：`衣装セット.ERB:2984-2986` `CASE "下半身内衣２"` → `CALLF MAKE_INT(V_NAME, 35)`（`固有泳衣类型==1` 时；`METH_衣装セット.ERB:2793-2795` 同形），`衣装セット.ERB:2909-2910` 定装 `[[下半身内衣_ずらし可能_泳裤]]`=34。退衣 `衣服/PANTS.ERB:59 @PANTS_GET` → `:63 種類 = EQUIP:ARG:下半身内衣２` → `:64 CALL PANTS_GETTING(ARG, 種類)` → 物理 82 行 `PANTS_TEMP:ARG:種類 += 1`（报告 0 基 81）越界 | 语料内部不一致（官方 PC 同形）：4.980 同值（`DIM.ERH:218` `MAXPANTS=34`、`衣装セット.ERB:2985` 同 35）；越界必抛 `OoRCharaVarArg`（C# 锚 `CharaVariableToken.cs:56-70`，不夹下标不加白名单），存档按当前声明截断不扩容（`EraBinaryDataReader.cs:270-291`）⇒ 引擎判维正确，错在语料 |**已修（补丁 CB-007）**（主人 11-15 裁定「修复所有官方语料 bug」）：取 §5.5 修法①把 `DIM.ERH:221` 的 `MAXPANTS` 34 抬到 36（1 行常量 + 1 行注记，其余声明逐字不动），不动衣装套装与存档读写语义；`devtools/corpus-patches/CB-007.patch` + `index.yaml`（261111 病灶 sha `6355cf8c…` → 修后 `29a2f203…`；261017 退役根 / 4.980 canonical 按②类 skip）；编译期 staging 套用、真语料零改动；引擎零改动（ADR-005 不夹下标，`PantsTempMaxPantsBoundsTest` 8/0）；§5.5 两类候选修法保留作上游裁定记录；旧存档 `PANTS_TEMP` 维度随当前声明表自然扩容 | grep 全量（4.981）：`PANTS_GETTING(` 5 处调用 + 1 声明 + 1 注释 —— `日時天候管理.ERB:337`、`DLC/WEATHERCONTROL.ERB:19`、`fromEN/Addition/Add_Misc.ERB:1431`、`EVENT_MESSAGE_COM400.ERB:159`、`衣服/PANTS.ERB:64`；声明 `衣服/PANTS.ERB:76`；注释 `M_KOJO_K36_1_イベント.ERB:7276`。只有 `PANTS.ERB:64` 无界（其余经 `今天穿的内裤`/`今日のぱんつ` → `魔改内容/qol/qol_CLOTHES.ERB:11` `FOR 0,MAXPANTS`）；全语料写死 35 唯一 = `衣装セット.ERB:2986`；对象 35 = `CLOTHES_下半身下着_ずらし可能.ERB:1187/:1191`；可达链见 §5.6；回归钉 `PantsTempMaxPantsBoundsTest` 8/0 |
+| CB-008 | 同 CB-006 的端点签名（`筛选器中包含意外的值 L_FILTER_TARGET_TEMP=…`）· 同文件同族缺口 · 无独立上报 | `ERB/CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERB` | `:1176-1186` 表单编辑路径：`CALL PRINT_PRESET_COLUMN` 能**删列/改列/加列**（`TEMP_CHARA_LIST_BY_DT_FUNC.ERB:1410-1453` 删列时只 `REMOVE_FILTER` 清**已提交**的 `FILTER_TARGET` 数组，清不到调用方帧里的 `L_FILTER_TARGET_TEMP`），返回非 0 后 `:1182 GOTO RELOAD_DT` **未清** `L_FILTER_TARGET_TEMP/OPR/NUMBER`；`RELOAD_DT`(:251)→`SORT_LIST`(:342)→`MOVE_PAGE`(:367) **同帧**直落 `:904`，在 `COLUMN_NAME:L_SELECTED_COLUMN_GROUP:*` 里找不到那个旧列名即 `:918 THROW`（`CGROUP_ADD` 新建组 :1169→:1178 同汇入） | 语料侧（官方 PC 同形：THROW 原样抛 `Process.cs:1796-1797`；局部变量只在 CALL 建帧复位 `VariableEvaluator.cs:1339` / `VariableData.cs:3365-3383`，GOTO 不建帧 ⇒ 原版同样残留） | **已修（补丁 CB-008）**：`:1186` 的 `GOTO RELOAD_DT` 前补 1 行注记 + 3 行置空（与 `:1197-1200` 同文本、缩进按 `IF RESULT` 体内 2 tab，零删除）→ `devtools/corpus-patches/CB-008.patch` + `index.yaml`（bad=`8d8b8475…`（= CB-006 的 fixed，独立复算）→ fixed `0e458fbd…`）；⚠ **applier 现状不支持同文件链式两补丁**（选择阶段拿**真语料**的 sha 与每条 bad-sha 比、且 staging 前就判定，故 CB-008 的 bad 永远不命中 ⇒ 未知漂移判红）：**本笔合入前须先落 buildSrc `planCorpusPatches` 的链式选择**（按 target 归组、以 `bad==前一环 fixed` 串链、只在链头对真语料 sha 判定、套用前逐环校验 staging sha）；引擎零改动 | 病灶链：`TEMP_CHARA_LIST_BY_DT_FUNC.ERB:1410`（`C_BUTTON_REMOVE_COLUMN` 分支）→ `:1441-1442`（`REMOVE_SORT`/`REMOVE_FILTER` 只清已提交数组）→ `:1448-1453`（`SWAP` 左移列名）→ `ERB/CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERB:1179-1182` → `:251/:342/:367` → `:906-918`；与 CB-006 同一端点、同一 THROW 行 |
+| CB-009 | 玩家反馈（无崩溃上报）「起来时魔理莎约我去约会，然后人消失了。如果点归途会变回来，如果直接到约会地点人直接失踪但显示还在约会」· 2026-11-14 | `ERB/魔改内容/qol/qol_MAP.ERB:580-595`（「不知不觉间便到达了」= 直接到达分支）；病灶源 `ERB/SET_CMN.ERB:268/:331-332/:336` | 接受邀请走 `SET_DATE`：`:268` 无条件 `CFLAG:MASTER:约会中 = P_ID`，`:331-332` 把两人 `現在位置 = ROAD_TO(P_ID) = 97xx` 道中段（`fromEN/IMG/IMAGE_HELPERS.ERB:93/:132` 过滤 `現在位置 % 100 >= 97`）⇒「人消失」；归途 `:238-243` 才复位 ⇒「点归途变回来」。到达复位共三条（`SET_CMN.ERB:239` 归途、`:340` 即时到达、`EVENTCOMEND2.ERB:72` 倒计时到达），**每条都清 `TFLAG:约会道中`**；唯独 qol_MAP 特殊ワープ直接到达分支（`:582-594`）设了两人 `現在位置`/`约会中` 却不清道中计数 ⇒ 下一回合 `EVENTCOMEND2.ERB:62-79` 继续递减、归零时再次把两人位置复位成 `GET_ENTRANCE(CFLAG:MASTER:约会中)`，同行者被拉回不可见段，而 `约会中` 仍非家地图 ⇒「人直接失踪但显示还在约会」 | 语料侧状态残留（官方 PC 同形：`SET_CMN.ERB:336` `TFLAG:约会道中=所要時間+1000` 与三条复位链同形；到达后 `CFLAG:MASTER:约会中` 保持 P_ID 是官方语义，不动） | **已修（补丁 CB-009，主人 11-14 裁定「计入官方 bug 文档 + 发语料补」）**：照 `EVENTCOMEND2.ERB:72` 在 `:582` 后补 `TFLAG:约会道中 = 0` + 1 行注记（零删除、不新增玩法）→ `devtools/corpus-patches/CB-009.patch` + `index.yaml`（261017 时代病灶 sha `bb1a4823…` → 修后 `e0f44a8e…`；2026-11-14 语料换代 261111 重锚：病灶 sha `ca671bb1…` → 修后 `74c7e1d2…`，补丁资产按 261111 重出〔尾部上下文 `IF HAS_ANY_COMPANION()` 重构〕），编译期 staging 套用、真语料零改动；引擎零改动（ADR-005，未加兜底/白名单）；玩家获得修复=重新出包（§3.5） | 别名逐字核对排除「不同源」假说：`ERB/Headers/AutoConst_FLAG.ERH:84-85`（`FLAG_约会的对象`=`FLAG_デート相手`=73）、`AutoConst_CFLAG.ERH:26-27`（`约会中`=`デート中`=12）、`AutoConst_TFLAG.ERH:219-220`（`约会道中`=`デート道中`=229）；上一会话 `b93788dd2` 已把只读诊断口 `DatingForensics` 补齐 4.981 双口径与道中链现场读数（调试命令 `dating`）；TODO(verify) 真机 A/B 未做，玩家复现后回传 `dating` 读数可一击定性 |
+| CB-010 | 玩家反馈「游戏内的补丁页面里的补丁设定，翻了几页之后，就开始出现选项缺失」（2026-11-15 截图：`现在的设定（1/3）：`下整页空白）· 同 11-04 反馈「返回即换页 / 三次后空白 / 回翻无效」复发 | `ERB/DLC/OPTIONPRINT.ERB:1-3`（`@DLCOPTIONPRINT(ARG)` 的 `#DIM MAXPAGE = 3` / `#DIM DYNAMIC 行数统计` 之后无 `LOCAL = 0`）；消费者 `ERB/DLC/OPTIONDLC.ERB:8-28`（`@OPTION_DLC` 循环 `CALL DLCOPTIONPRINT(PAGE)`，按 `[<]`/`[>]`（HTML `button value=1001/1002`）改 PAGE 后 `CALL RELINE(5)` 清行重画） | `@DLCOPTIONPRINT` 把**跨 CALL 持久的 LOCAL**（`DLC.ERH:60` `#DIM SAVEDATA DLC_Toggle, 200, 10` ⇒ `VARSIZE` = 200）当 DLC 枚举下标且入口未归零 ⇒ 第 n 次渲染从 `30*(n-1)` 续枚举，翻几页后 LOCAL ≥ 200 每轮只打空行 ⇒ 整页空白；翻回页 1 同样空白（截图形态） | **语料内容缺陷（官方 PC 同形，非引擎）**：LOCAL 生命周期 = 官方语义 —— 蛇版 4.981 反编译实核 `SetDefaultLocalValue()` 仅 ResetData/读档三处（`reference/emuera-skia-4.981` `VariableEvaluator.cs:1737/:2816/:2992`）、`ClearLocalValue()` 仅 `Dispose()`（`VariableData.cs:1664`）；1.824 同构（`reference/emuera-cs` `VariableData.cs:3365/:3377/:4215`）。引擎侧按调用归零的门控曾于 11-04 引入（`4c710f48d`）、11-05 按反编译证据拆除（ENGFIX-1 `b98b5b211`）——`@Reline`（`魔改内容/Misc.ERB:29`）的静态 `行数存档,10` 全游戏 UI 重绘都依赖该持久语义，改引擎 = ADR-005 违例。11-04 的语料修复（`305aad010`）当时直接插进 261017 部署根、未进本管线 ⇒ 语料升版 261111 时丢失（两根该文件实 diff 仅 4d3 一行），本次复发即丢失链的兑现 | **已修（补丁 CB-010，组长 11-15 裁定「补丁管线收口」）**：入口补 `LOCAL = 0`（复用 305aad010 的逐字修复行）→ `devtools/corpus-patches/CB-010.patch` + `index.yaml`（病灶 sha `ce867d4e…` = 261111 原版，修后 sha `fd184ead…` = 与 261017 已修版逐字节同值，故 261017 根自动按「已是修后版」跳过、无需 skip-sha256）；编译期 staging 套用、真语料零改动；字节同一性实核：261111 内容 + 修复行 sha == `fd184ead…` == 261017 根实测 sha。引擎零改动；玩家获得修复=重新出包。**编号顺延**：`CB-009` 已由 2026-11-14 约会道中补丁（`qol_MAP.ERB`）占用，本条与 origin/main 合流时改为 `CB-010`、补丁资产同文重命名；四条 261111 重锚链（CB-001/005/006/008）已由并行会话合入远端，本条为本轮仅剩独有增量 | 截图 182dede9b757ee3d7256e0a9c14197c7（`现在的设定（1/3）：` 下无选项行）；`OPTIONPRINT.ERB:17-18`（`PRINTFORML 现在的设定（{ARG+1}／{MAXPAGE}）：` + `WHILE 行数统计 < 30*ARG + 30`）；`OPTIONDLC.ERB:12`（HTML 翻页按钮）；C# 锚见判定列；回归钉 `DlcPagingReproTest`（11-04 波入库，erbc 产物档） |
+| CB-011 | 11-10 上报 ×1「开局处女设定菜单 THROW 无效输入。」· `verify-notes.md §22.1` 立案（0 基锚 `NEWGAME_UTILS.ERB:79-84`） | `ERB/NEWGAME/NEWGAME_UTILS.ERB:79-84 @ASK_CHOICES` 输入循环判据 `:81` `SIF argCanselNo \|\| (RESULT < VARSIZE("refChoices") && refChoices:RESULT != "")`；调用方 `ERB/NEWGAME/NEWGAME_VIRGINITY.ERB:7-68 @VIRGIN_SET` | 第一个操作数是取消号本身（VIRGINITY 传 100）⇒ 非零恒真，任何输入都原样 RETURN；`:83 CLEARLINE` 重试与后续合法性校验全是死代码；点到残留旧按钮 / 输入菜单外数字即落 `NEWGAME_VIRGINITY.ERB:65-66 THROW 无效输入。`，开局设定菜单直接报错 | 模组脚本自己的笔误、官方 PC 同炸（`verify-notes.md §22.1:1864-1877` 合法值集 `{0,1,2,3,4,5,9,100}`）；4.980 / 261017 / 261111 三根逐字同形 | **已修（补丁 CB-011）**（主人 11-15 裁定）：判据改 `SIF RESULT == argCanselNo \|\| (…)` 让取消号仍直接返回、越界输入走重试；`devtools/corpus-patches/CB-011.patch` + `index.yaml`（261111 病灶 sha `ca153cf4…` → 修后 `820e8d9c…`；261017 与本版逐字节同形，按 `CorpusPatches.kt:385-388` 判定序 bad 先于 skip 无法登记，两代补丁语义等价、261017 已退役且 golden 采集走 PC 原版引擎不经 compileCorpus；4.980 canonical 按②类 skip）；只改 1 行判据 + 1 行注记，不改选项表与调用方；编译期 staging 套用、真语料零改动；引擎零改动 | `docs/UPSTREAM-BUG-PR.md` A11 行；`specs/verify-notes.md §22.1:1864-1877`；TODO(verify) 真机开局菜单 A/B 未做 |
+| CB-012 | 玩家反馈「魔理沙睡眠时颜绘模糊、眼睛看起来重叠了」（A13，无崩溃上报）· 官方引擎 Emuera_skia V17.2 最小语料复现 MAE=1.88（180px 对齐） | `ERB/キャラデータ/Chara_data_11_魔理沙.ERB:496-497 @IMAGE_I11_特殊照れ` 与 `:546-547 @IMAGE_I11_特殊吐息` 的 `ELSEIF CFLAG:CHARA:睡眠 ⇒ RESULTS = 睡眠`；效果名合成 `ERB/ステータス表示関連/IMAGE.ERB:1124-1133 / :1146-1156`；资产登记 `resources/EN_IMG/327/327 Res.csv:1680-1681` | 触发面 `個人口上/011 Marisa [魔理沙]/eraTW用霧雨魔理沙口上ver,0.03/M_KOJO_K11_FUNC.ERB:3381-3385` 的 AFTERTRAIN SPTALK 显式表情绕过 `IMAGE.ERB:647` 的 base 睡眠切换 ⇒ 醒脸上叠 `11_別顔_睡眠.webp(540,0)` 半透明软睡脸（闭眼睫毛压睁眼虹膜）+ 半透明皮肤罩；睡眠吐息 cell 近空（全 cell 仅 545px 有 a≥128 内容）使吐息层消失。霊夢同款行干净（vs 純憤怒 base 2.02），4.980 分支 `:436/:486/:536` 同形 | 效果层在 base 未切睡眠时仍走睡眠前缀（素材错位，非引擎缺陷）：正常 cell 是 `327 Res.csv:1672/1673` 的 `別顔_照れ_11` / `別顔_吐息_11`；霊夢 `:57/:58` 与魔理沙 `:1680/:1681` 登记同形 ⇒ 改资产表等于先裁定「素材笔误 vs 演出设计」，本仓不越权替官方定设计 | **已修（补丁 CB-012）**（主人 11-15 点名裁定「包括魔理沙颜绘模糊 bug」）：取 A13 候选①「显式表情时效果层不走睡眠前缀」，在两个 `RESULTS = 睡眠` 后各追加 1 行注记 + `RESULTS = ` 置空（只加不删）⇒ 效果名回到正常腮红 / 吐息 cell；`devtools/corpus-patches/CB-012.patch` + `index.yaml`（261111 病灶 sha `259aa8ab…` → 修后 `88785e79…`；261017 / 4.980 canonical 按②类 skip）；未选 Res.csv 路线因 `resources/` 不在 `CorpusPatches.kt:417-433` 的 staging 副本形状内，`root: game` 新 target 会判红、需改判定本体（越权）；base 睡眠仍由 `IMAGE.ERB:647` 负责，霊夢与其它角色零改动 | `docs/UPSTREAM-BUG-PR.md` A13 行（语料锚 / 资产像素取证 / V17.2 复现三链齐，分析工件未入库）；`327 Res.csv:1641/1672/1673/1680/1681`；`IMAGE.ERB:647 / :1000-1003`；TODO(verify) 真机颜绘 A/B 未做 |
+| CB-013 | 「函数 GETBIT：第 2 个参数 150 越界（0-63）」· 2 起 · 0.2.45；栈 `REWARD_BONUS_0 行316(0基) ← BONUS 行56 ← USERSHOP 行355` | `ERB/SHOP関連/BONUS2.ERB:317`（0 基 316；`@REWARD_BONUS_0` 开头 `SIF GETBIT (FLAG:认识BONUS取得状况, ARG)`）；转发源 `:57`（INPUT 的 `CASEELSE` 盲转 `TRYCALLFORM REWARD_BONUS_{PAGE}(RESULT, DEBUG)`）；150 = `SHOP.ERB:198` 的 `[150] 実績解除` 按钮值（CB-004 判词所引 SHOP.ERB:188 在 261111 移至 :198） | 实绩菜单 `@BONUS:32 INPUT` 的取值域 = 菜单键 ｛0/998/999/1000｝∪ 当前页实绩按钮，`CASEELSE` 却把其余**任意**键值当实绩位转发；商店屏残留的 [150]（或手输任意 ≥64/负数）进 `REWARD_BONUS_0` 即在首个 GETBIT 崩。本页实绩位空间由语料自证两处：`PRINT_BONUS_0:248 FOR LOCAL,1,6`（按钮 [1]..[5]）与 `REWARD_BONUS_0:333 SELECTCASE ARG CASE 1..5 CASEELSE RETURN`（未知位本意 no-op，但位检先于 CASE 执行） | 语料内容缺陷（官方 PC 同形：GETBIT 位域 0-63 是引擎硬限、越界直接抛，蛇版 `Creator.Method.cs:5238-5247` `GetIntValue` `m<0\|\|m>63 → CodeEE(ArgIsOutOfRange)` 不夹持；官方 PC 同语料手输 150 同炸） | **已修（补丁 CB-013，主人 11-15 授权）**：`GOTO SKIP_CHECKS` 后补 2 行注记 + `SIF ARG < 1 \|\| ARG > 5` + `RETURN`（照本函数自身 CASE 域 1..5，越界值走既有 CASEELSE no-op 口径；零删除）→ `devtools/corpus-patches/CB-013.patch` + `index.yaml`（病灶 sha `95015315…` → 修后 `5fcfe4a0…`），编译期 staging 套用、真语料零改动；引擎零改动；玩家获得修复=重新出包（§3.5）。**同族已一并收**：同文件 `REWARD_BONUS_1..9`（:476/:689/:940/:1155/:1512/:1663/:1850/:2015/:2133）九页各补同形守卫（域按各页 SELECTCASE 与 PRINT_BONUS_N 的 FOR 区间：1..8 / 1..8 / 1..11 / 1..14 / 1..5 / 1..6 / 1..4 / 1..10 / 仅 5），十页越界位全部在 GETBIT 前返回（台账 A16 建议调用点收窄值域仍留上游） | 补丁自证：真套用器 compileCorpus staging 套用 sha 对账 == index fixed（2026-11-15 扩九页后 14 条全绿）；全量 strict 编译 4307 文件 / 118188 片段 / 0 失败；反向证明：扰动新增行 → 套用后 sha ≠ fixed 判红、扰动上下文行 → pre 块零命中判红、恢复逐字节一致 |
+| CB-014 | 「数组变量"TEMP_STR"的第1参数(1000)超出数组范围」· 3 起 · 0.2.44/45；栈 `CNT_SPLIT 行2801(0基) ← SHOW_TASTE 行356 ← DISH_COOKING 行570 ← COM413 行277 / COOKING_MATCH_SELECT 行292`（四帧全按 261017 布局逐字核对一致） | `ERB/COMMON.ERB:2836-2863 @CNT_SPLIT`（261017 `:2783-2808`）：工作数组 `#DIMS DYNAMIC TEMP_STR, 1000`（261111 `:2845` / 261017 `:2792`）、头注 `:2824` 自限「单词总数 <1000 个（受限于函数内临时数组大小）」；`SPLIT`（`:2852`）后 `FOR TEMP_ID, 0, TEMP_NUM`（`:2853`）读 `TEMP_STR:TEMP_ID`（`:2855`，261017 物理 `:2802`） | 官方 SPLIT 只把前**数组容量**段写进数组、`TEMP_NUM` 却报**完整**段数（蛇版 `Process.ScriptProc.cs:549-565`：`Num.SetValue(retStr.Length)` 在前、超容量时 `Array.Copy` 截断写入、原溢出 throw 已注释）⇒ 传入串 ≥1001 段时循环对 1000..TEMP_NUM-1 读越界即崩。传入串 = 料理味串 `DISH_TASTE`（`FOOD.ERH:2` `#DIMS SAVEDATA`，`DISH_TASTE_ADD`（DISHDATA.ERB:1588+）/`DISH_TASTE_FROM_CHARA`/COMF413:480-484 逐段 `+=`，仅 `DISHDATA.ERB:20`/`RESET_DISH` 清零）长期积累突破头注自限；`SHOW_TASTE`（COOKING_UI.ERB:366）把它喂给 `CNT_SPLIT`（`:391`）。扩容修法被否：调用面串长无语料上界（任意固定容量只挪墙），且下游 `TASTE_LIST/CNT_LIST` 仅 100 槽（COOKING_UI.ERB:370-371）——语料设计意图就是「unique 味 ≤100、总段 <1000」 | 语料内容缺陷（官方 PC 同形必炸：SPLIT 截断 + 全量 TEMP_NUM 是蛇版 4.981 引擎实况，越界必抛 `VariableTerm.cs:70-76` rethrow / `VariableData.cs:30`——按 CB-002 判例纪律只证越界必崩，同形判据 = 蛇版 SPLIT 语义 + 语料头注自限） | **已修（补丁 CB-014，主人 11-15 授权）**：`SPLIT` 与 `FOR` 之间补 2 行注记 + `SIF TEMP_NUM > VARSIZE("TEMP_STR")` + `TEMP_NUM = VARSIZE("TEMP_STR")`（钳到函数自己声明的容量、只统计 SPLIT 实际保留的段；≤1000 段合规输入零行为差；VARSIZE 局部数组用法为语料既有写法，如 `TEMP_CHARA_LIST_BY_DT_FUNC.ERB:1119`；零删除）→ `devtools/corpus-patches/CB-014.patch` + `index.yaml`（病灶 sha `bb8bba5f…` → 修后 `0115e8b6…`），编译期 staging 套用、真语料零改动；引擎零改动；玩家获得修复=重新出包（§3.5）。**同族已一并收**：同文件 `@STR_MULTI_COUNT`（:2804 的 SPLIT，同款 `#DIMS DYNAMIC TEMP_STR, 1000` + 头注 :2773 同契约）补同形钳位，两处 SPLIT 后都先钳再 FOR/MATCH | 补丁自证：真套用器 staging 套用 sha 对账 == index fixed；全量 strict 编译 4307 文件 / 118188 片段 / 0 失败（2026-11-15 两 hunk 版复跑）；反向证明新增行/上下文行两向扰动均判红、恢复逐字节一致；TODO(verify) 玩家侧 `DISH_TASTE` 实际段数与积累路径未取证（需玩家存档 `DISH_TASTE` 读数） |
+| CB-015 | 「角色变量 CFLAG 的第 1 参数 139 越界（角色数 136）」· 3 起 · 0.2.45 启动失败簇；位置 `VERSION_UP.ERB 行191(0基)` = 261111 物理 :192 | `ERB/VERSION_UP.ERB:190-193`（读档迁移块 `;典更新`）：`IF modding_version < 20251212` 内 `CFLAG:139:998 = 4`，无任何角色存在性守卫 | 139 = **作者环境装载序**硬编码的角色序号（`CSV/Chara/Chara139 典.csv` 菅牧典——作者环境里 CSV 文件号 == 装载序号），实际序号随 DLC 开关/角色增减漂移；玩家存档 `CHARANUM=136` 时序号 139 不存在，读档跑 `@VERSION_UP` 迁移块即崩、启动失败。语料自身已有两套稳健写法可对照：同文件 `:94-103` 用 `CFLAG:[[先代]]:…` 按名解析、`:194` 用 `CHARANUM == 168` 存在性守卫（作者对新块守了、对 20251212 块漏了）；`CFLAG` 第 1 参语义 = 装载序下标（`AutoConst_CFLAG.ERH:503-504` 998 = `剧本选择`/`口上セレクタ`） | 语料内容缺陷（官方 PC 同形：角色变量越界即抛不夹持，蛇版 `VariableToken.cs:308-309` `CheckElement` `arguments[0]<0 \|\| >= CharacterList.Count → CodeEE(OoRCharaVarArg)`；CB-007 判例同锚 `CharaVariableToken.cs:56-70`） | **已修（补丁 CB-015，主人 11-15 授权）**：块前补 2 行注记 + `SIF CHARANUM <= 139` + `GOTO CB015_SKIP_139`、块后补 `$CB015_SKIP_139` 标签（照 :194 既有 CHARANUM 守卫口径跳过不存在角色；零删除、不越权改写 ：192）→ `devtools/corpus-patches/CB-015.patch` + `index.yaml`（病灶 sha `585706a9…` → 修后 `c30a0cb7…`），编译期 staging 套用、真语料零改动；引擎零改动；玩家获得修复=重新出包（§3.5）。**已知残留（有意保持）**：序号 139 存在但不指向典的存档（>139 角色且装载序漂移）仍会把 `口上セレクタ` 写到别的角色——官方 PC 同样如此，未实报、不越权修，上游正修 = 改 `CFLAG:[[典]]:998` 按名解析；同文件 `:183-188` 硬编码 12/118 同族隐患已一并补 CHARANUM 守卫（GOTO 跳过不存在的角色）。**同根排查**：`IRAI_固有15_咲夜.ERB:97 CALLNAME:15101`（垃圾下标）与本簇不同根，维持台账 §0 ④「缺玩家侧文件」原判不并案 | 补丁自证：真套用器 staging 套用 sha 对账 == index fixed；全量 strict 编译 4307 文件 / 118188 片段 / 0 失败（2026-11-15 合并单 hunk 版复跑）；反向证明两向扰动均判红、恢复逐字节一致；TODO(verify) 真机 A/B 未做（需 CHARANUM ≤139 的存档验证启动不再崩） |
+| CB-016 | 玩家反馈（无崩溃上报）「亲密上限是不是100，过了就变成0了，又触发好感依赖清零了，好意太容易超上限了，随便一个选项就加几千万」+「数值增长似乎有些夸张？一下子从B级升到SS级别？」· 0.2.46 | `ERB/イベント関連/EVENTTURNEND.ERB:22-31`（`MAGIC_DLC_好感亲密重做` 满好感亲密补正） | `:26` `ABL:LOCAL:親密 = SQRT(CFLAG:LOCAL:4)/8` **无上限**：信赖度 LIMIT 上限 999999（`TRACHECK_信頼度上昇処理.ERB:271`）⇒ SQRT/8 最高 124 级；而官方对亲密的有效消费面全部按 `MIN(親密,15)` 收口（`コマンド関連/COMF/外出系/NASIKUZUSI.ERB:582-592` 多处、`COMF460:185/190`），親密升级消耗表 CASE 21+（CASEELSE）进入 `40000*親密^2` 公式段（`ABL_UP_DATA.ERB:573-574`，亲密 100 级 = 一次 4 亿）⇒ 补正把亲密推到 100+ 级后升级一次吞掉数亿好意之珠，与 CB-017 的 source 正反馈合成报红链：好意几千万 → 亲密升级消耗指数级 → 好意之珠被一次升级吃光（「过了就变成0/好感依赖清零」——好感度/信赖度本体无清零机制，全语料仅 RESET_CHARA〔版本迁移一次性〕/神签小减〔-100/-50〕/妄想副本〔COMF460 只动副本〕三处，均已排查排除；玩家口中的「好感依赖」= 界面列「好感」「信赖」（CHARA_LIST.ERB:107/111）的口语化） | 语料内容缺陷（魔改 DLC 数值失衡，官方 PC 同形：`SQRT(CFLAG:LOCAL:4)/8` 在 4.980/261017/261111 三根 ×2 同形计数） | **已修（补丁 CB-016，主人 11-15 指令「彻查机制、以语料补丁修复」）**：条件与赋值两处各套 `MIN(SQRT(CFLAG:LOCAL:4)/8, 15)`（对齐官方消费锚 15）+ 1 行注记 → `devtools/corpus-patches/CB-016.patch` + `index.yaml`（261111 病灶 sha `11a20d14…` → 修后 `17d2cf19…`；261017/4.980 按②类 skip）；编译期 staging 套用、真语料零改动；引擎零改动；玩家获得修复=重新出包（§3.5）。**存量保护**：原判据 `> LOCAL:1`（只升不降）保留，已 100+ 级的存档角色不回退 | 机制链锚：`EVENTTURNEND.ERB:25-26`（病灶）、`TRACHECK_信頼度上昇処理.ERB:271`、`NASIKUZUSI.ERB:582-589`（MIN(親密,15) ×5）、`ABL_UP_DATA.ERB:507-563`（消耗表）；TODO(verify) 真机长线 A/B 未做 |
+| CB-017 | 同 CB-016 报红链的另半根（「好意太容易超上限了，随便一个选项就加几千万」「一下子从B级升到SS级别？」）· 0.2.46 | `ERB/ステータス計算関連/SOURCE/SOURCE_1.ERB:443-447`（@SOURCE_歓楽 亲密倍率）、`:456-487`（同函数好感度倍率）、`:649-654`（@SOURCE_受動 亲密倍率） | 三组正反馈倍率**无衰减**：亲密项 `×(親密*5+100)/100`（亲密 100 级 → ×6，124 级 ×7.2）、受動亲密项 `×(親密*10+70)/100`（100 级 ×10.7）、好感度项 `×(CFLAG:2/50+100)/100`（好感 50 万 = 该分段上限处 ×101）——CB-016 病灶把亲密推到 100+ 级后，`CUP:好意` 单回合以千万计 → 调教结束 `AFTERTRA.ERB:780-845` JUEL_CHECK 高档位一次转 2 亿宝珠（「随便一个选项就加几千万」）；好感度单次 +几千跨三级（`COMMON.ERB:2122-2153` MAX_50000 表 B=3000→SS=30000，B级跳SS）；欲望项不失控（无补正通道） | 语料内容缺陷（魔改 DLC 数值失衡，官方 PC 同形：三组倍率行 4.980/261017/261111 病灶形态计数逐字一致） | **已修（补丁 CB-017，主人 11-15 指令）**：7 行表达式各套 MIN——亲密项 `MIN(ABL:ARG:親密, 15)`（消费锚同 CB-016）、好感度项 `MIN(CFLAG:ARG:2, 50000)`（`CALC_RANK` MAX_50000 的 Ex=50000 评级天花板锚，MIN 后衔接处倍率恰 ×11 无缝）+ 2 行注记 → `devtools/corpus-patches/CB-017.patch` + `index.yaml`（261111 病灶 sha `4f71ce45…` → 修后 `e4df6ab7…`；261017/4.980 按②类 skip）；`:484` 的 10 亿分支与欲望项**有意不封**（该分支是作者既有硬帽：好感>5 万且 LOCAL≥1e7 时直接置 1e9，非本波新增放大，改它需裁定官方意图、留上游；欲望无补正通道）——只砍失控段、保留 ≤15 级/≤5 万好感内的官方正反馈手感；玩家自设「好感度上升率 X20」（OPTION.ERB:688 LIMIT 20）为官方功能不动 | 机制链锚：`SOURCE_1.ERB:417-490/:596-665`、`AFTERTRA.ERB:780-845`（档位表最高 2 亿）、`TRACHECK_好感度上昇処理.ERB:428-430`（好感度 LIMIT 100 万）、`COMMON.ERB:2122-2160`（等级表）、`OPTION.ERB:688`；TODO(verify) 真机长线 A/B 未做 |
 
 ## 2. 什么进这张表（判定口径）
 
@@ -35,7 +50,7 @@
    （id、目标文件、**目标文件 sha256**、适用语料版本、病灶/修法摘要、状态）。
    `root: game`（可选，缺省 `corpus`）把目标解析根从 `<游戏根>/ERB` 换到游戏根，用于
    `CSV/_Rename.csv` 这类与 ERB 平级、但同样随包的数据；`skip-sha256`（可选）登记
-   「已知无需补丁的其它版本」（如 4.980 根已有同一批键），其余未知 sha 仍判红。
+   「已知不进入本链的其它版本」（两类语义见本节末注），其余未知 sha 仍判红。
 2. **应用点**：`:tools:erbcc:compileCorpus`（及一切喂 erbcc 的流程）编译前把补丁应用到**临时副本**再喂编译器；
    `root: game` 的目标**同时**在 `:app:stageGameAssets` 落 assets 时替换（硬链接只读，删链接后写修后字节），
    否则会出现「erbc 修了、随包 CSV 没修」的半截修复。
@@ -45,9 +60,47 @@
 4. **两机同步**：补丁随 git pull 即达，与语料物理位置无关；Haruki/HOMEJIA 各自编译产物一致。
 5. **玩家获得修复 = 重新出包**（erbc 随包）；不出包则线上无感——出包节奏主人掌握（P0 行）。
 
+**`skip-sha256` 的语义边界（2026-11-11，`CONTRACT-RESIDUAL-2LANE.md` 车道 B）**：登记分两类，
+① 该版本病灶已不存在（CB-005：4.980 根 `CSV/_Rename.csv` 已有同一批键）；
+② 该版本不是本链的出包对象、须保持编译基准原始字节（CB-006/008 链头登记 4.980 canonical
+`CHARALIST_DT/TEMP_CHARA_LIST_BY_DT.ERB` 的 sha `cc3bff04…`）。② 的实测依据：4.980 与 4.981
+该文件逐字节差异只在行尾（LF vs CRLF），去 BOM + 归一 EOL 后两串 sha 同为 `d3b7fed6…`、
+1436 行逐行同文，`:1118` / `:1182` 两处缺口**在 4.980 同样存在** ⇒ 登记 skip 是「该版本整链
+跳过、保持 erbcc-rs `regen --lane rust-full` 全量基准与历史同态」，**不是「4.980 已修」**。
+若 4.980 被改作出包根，必须按 4.980 的 bad/fixed sha 另立链，不得沿用本 skip；出包根仍为
+4.981，CB-006→CB-008 按病灶版照常套用。判定本体 `CorpusPatches.kt` 零改动。
+
+**语料换代重锚（2026-11-14，261017→261111）**：蛇版官方仓（gitgud `eratw-sub-modding`）
+发行 `eraTW4.981-261111-EAGLOV3` = 提交 `278662ced`（2026-11-11，磁盘 ERB/CSV 与仓树逐字节
+对账一致）成为出包根，261017 转退役留档（golden 采集根/回归对拍根）。五条补丁病灶在 261111
+**全部原样在**（CB-001 `:64` 多参逐字未动、CB-005 四键仍缺且锚块 `351,卷心菜/352,草莓/353,芜菁`
+移位 `:672`→`:668`、CB-006/008 缺口同位、CB-009 缺口同位但尾部上下文被上游重构
+`IF FLAG:约会的对象`→`IF HAS_ANY_COMPANION()` ⇒ CB-009 补丁资产**按 261111 重出**），其余 diff 资产**原样复用**（套用器按内容定位，
+261111 实测 sha（fixed 由套用器语义模拟器预计算、编译期双重判据兜底），261017 的病灶版 sha
+按头部②类登记链头 `skip-sha256`（病灶未修，仅不再是出包对象）。判定本体 `CorpusPatches.kt`
+零改动。
+
+**261111 磁盘根取得（2026-11-15，Haruki）**：本机原先只有退役的 261017 根，本次从官方仓
+gitgud `era-games-zh/touhou/eratw-sub-modding`（项目 28180）提交
+`278662ced155253f47daf514bbf0dbad44e0e3b7`（2026-11-11 23:12）下载 archive.zip 还原；
+仓 blob 为 LF、磁盘发行根为 CRLF ⇒ 文本文件做 LF→CRLF 归一、二进制原样，并用本表
+CB-001/005/006/009 四个目标的 261111 病灶 sha256 做四点逐字节自证（全 MATCH）。
+故新增补丁的 bad/fixed sha 均可按真实出包字节复算，不再依赖只存在于另一台机的临时工件。
+完整口径与取回通道见 `devtools/corpus-patches/index.yaml` 头部。
+
 （机制本体在首个补丁落地时实现，先于补丁合入；§1 中任一「待修」行获批即开工。）
 
 ## 4 降级切片的治理裁定（ENGFIX3 `eng2-deg`，2026-11-08）
+
+> **2026-11-14 口径变更（主人裁定，优先于本节以下历史内容）**：第三方口上不再「一个字节不改」。
+> 7 行 `CASE` 用的旧日文/繁体地名已在 `github.com/Poboking/kojo-community` 上游按 4.981 常量表里
+> **同数值**的简体/新译名归一（`桜花道的鳥居`→`樱花道的鸟居`、`広場`→`广场`、
+> `P948縦穴底部`→`P948竖井底部` 等），两个 4.981 语料根副本同步，三份 sha256 一致；
+> `devtools/erbc-degraded-allowlist.tsv` 在册 **13 → 8 → 0**，出包回到 **strict 档零降级**。
+> 即：旧 §4.2/§4.3 讨论的 THROW 桩与「默认保留 8 条」**已全部结项**，仅作历史留痕；
+> 现行纪律见 `.agents/skills/eratw-kojo-pack/SKILL.md §2` 与清单文件头部。
+> 注意本裁定**没有**采用「给 4.981 头文件补别名常量」那条路线（不引入官方没有的内容），
+> 而是 A8 台账的第二个候选修法：口上统一改用已定义的简体名。
 
 **结论：THROW 空体桩 + `--allow-degraded-corpus` 不构成缺陷掩盖**，但只能在 §4.2 四条边界内使用；
 越界条目按「掩盖」处理（判据见 `.local/引擎缺陷掩盖审查-20261106.md` §1）。
@@ -77,14 +130,14 @@
    必须写明玩家后果（进哪个场景会看到哪条错误），不许用「反正没人调」收尾。
 4. **清单随 main 走**：禁止跨机本地重登（B3 历史：本地重登 13 条导致「发出的包 ≠ main 的状态」）。
 
-### 4.3 剩余 8 条的处分（2026-11-08）
+### 4.3 剩余 8 条的处分（2026-11-08，历史；2026-11-14 已结项）
 
 - **7 条日文字形 + `_COM_K16_440` 标记**：第三方口上按另一套译名写 `CASE 桜花道的鳥居 …`，
   4.980/4.981 两版 ERH 都只定义简体名（`DIM.ERH:67/77/96/158`、`PLACE_ERH.ERH`）⇒
   原版 PC 在**同语料**下同样会把这个函数标 `ErrMes`。该函数经基座的动态调用链
   `TRYCALLFORM M_KOJO%KOJO_NAME%_MESSAGE_COM_K{NO:TARGET}_{…}`（`DLC/实用设置补丁/实用设置.ERB:406/408/437/478`；
   `{…}` 取到 440 时命中本函数）调用，桩被触发时与原版同形地抛错，不是静默走错分支。**默认保留**：这是对原版行为的忠实复刻。
-  若要「更好」，唯一合法路线是给 4.981 头文件补别名常量（CB-006 形态）——那会引入官方
+  若要「更好」，唯一合法路线是给 4.981 头文件补别名常量（别名常量补丁形态）——那会引入官方
   没有的内容，**属主人裁定项**，未经裁定不得做（`eng2-pack`/`eng2-deg` 均未实施）。
 - **文案债（已结，2026-11-08）**：桩文案原为自造串「函数「@X」在装载时出错，无法使用」；
   现改取册内官方原文 `Lang.Error.CalledFailedFunc`（`Lang.cs:2450` / zhs 表 :567 / eng 表 :570，
@@ -95,3 +148,59 @@
   函数名信息不再进屏（原版也不给），定位靠错误屏的位置信息。
 - **可达性登记**：`@M_KOJO_色情特化_MESSAGE_COM_K16_440` 是 Remilia 的指令口上函数；
   玩家触发对应指令时按原版同形报错（错误屏），不会静默继续。当前包（0.2.43+19）即此状态。
+
+## 5 上游 PR 出口（lane corpus-pr，2026-11-10）
+
+> 目的：把 §1 里所有**已修（补丁 …）**的语料缺陷，按 id 打成可提交上游的补丁包；主人将来挑一批交给 eraTW 语料原作者/维护者。本节只定「怎么出口」，不改 §1 的判定。
+
+### 5.1 单一映射规则（台账是唯一真源）
+
+- 台账 §1 的**一**行 ⇔ `devtools/corpus-patches/index.yaml` 的**一条**条目 ⇔ `out/corpus-pr/<id>/` 的**一个** bundle，三面 id 同名。
+- 只有处置列为「已修（补丁 <id>）」的行才出口；其它状态（待裁定 / 等上游 / 官方同形不修 / 已修（出包侧））**跳过并告警**，不生成 bundle、也不判红。
+- index.yaml 有条目、台账却没认账 ⇒ **红**；台账认了、index.yaml 没条目 ⇒ **红**；补丁资产缺失 ⇒ **红**。
+- 宁红不猜：解析失败、未知字段、sha 形状不对、id 与文件名对不上，一律判红。
+### 5.2 bundle 结构（每个 id 一个目录）
+
+```
+out/corpus-pr/<id>/
+  README.md       # 病灶 / 证据 / 修法 / 风险 / 上游路径（PR 描述底稿）
+  <id>.patch      # unified diff，字节 = index.yaml 指向的补丁资产（原样）
+  manifest.json   # 机器判据：corpus/target/root、bad/fixed/patch 三个 sha256、
+                  # 台账行号与行 sha256、建议分支与 commit subject、文件清单
+```
+
+- `manifest.patch.sha256` 必须等于 `<id>.patch` 实际 sha256（自洽判据，测试钉死）。
+- `ledger.row_sha256` 是台账该行 sha256：台账改了而 bundle 没重生成 ⇒ `--check` 判红。
+- 确定性：同输入两次生成逐字节相同（键排序、LF、无时间戳、无绝对路径）。
+
+### 5.3 生成与校验
+
+```
+python devtools/export_corpus_pr.py            # 生成 out/corpus-pr/<id>/
+python devtools/export_corpus_pr.py --check    # 只校验不写盘（CI / 提交前）
+python devtools/test_export_corpus_pr.py       # 定向回归（离线、无 Gradle）
+```
+### 5.4 提交清单（主人去上游提 PR 时照这个走）
+
+1. **钉上游**：以 eraTW 语料原作者发布页/仓库为准（本工具离线、不代填 URL，提交前由主人钉住仓库与目标分支）。
+2. **分支**：`eratw-corpus-fix/<id>`（一 id 一分支，便于单独 review / 单独拒收）。
+3. **commit**：`corpus(<id>): <summary 首句>`（导出器给在 `manifest.upstream.commit_subject`）；body 贴 README 的「病灶/证据/修法」+ manifest 的 sha256 三件套。
+4. **PR 描述**：一句病灶 + 复现链（玩家操作）+ 影响面（角色/衣装/存档）+ 修法二选一（§5.5）+ 「只改语料文本、不动引擎」。
+5. **维护者问询点**：
+   - `#DIM CONST MAXPANTS=34` 是笔误还是有意（对象号空间到 35）？
+   - 抬 `MAXPANTS` 会让旧存档 `PANTS_TEMP` 维度变长，可接受吗？
+   - 若不抬：「下半身内衣２」槽是否应拒收泳装对象（34/35）？
+   - 4.980/4.981 同形，是否已在更高版本修过（有则改判「已上游修复」并撤本仓补丁）。
+6. **回填**：上游合入后把台账处置改成「已上游修复（版本/commit）」并撤 `index.yaml` 条目（或降级 `skip-sha256`），保持三面一致。
+### 5.5 两类候选修法（本仓不预设，上游裁定）
+
+| 修法 | 改动面 | 风险 |
+|---|---|---|
+| 抬 `MAXPANTS`（34 → 对象号空间上限 36） | `ERB/DIM.ERH:221` 一行 | 旧存档 `PANTS_TEMP` 维度变化；所有 `FOR 0,MAXPANTS` 循环多跑 2 格（收藏/更衣菜单多出两条泳装胖次） |
+| 衣装套装拒收泳装对象 | `ERB/OBJ/CLASS/衣装セット.ERB` 的「下半身内衣２」槽 + `METH_衣装セット.ERB` 同形 | 泳装套装不再把泳装下装塞进胖次槽；需确认泳装系统「関連内衣」链仍自洽 |
+
+### 5.6 在册待出口条目
+
+- **CB-007**（已批修，主人 11-15 裁定取 §5.5 修法①）：`MAXPANTS=34` vs 胖次对象号 34/35 的泳装下装。可达链：`衣装セット.ERB:2984-2986`（泳装，`固有泳衣类型==1`）/ `:2909-2910`（泳裤装，值 34）→ `衣服/CLOTHES.ERB:1191-1192` 把套装值写进 `EQUIP:C_ID:下半身内衣２` → `衣服/PANTS.ERB:59-64` 退衣取 `種類 = EQUIP:ARG:下半身内衣２` → `:82 PANTS_TEMP:ARG:種類 += 1` 越界。`CSV/_Rename.csv:1459-1460`（261111；261017 为 `:1489-1490`）把 34/35 登记为泳裤/特有泳裤，证明对象号空间到 35 而 `PANTS_TEMP` 只开 0..33。
+- **CB-011 / CB-012**（已批修，主人 11-15 裁定「修复所有官方语料 bug（含魔理沙颜绘模糊 bug）」）：A11 `NEWGAME_UTILS.ERB:81` 的 `ASK_CHOICES` 恒真判据 / A13 魔理沙睡眠状态下照れ·吐息效果层错配。两条均为编译期文本补丁，不动引擎与资产表。
+- **CB-001 / CB-005 / CB-006 / CB-008 / CB-009 / CB-010**（已批修）：连同上面三条共 **9 条**，`python devtools/export_corpus_pr.py` 产出 `out/corpus-pr/CB-*`，`python devtools/export_corpus_pr.py --check` 校验三向一致；`out/` 按 `.gitignore` 不入库。

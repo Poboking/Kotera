@@ -70,12 +70,17 @@ class SweepTest {
         assertTrue("MINI_METHOD" in keys, keys.toString())
         // 事件函数 + erbcc 合成事件入口（·event-entry·）都不在列
         assertTrue("EVENTFIRST" !in keys, "事件函数被清扫：$keys")
-        // 必含字段齐全（契约：fn/key/status/line/pc/msg/steps/elapsedMs + 覆盖率三列）
+        // 必含字段齐全（契约：fn/key/status/line/pc/msg/steps/elapsedMs + 覆盖率三列 + file）
         val rec = recs.first { it["key"] == "MINI_CODEEE" }
-        for (f in listOf("fn", "key", "status", "line", "pc", "msg", "steps", "elapsedMs", "covered", "stmts", "coverPct")) {
+        for (f in listOf("fn", "key", "status", "line", "pc", "msg", "steps", "elapsedMs", "covered", "stmts", "coverPct", "file")) {
             assertTrue(rec.containsKey(f), "缺字段 $f：$rec")
         }
         assertEquals("CODEEE", rec["status"])
+        // file = 该函数自身 position 的文件（mini.erb），不是失败点另算的列
+        assertTrue((rec["file"] ?: "").endsWith("mini.erb"), "file 应指向 mini.erb：$rec")
+        // **行尾追加**：file 是每条记录最后一个键（旧字段名/顺序/值不动）
+        val rawLine = Files.readAllLines(jsonl, Charsets.UTF_8).first { "\"key\":\"MINI_CODEEE\"" in it }
+        assertTrue(rawLine.trimEnd().endsWith("\"file\":\"${rec["file"]}\"}"), "file 应追加在行尾：$rawLine")
 
         // 失败不中断批跑：MINI_CODEEE 之后的 MINI_METHOD 也有记录
         val method = recs.first { it["key"] == "MINI_METHOD" }
@@ -110,7 +115,14 @@ class SweepTest {
         val keysA = records(shardA.resolve("sweep.jsonl")).map { it["key"] }.toSet()
         val keysB = records(shardB.resolve("sweep.jsonl")).map { it["key"] }.toSet()
         assertTrue((keysA intersect keysB).isEmpty(), "分片相交：$keysA / $keysB")
-        assertEquals(keysA + keysB, setOf("MINI_PASS", "MINI_ARGS", "MINI_CODEEE", "MINI_METHOD", "MINI_INPUTLOOP"), "分片并集不符")
+        assertEquals(
+            keysA + keysB,
+            setOf(
+                "MINI_PASS", "MINI_ARGS", "MINI_CODEEE", "MINI_METHOD", "MINI_INPUTLOOP",
+                "MINI_TOTAL", "MINI_DB_INIT", "MINI_DB_MAX", "MINI_DB_MAX_CALL",
+            ),
+            "分片并集不符",
+        )
     }
 
     @Test
@@ -233,6 +245,34 @@ class SweepTest {
         val rec = recs.single { it["key"] == "MINI_INPUTLOOP" }
         assertEquals("WALL_LIMIT", rec["status"], "应折成 WALL_LIMIT 而非挂死：$rec")
         assertTrue((rec["elapsedMs"]?.toLongOrNull() ?: -1L) >= 200, "墙钟应真实生效：$rec")
+    }
+
+    @Test
+    fun sweepResumeReadsLegacyJsonlWithoutFileColumn() {
+        // R7 之前的 sweep.jsonl 没有 file 列：--resume 仍按 key 跳过（只认 key/status），
+        // 覆写时缺键补 `-`，绝不能因此把已跑过的函数重跑一遍。
+        val outDir = tmp.resolve("sweep-out-legacy")
+        Files.createDirectories(outDir)
+        val jsonl = outDir.resolve("sweep.jsonl")
+        Files.writeString(
+            jsonl,
+            Jsonl.obj(
+                listOf(
+                    "fn" to "MINI_PASS", "key" to "MINI_PASS", "status" to "PASS", "cls" to "-",
+                    "line" to -1, "pc" to -1, "msg" to "", "steps" to 1, "elapsedMs" to 1,
+                    "covered" to 2, "stmts" to 2, "coverPct" to "100.0",
+                ),
+            ) + "\n",
+            Charsets.UTF_8,
+        )
+        val (code, text) = run(*MiniCorpus.args(built, work, "sweep", "--out", outDir.toString(), "--only", "MINI_PASS", "--resume"))
+        assertEquals(0, code, text)
+        assertTrue("本次清扫 0" in text, "旧档终态应按 key 跳过：$text")
+        assertTrue("跳过 1 个" in text, text)
+        val recs = records(jsonl)
+        assertEquals(1, recs.size, "旧档记录被复用而非重跑：$recs")
+        assertEquals("PASS", recs[0]["status"], recs.toString())
+        assertEquals("-", recs[0]["file"], "旧档缺 file 键 ⇒ 覆写时补 -，不编造文件：$recs")
     }
 
     @Test

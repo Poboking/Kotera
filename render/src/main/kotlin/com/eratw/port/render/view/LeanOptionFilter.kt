@@ -1,10 +1,9 @@
 package com.eratw.port.render.view
 
 import com.eratw.port.core.host.ConsoleOption
-import com.eratw.port.core.host.paletteSwatchMask
 
 /**
- * 右侧选项栏的「更精简的游戏选项」过滤器：只保留**屏上自带编号**的常用指令。
+ * 「屏上自印编号的常用指令」判据：右栏过滤的「隐藏无编号按钮」规则与可置顶判据共用这一条。
  *
  * ## 为什么按「按钮自己印的编号」筛
  * 本作的常用指令都把编号印在按钮上，但**编号写在名字的哪一侧由各处代码自己定**，两种形态并存：
@@ -36,9 +35,9 @@ import com.eratw.port.core.host.paletteSwatchMask
  * - 空标签不匹配。
  *
  * ## 不碰原有识别
- * 这是**纯显示层**策略：只在开关打开时裁剪右侧栏要渲染的候选；可点性仍由引擎的
+ * 它只喂显示端：右栏要不要藏这枚、这枚能不能置顶；可点性仍由引擎的
  * 世代 + 等待类型决定（`LineBufferConsoleSink.currentOptions`），正文里的按钮命中
- * （[com.eratw.port.render.button.ButtonLayer]）也一个字节都不动。
+ * （[com.eratw.port.render.button.ButtonLayer]）一个字节都不动。
  */
 object LeanOptionFilter {
 
@@ -51,25 +50,11 @@ object LeanOptionFilter {
     private val TRAILING_TAG = Regex("""\S.*\[\s*\d+\s*\]\s*$""")
 
     /**
-     * 只保留屏上自带编号的常用指令，顺序与其余字段原样保留。
-     *
-     * 调色板不是「常用指令」，但它也不是普通无编号按钮：这里用 core 的
-     * [paletteSwatchMask] 只保住**连续 8 枚以上**的真实调色板色块，
-     * 单个彩色 `■` 仍按普通无编号按钮裁掉。
-     */
-    fun keepCommon(options: List<ConsoleOption>): List<ConsoleOption> {
-        val palette = paletteSwatchMask(options)
-        return options.filterIndexed { index, option ->
-            palette[index] || isCommonCommand(option)
-        }
-    }
-
-    /**
      * 单条候选判定：屏上自带编号（末尾形态看标签，开头形态看引擎那句 [ConsoleOption.printsOwnNumber]），
      * 且还有名字。
      *
-     * 调色板色块不在这里判：`■` 没有名字也没有编号，但真正调色板由 [keepCommon] 通过
-     * [paletteSwatchMask] 单独保留；本函数只回答「是不是常用指令」。
+     * 调色板色块不在这里判：`■` 没有名字也没有编号，是不是真调色板由 core 的
+     * `paletteSwatchMask` 在调用侧判；本函数只回答「是不是常用指令」。
      */
     fun isCommonCommand(option: ConsoleOption): Boolean =
         option.label.isNotBlank() && (hasTrailingNumberTag(option.label) || option.printsOwnNumber)

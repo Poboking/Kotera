@@ -335,6 +335,9 @@ class CompileBaseTest {
         override val totalCount: Int get() = items.size
         override val materializedCount: Int get() = items.size
         override fun statementAt(index: Int): Statement = items[index]
+        override fun scanStatementHeaders(visit: (codeName: String, line: Int) -> Unit) {
+            for (s in items) visit(s.code.name, s.line)
+        }
         override fun releaseRaws() = Unit
         override fun seedInterning(roots: List<Expr?>): ArgInterner.Stats = ArgInterner.Stats(0, 0, 0, 0, 0L)
         override fun buildFlatStatementsRange(from: Int, until: Int): FlatStatements =

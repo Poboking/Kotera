@@ -341,6 +341,40 @@ class DualPathParityTest {
         ),
     )
 
+    // 4.981 NF 族：两条通道都要在 InputRequest 上带 noFocus=true。
+    // DualPathInputSink 记的是 InputRequest.toString()（含全部字段），
+    // 一侧漏置位会直接让 a.input / b.input 不等价；绝对真值由
+    // UpstreamStatementsTest 的 TINPUTNF/TINPUTSNF 用例钉住。
+    @Test
+    fun `TINPUTNF 的 noFocus 两路一致`() = assertParity(
+        ParityCase(
+            "TINPUTNF",
+            target = instr(
+                FunctionCode.TINPUTNF,
+                SpTInputsArgument(iLit(1000), iLit(11), null, null, null, null),
+            ),
+            directRead = false,
+            configure = { ctx ->
+                (ctx.input as DualPathInputSink).outcome = InputOutcome(intValue = 5L, isTimeout = true)
+            },
+        ),
+    )
+
+    @Test
+    fun `TINPUTSNF 的 noFocus 两路一致`() = assertParity(
+        ParityCase(
+            "TINPUTSNF",
+            target = instr(
+                FunctionCode.TINPUTSNF,
+                SpTInputsArgument(iLit(1000), iLit(11), null, null, null, null),
+            ),
+            directRead = false,
+            configure = { ctx ->
+                (ctx.input as DualPathInputSink).outcome = InputOutcome(strValue = "typed", isTimeout = true)
+            },
+        ),
+    )
+
     // ---------------- 数组族 ----------------
 
     @Test

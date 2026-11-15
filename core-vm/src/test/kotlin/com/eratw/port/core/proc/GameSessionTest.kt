@@ -305,6 +305,29 @@ class GameSessionTest {
     }
 
     @Test
+    fun `装载期视图度量快照 - 在位取快照、缺省回落生效配置`(@TempDir dir: Path) {
+        // CONTRACT-RT2-CFG16 / SPEC-RULING 序 16：GameHost 单读后把 view metrics 传进会话，
+        // 两处共用同一份；不传（headless / 装置）则回落本会话 EffectiveConfig，逐位不变。
+        val f = fixture(printDataFirst = "PRINTL PLAIN")
+        val plain = GameSession(dir, f.program, f.metadata, consoleWidth = 199, randSeed = 1L)
+        try {
+            assertEquals(18, plain.scriptFontPixelSize, "缺省 = 生效配置字号（ConfigData.cs:66 出厂 18）")
+        } finally {
+            plain.close()
+        }
+        val snapshot = GameSession(
+            dir, f.program, f.metadata,
+            consoleWidth = 199, randSeed = 1L,
+            bootViewMetrics = BootViewMetrics(fontSize = 31, lineHeight = 47),
+        )
+        try {
+            assertEquals(31, snapshot.scriptFontPixelSize, "快照在位 ⇒ 字号取快照（与 View 排版同一份）")
+        } finally {
+            snapshot.close()
+        }
+    }
+
+    @Test
     fun `屏幕像素可注入而字号只认生效配置`(@TempDir dir: Path) {
         val f = fixture(printDataFirst = "PRINTL PLAIN")
         // 缺省（headless / PC 基准）：GFX-06 改造前后零行为差 ——

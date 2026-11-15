@@ -247,8 +247,25 @@ internal class ConsoleBridge(
         delegate?.publishProgressFrame()
     }
 
+    /**
+     * 忙碌指示器转发（[ConsoleSink.setBusyIndicator] 的缺省实现是 no-op）：
+     * 宿主写的是 `ctx.console`（= 本桥接器）时，漏转发就等于指示器永远不存在。
+     */
+    override fun setBusyIndicator(indicator: BusyIndicator?) {
+        delegate?.setBusyIndicator(indicator)
+    }
+
     override fun printHtml(text: String, option: Boolean) {
         delegate?.printHtml(text, option)
+    }
+
+    /**
+     * 定宽制表必须转发到宿主 sink：sem 的 `ctx.console` 是本桥接器，而预折判界要读
+     * 宿主的待决缓冲与可绘制宽度。走接口缺省实现会退化成普通追加，fork 的逐项预折
+     * 在真机整条失效（与 [noteInputWait] 的漏转发同一类错）。
+     */
+    override fun printHtmlC(text: String, columnCells: Int) {
+        delegate?.printHtmlC(text, columnCells)
     }
 
     override fun addHtmlIsland(text: String) {

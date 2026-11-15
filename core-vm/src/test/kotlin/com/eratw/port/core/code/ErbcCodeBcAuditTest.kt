@@ -55,7 +55,8 @@ class ErbcCodeBcAuditTest {
         // 202..243 自 T2-21 起是合法栈码组（池引用越界由 requireStackOpPool 另行拒载，
         // 见 StackOpcodeTest 的池校验用例），244 `_RETF`（4.981 浮点返回追加段）、
         // 245 `_CALL_STR`（WIRE-1/2 运行期字符串调用追加段）、246 `_EVAL_INT_JZ`
-        // （MODERN-T1 条件位融合追加段）；非法域从 `Opcode.MAX_OPCODE + 1` 开始。
+        // （MODERN-T1 条件位融合追加段）、247/248 `_LT_JZ/_GT_JZ`（PERF-LOOP 循环条件融合）；
+        // 非法域从 `Opcode.MAX_OPCODE + 1` 开始。
         for (op in listOf(Opcode.MAX_OPCODE + 1, 500, -1, Int.MIN_VALUE)) {
             val e = assertFailsWith<ErbcDecodeException>("op=$op 应被拒载") {
                 ErbcReader.decode(bytesWithOp0(op))
@@ -65,8 +66,8 @@ class ErbcCodeBcAuditTest {
                 "报错要点名操作码与真值，实际: ${e.message}",
             )
         }
-        // 合法上界 = Opcode.MAX_OPCODE（当前 246 `_EVAL_INT_JZ`，末条；`_CALL_STR`(245)、
-        // `_RETF`(244) 紧随其前）；各段首末条都要合法。
+        // 合法上界 = Opcode.MAX_OPCODE（当前 248 `_GT_JZ`，末条；`_LT_JZ`(247)、
+        // `_EVAL_INT_JZ`(246)、`_CALL_STR`(245)、`_RETF`(244) 紧随其前）；各段首末条都要合法。
         assertEquals(Opcode.MAX_OPCODE, ErbcFormat.OPCODE_MAX, "上界 = 操作码表末条")
         assertTrue(ErbcFormat.isValidOpcode(0))
         assertTrue(ErbcFormat.isValidOpcode(Opcode.MAX_STATEMENT_OPCODE))
@@ -76,6 +77,8 @@ class ErbcCodeBcAuditTest {
         assertTrue(ErbcFormat.isValidOpcode(Opcode._RETF), "浮点返回追加段 244 必须合法")
         assertTrue(ErbcFormat.isValidOpcode(Opcode._CALL_STR), "运行期字符串调用追加段 245 必须合法")
         assertTrue(ErbcFormat.isValidOpcode(Opcode._EVAL_INT_JZ), "条件位融合追加段 246 必须合法")
+        assertTrue(ErbcFormat.isValidOpcode(Opcode._LT_JZ), "循环条件融合 247 必须合法")
+        assertTrue(ErbcFormat.isValidOpcode(Opcode._GT_JZ), "循环条件融合 248 必须合法")
         assertTrue(!ErbcFormat.isValidOpcode(Opcode.MAX_OPCODE + 1))
         assertTrue(!ErbcFormat.isValidOpcode(-1))
     }

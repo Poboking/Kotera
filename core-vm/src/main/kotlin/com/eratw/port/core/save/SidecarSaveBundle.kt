@@ -32,6 +32,17 @@ import java.util.zip.CRC32
  * 读档必须先于实体图恢复（§16 第 6 点）。ABI-6 未冻结、无已发布存档 ⇒ **v1 直接拒载**，
  * 不做双版本读取面（同 [com.eratw.port.core.entity.EntityPayloadCodec] v1 的口径）。
  *
+ * **v2 增补尾段（W1-DSTATE，2026-11-14）**：分片之后新增**决策态段**与**任务态段**
+ * （各为 `i32 + bytes` 定长 blob；载荷 = `DecisionStateCodec` / `JobSchedulerStateCodec`
+ * 的 VERSION 2 输出，容器层不解释内容）。写入纪律：两段**要么都写、要么都不写**——
+ * 任一载荷非空才追加（决策段在前、任务段在后），两段全空 = 与增补前逐字节同形
+ * （global.rt2 与既有回归的字节不变性由这条保证）。读取纪律：分片读完后**有剩余字节
+ * 才读尾段**，剩余字节不足两段 / 容量越界 / 读完后仍有剩余 = 容器损坏当场拒
+ * （[SidecarFormatException]，既有 fail-closed 口径）。**旧档（增补前写入）无尾段 ⇒
+ * 两段取空缺省回落，不拒载**——决策态回落「未初始化 seed（宿主熵派生）+ 无动态实例」、
+ * 任务态回落「无实例」（CONTRACT-RT2-DSTATE 判据 1）；FORMAT_VERSION 维持 2 不 bump，
+ * v1 直接拒载的既有纪律不变。CRC32 覆盖含尾段在内的全部字节（尾部校验和照旧）。
+ *
  * **孤儿分片透传**：未激活 Mod 的分片在解码后原样保留、存盘时原样回写——
  * 容器层不解释分片内容，激活与否由 SaveService 判定。
  *
@@ -43,7 +54,15 @@ import java.util.zip.CRC32
 /** 容器损坏 / 版本不符 / 容量越界 / CRC 失败。文案由宿主侧包成三语存档错误。 */
 class SidecarFormatException(message: String) : RuntimeException(message)
 
-/** 绑定三元组：.rt2 与 .sav 的同一性凭据，读取时逐字段校验。 */
+/**
+ * 绑定三元组：.rt2 与 .sav 的同一性凭据，读取时逐字段校验。
+ *
+ * 第三位 `saveTextHash` 的生产语义 = .sav 容器全字节 CRC32（槽档与 global 档同构）。
+ * era-arch §8:221 的字面命名从未定义哈希对象；按绑定目的（兼容性矩阵「PC 往返 ⇒ 检测
+ * 配对漂移 → 警告扩展状态滞后」），CRC32-of-bytes 是文本哈希的**严格加强**而非等价替换。
+ * 裁定全文与语义钉子见 `FileSystemOps.savBytesHash` KDoc 与 `SidecarPairSaveTest`
+ * 「绑定第三位内容敏感 / 存读同源」（TODO(verify) 2026-11-13 闭环）。
+ */
 data class SidecarBinding(
     val uniqueCode: Long,
     val scriptVersion: Long,
@@ -52,6 +71,24 @@ data class SidecarBinding(
 
 /** 按 Package 分片的载荷（孤儿片原样透传，容器层不解释内容）。 */
 class PackageChunk(val packageId: String, val payload: ByteArray)
+
+/**
+ * `.rt2` 容器的 W1-DSTATE 状态尾段（决策态 + 任务态，两段同进退；见 [SidecarSaveBundle]
+ * 类 KDoc v2 增补节）。做成单参载体是 detekt LongParameterList 的源头修法（构造器保持
+ * 六参以内），语义与两个独立 blob 参数完全等价。
+ */
+class SidecarStateSegments(
+    /** 决策态段：`DecisionStateCodec` VERSION 2 输出原样字节；空 = 旧档无段（回落，不拒载）。 */
+    val decisionState: ByteArray,
+    /** 任务态段：`JobSchedulerStateCodec` VERSION 2 输出原样字节（会话并集快照）；空 = 旧档无段。 */
+    val jobState: ByteArray,
+) {
+
+    companion object {
+        /** 旧档同形：两段全空 = 增补前逐字节形状（encode 都不写，见 SidecarSaveBundle.encode）。 */
+        val EMPTY = SidecarStateSegments(ByteArray(0), ByteArray(0))
+    }
+}
 
 /** 一个 .rt2 的逻辑内容（编解码均为纯函数，无文件 IO）。 */
 class SidecarSaveBundle(
@@ -67,7 +104,18 @@ class SidecarSaveBundle(
      * 注册表之后、实体图之前（见类 KDoc）。
      */
     val virtualNoSnapshot: ByteArray = ByteArray(0),
+    /**
+     * W1-DSTATE 状态尾段（判据 1）：决策态段 + 任务态段，字节布局排在分片之后、CRC 之前，
+     * 两段**要么都写要么都不写**（见类 KDoc v2 增补节与 [SidecarStateSegments]）。
+     * 缺省 [SidecarStateSegments.EMPTY] = 增补前的旧档形状，既有构造点零改动。
+     */
+    val stateSegments: SidecarStateSegments = SidecarStateSegments.EMPTY,
 ) {
+    /** 决策态段原样字节（观察面；空 = 旧档无段，读取侧回落「未初始化 seed + 无动态实例」）。 */
+    val decisionStatePayload: ByteArray get() = stateSegments.decisionState
+
+    /** 任务态段原样字节（观察面；空 = 旧档无段，读取侧回落「无实例」）。 */
+    val jobStatePayload: ByteArray get() = stateSegments.jobState
     /** 读取侧绑定校验：三元组全等才允许应用本 sidecar。 */
     fun matchesBinding(other: SidecarBinding): Boolean = binding == other
 
@@ -88,6 +136,14 @@ class SidecarSaveBundle(
                 "分片 [${chunk.packageId}] 载荷超容量: ${chunk.payload.size}"
             }
         }
+        require(stateSegments.decisionState.size <= MAX_DECISION_STATE_BYTES) {
+            "决策态段超容量: ${stateSegments.decisionState.size}"
+        }
+        require(stateSegments.jobState.size <= MAX_JOB_STATE_BYTES) {
+            "任务态段超容量: ${stateSegments.jobState.size}"
+        }
+        val writeStateSegments =
+            stateSegments.decisionState.isNotEmpty() || stateSegments.jobState.isNotEmpty()
         val buf = ByteArrayOutputStream()
         val out = DataOutputStream(buf)
         out.writeInt(MAGIC)
@@ -102,12 +158,10 @@ class SidecarSaveBundle(
         out.writeInt(entityGraphPayload.size)
         out.write(entityGraphPayload)
         out.writeInt(chunks.size)
-        for (chunk in chunks) {
-            val nameBytes = chunk.packageId.toByteArray(Charsets.UTF_8)
-            out.writeInt(nameBytes.size)
-            out.write(nameBytes)
-            out.writeInt(chunk.payload.size)
-            out.write(chunk.payload)
+        writeChunks(out)
+        // v2 增补尾段：要么都写（决策段在前、任务段在后），要么都不写（旧档同形）。
+        if (writeStateSegments) {
+            writeStateSegments(out)
         }
         out.flush()
         val body = buf.toByteArray()
@@ -117,6 +171,25 @@ class SidecarSaveBundle(
         withTrailer.write(body)
         DataOutputStream(withTrailer).writeInt(crc.value.toInt())
         return withTrailer.toByteArray()
+    }
+
+    /** 分片序列化（encode 的主体拆出；字节序 = 名长 + UTF-8 名 + 载荷长 + 载荷，逐片）。 */
+    private fun writeChunks(out: DataOutputStream) {
+        for (chunk in chunks) {
+            val nameBytes = chunk.packageId.toByteArray(Charsets.UTF_8)
+            out.writeInt(nameBytes.size)
+            out.write(nameBytes)
+            out.writeInt(chunk.payload.size)
+            out.write(chunk.payload)
+        }
+    }
+
+    /** 状态尾段序列化（决策段在前、任务段在后；是否写出由 encode 的「都写或都不写」闸决定）。 */
+    private fun writeStateSegments(out: DataOutputStream) {
+        out.writeInt(stateSegments.decisionState.size)
+        out.write(stateSegments.decisionState)
+        out.writeInt(stateSegments.jobState.size)
+        out.write(stateSegments.jobState)
     }
 
     companion object {
@@ -133,6 +206,12 @@ class SidecarSaveBundle(
 
         /** 虚拟 NO 注册表段上界（2^20 条 × 12 字节 ≈ 12 MiB；取 16 MiB 与条目闸对齐）。 */
         const val MAX_VIRTUAL_NO_BYTES: Int = 16 * 1024 * 1024
+
+        /** 决策态段上界（与虚拟 NO 注册表段同档取 16 MiB；codec 内另有 2^20 条目闸）。 */
+        const val MAX_DECISION_STATE_BYTES: Int = 16 * 1024 * 1024
+
+        /** 任务态段上界（同档取 16 MiB；codec 内另有 2^20 条目闸）。 */
+        const val MAX_JOB_STATE_BYTES: Int = 16 * 1024 * 1024
 
         /** 分片数上界。 */
         const val MAX_CHUNKS: Int = 4096
@@ -187,8 +266,16 @@ class SidecarSaveBundle(
                 if (name.isEmpty()) fail("空分片名")
                 chunks.add(PackageChunk(name, readBlob(MAX_CHUNK_BYTES, "分片 [$name]")))
             }
-            if (input.available() != 0) fail("尾部多余字节")
-            return SidecarSaveBundle(binding, registry, graph, chunks, virtualNo)
+            // v2 增补尾段：分片后有剩余字节才读（旧档无段 = 空缺省回落，不拒载）；
+            // 有剩余但读不满两段 / 读完后仍有剩余 = 容器损坏，既有 fail-closed 口径。
+            var segments = SidecarStateSegments.EMPTY
+            if (input.available() > 0) {
+                val decision = readBlob(MAX_DECISION_STATE_BYTES, "决策态段")
+                val jobState = readBlob(MAX_JOB_STATE_BYTES, "任务态段")
+                if (input.available() != 0) fail("尾部多余字节")
+                segments = SidecarStateSegments(decision, jobState)
+            }
+            return SidecarSaveBundle(binding, registry, graph, chunks, virtualNo, segments)
         }
     }
 }

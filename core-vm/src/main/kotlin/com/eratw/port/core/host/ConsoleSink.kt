@@ -297,6 +297,22 @@ interface ConsoleSink {
     fun publishProgressFrame() {}
 
     /**
+     * 长页忙碌指示器（纯显示态）：宿主在页中检查点写入「本页已跑多久」，页交付/进入
+     * 输入等待时写 null 清掉。缺省 **no-op** —— headless / golden / 装置不接线时逐字节
+     * 零行为变化。
+     *
+     * **不进任何缓冲**：实现方只许存一个不可变读数（见 [BusyIndicator]），不许打印行、
+     * 不许改 [LineBufferConsoleSink.revision]、`frameSnapshot()`、`publishedOptions()`。
+     * 这是渲染层「游戏自己在祈祷」横带的唯一数据源；语义面零参与。
+     *
+     * 委托型宿主（[ConsoleBridge]）必须转发：接口缺省是 no-op，漏转发时生产永远看不到指示器
+     * （与 [publishProgressFrame] 同一类事故）。
+     *
+     * 线程：VM 线程写（宿主检查点），UI 线程读（每帧绘制）。
+     */
+    fun setBusyIndicator(indicator: BusyIndicator?) {}
+
+    /**
      * 整组样式复位 —— 原版 `EmueraConsole.ResetStyle()`（spec: EmueraConsole.cs:2838-2842）：
      * `userStyle = defaultStyle` + `alignment = DisplayLineAlignment.LEFT`，两条语句级动作
      * 一次性完成。调用点共四处：BEGIN（FunctionIdentifier.cs:2930-2936，方法体第 3 句 :2935）、
@@ -387,6 +403,24 @@ interface ConsoleSink {
 
     /** HTML 片段渲染（HTML_PRINT；option=附加渲染选项）。spec: EmueraConsole.PrintHtml */
     fun printHtml(text: String, option: Boolean)
+
+    /**
+     * HTML 定宽制表追加（HTML_PRINTC / HTML_PRINTLC）。spec: fork-src EmueraConsole.Print.cs:521-574。
+     *
+     * 与 [printHtml] 的差别只有一处：fork 在写每一项**之前**先判
+     * `currentPx > 0 && currentPx + cellWidthPx > DrawableWidth`，命中就把当前缓冲行
+     * 整行 Flush 落表，再写这一项（:529-539）。因此指令网格的每一显示行各自是一个
+     * **逻辑行**：`LINECOUNT` 按行计、`CLEARLINE 1` 只摘一行、按钮对象分批入表。
+     * 端口此前把整张网格攒在 pending 里直到 PRINTL 才一次落表，整张网格塌成
+     * 1 个逻辑行 + N 个折行续排 —— 任何一次按逻辑行删行都会把整批按钮一起抹掉。
+     *
+     * [columnCells] 是单元格宽（半角格，等于 Config.PrintCLength）；<= 0 或宿主
+     * 未接管折行时实现可退化为普通追加。缺省实现直接转 [printHtml]，让诊断型宿主
+     * 与既有测试假 sink 零改动。
+     */
+    fun printHtmlC(text: String, columnCells: Int) {
+        printHtml(text, true)
+    }
 
     /** HTML 浮岛（HTML_PRINT_ISLAND / HTML_PRINT_ISLAND_CLEAR）。spec: EmueraConsole.PrintHTMLIsland */
     fun addHtmlIsland(text: String)

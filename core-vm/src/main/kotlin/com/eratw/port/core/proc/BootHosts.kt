@@ -1,6 +1,8 @@
 package com.eratw.port.core.proc
 
+import com.eratw.port.core.config.ConfigChainLayer
 import com.eratw.port.core.config.ConfigChainLoad
+import com.eratw.port.core.config.ConfigChainRole
 import com.eratw.port.core.config.ConfigChainSource
 import com.eratw.port.core.config.ConfigDebugLoad
 import com.eratw.port.core.config.ConfigFile
@@ -8,7 +10,11 @@ import com.eratw.port.core.config.ConfigKey
 import com.eratw.port.core.config.ConfigLayerPresence
 import com.eratw.port.core.config.ConfigReplaceLoad
 import com.eratw.port.core.config.ConfigStore
+import com.eratw.port.core.config.CSV_DIR_NAME
+import com.eratw.port.core.config.DEFAULT_CONFIG_CANDIDATES
+import com.eratw.port.core.config.EMUERA_CONFIG_CANDIDATES
 import com.eratw.port.core.config.EmueraConfigParser
+import com.eratw.port.core.config.FIXED_CONFIG_CANDIDATES
 import com.eratw.port.core.fn.BuiltinHost
 import com.eratw.port.core.fn.ConfigMethods
 import com.eratw.port.core.fn.DirectoryProbeFileOps
@@ -20,6 +26,7 @@ import com.eratw.port.core.host.FileOps
 import com.eratw.port.core.host.GlyphMaskHost
 import com.eratw.port.core.host.GlyphMaskHostProvider
 import com.eratw.port.core.save.SaveDataProbe
+import com.eratw.port.core.sql.SqlDriver
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.charset.Charset
@@ -294,6 +301,42 @@ private fun lenientDecode(bytes: ByteArray, offset: Int, charset: Charset): Stri
     String(bytes, offset, bytes.size - offset, charset)
 
 /**
+ * `RootedBuiltinHost` 的**开局单次读盘快照**（`CONTRACT-RT2-CFG16C`）。
+ *
+ * ## 为什么存在
+ *
+ * 原版配置是**进程级单实例**（`Program.cs:95` 一次 `LoadConfig` + `ConfigData.cs:494`
+ * `SetConfig` 写同一实例）：控制台字体/日志行数、`GETCONFIG` 的条目表、`MONEYSTR` 的货币
+ * 标签、存档目录探测的 `UseSaveFolder` 读的都是那一份。移植侧按铁律 4 每 VM 一份条目表，
+ * 于是宿主装配曾出现第三次读盘：A/L7 + L9B 已让 View 度量与会话配置段共用 `GameHost` 的
+ * 一次读取，但 `RootedBuiltinHost` 构造器内部仍会自行 `loadChainFromDisk` + `_Replace.csv`
+ * —— 两次读之间文件被改写，就会让 `fileOps` 一族的读数（`configOverrides` / `moneyLabel` /
+ * `useSaveFolder`）与 View/会话不同源。
+ *
+ * ## 形状与用法
+ *
+ * 两个字段必须来自**同一次读盘**（生产 = `GameHost.applyBootFontMetrics` 里那一次）：
+ * - [store]：链后 [ConfigStore]（`applyChainTo` 已重放三层链 + `_Replace.csv`，`WindowX`
+ *   已由宿主按 View 实测版面宽回填）；
+ * - [rawEntries]：原始条目表（键 = 条目标签大写英文形，值 = 文件原文 `Trim` 后；
+ *   与 `RootedBuiltinHost.configOverrides` 同形）。
+ *
+ * 传给 [RootedBuiltinHost] 后，该宿主的构造器**不再读盘**：`configChain` 是从 [store]
+ * 派生的只读视图、`configOverrides` 直接取 [rawEntries]、`moneyLabel` / `useSaveFolder`
+ * 读 [store]、`applyChainTo`（`ConfigMethods.storeFromHost` 的优先通道）把 [store] 的
+ * 条目原样复制过去，而不是重放文件。缺省 null（headless / 装置 / 既有测试）时宿主维持
+ * 各成员自读的旧路径，逐位不变。
+ *
+ * @property rawEntries `BuiltinHost.configOverrides` 的形状（键 = `ConfigSpec.upperEnLabel`）
+ * @property store 链后条目表；与 `GameSession.configStore` / `BootViewMetrics.configStore`
+ *   可以是同一实例（同一份数据，不复制）
+ */
+data class RootedConfigSnapshot(
+    val rawEntries: Map<String, String>,
+    val store: ConfigStore,
+)
+
+/**
  * headless 开局的最小 [BuiltinHost]：文件 IO + 时钟 + 存档槽探测 + 音频目录 + **三层配置链**。
  *
  * 只补「没有它就连第一屏都过不去」的能力，其余一律走接口默认值：
@@ -306,7 +349,8 @@ private fun lenientDecode(bytes: ByteArray, offset: Int, charset: Charset): Stri
  *   （`BuiltinHost.clockMillis`）；
  * - [readFileBytes]：二进制读，`SAVECHARA`/`LOADCHARA` 的通道；
  * - [configOverrides] / [configChain] / [configReplace] / [applyChainTo]：开局一次读盘的
- *   三层配置链加 `_Replace.csv`（见下面几个成员各自的逐条口径）。
+ *   三层配置链加 `_Replace.csv`（见下面几个成员各自的逐条口径）。传入 [RootedConfigSnapshot]
+ *   时改由快照供数，本类**一次盘都不读**（`CONTRACT-RT2-CFG16C`）。
  *
  * 其余项（字体表、控制台行、输入、音频后端）**故意留空**：BOOT-2 不猜。
  *
@@ -323,12 +367,25 @@ private fun lenientDecode(bytes: ByteArray, offset: Int, charset: Charset): Stri
  *   的 `RootedBuiltinHost(root) { … }`）靠**尾随 lambda 绑定最后一个参数**注入时钟，
  *   新参若排在末尾会抢走该槽位（lambda 类型对不上 `GlyphMaskHost?` 直接编译失败）。
  *   clock 保持末位后该用法原样可编译，本参一律按命名实参传入。
+ * @param configSnapshot 开局**单次读盘**的配置快照（[RootedConfigSnapshot]，生产 =
+ *   `GameHost.applyBootFontMetrics` 那一次读取）。非 null ⇒ [configChain] / [configDebug] /
+ *   [configReplace] / [configOverrides] / [applyChainTo] 全部从快照供数，构造器**不再读盘**；
+ *   null（缺省 / headless / 装置 / 既有测试）= 原路自读，逐位不变。位次同样在 [clock] 之前
+ *   （理由见 [glyphMaskHost]）。
+ * @param sqlDriver SQLite 驱动注入位（`CONTRACT-SQLITE-MIGRATION` §1/§4）。null（缺省）=
+ *   宿主未接线 ⇒ `SQL_*` 按契约抛 CodeEE，禁止静默建内存库；生产由 [GameSession] 的
+ *   `sqlDriver` 参数喂入，Android 侧 bundled 驱动与桌面 JVM 驱动共用同一端口。
+ *   位次在 [clock] 之前：clock 保持末位，既有 `RootedBuiltinHost(root) { … }` 的**尾随 lambda**
+ *   仍绑定时钟（理由同 [glyphMaskHost]）。
  */
+@Suppress("LongParameterList")
 class RootedBuiltinHost(
     root: Path,
     private val analysisMode: Boolean = false,
     private val debugMode: Boolean = false,
     glyphMaskHost: GlyphMaskHost? = null,
+    private val configSnapshot: RootedConfigSnapshot? = null,
+    override val sqlDriver: SqlDriver? = null,
     private val clock: () -> Long = { System.currentTimeMillis() },
 ) : BuiltinHost, ConfigChainSource, GlyphMaskHostProvider {
 
@@ -359,9 +416,14 @@ class RootedBuiltinHost(
      * default 的 17 个键与 fixed 的 8 个键都被 `emuera.config` 的 96 个键覆盖且值一致，
      * 所以**链合并后的值读数与单层完全相同**，差别只有 `fixed` 层的钉位
      * （判据与逐条清单见 `ConfigChainWireTest` 的语料用例与交付报告）。
+     *
+     * `CONTRACT-RT2-CFG16C`：传入 [configSnapshot] 时本属性改为从快照派生的只读视图
+     * （[snapshotChainOf]）—— 条目表 = 快照 store（同一实例），三层读数如实报
+     * [ConfigLayerPresence.ABSENT]（本宿主实例没有读盘，不冒充别人的读数）。
      */
     override val configChain: ConfigChainLoad =
-        EmueraConfigParser.loadChainFromDisk(base, ConfigStore(), analysisMode = analysisMode)
+        configSnapshot?.let { snapshotChainOf(base, it.store, analysisMode) }
+            ?: EmueraConfigParser.loadChainFromDisk(base, ConfigStore(), analysisMode = analysisMode)
 
     /**
      * `-debug` 时才有的 `debug.config` 层（spec: `Program.cs:142-144`、
@@ -377,9 +439,18 @@ class RootedBuiltinHost(
      * 语料实测：**没有** `debug/` 目录（根下只有 `DEBUG_MODE.bat` 与
      * `Debug Mode (拖曳启动).bat` 两支 `-debug` 启动脚本），故真语料上恒为
      * [ConfigLayerPresence.ABSENT]，`DEBUG` 七条保持注册默认。
+     *
+     * [configSnapshot] 在位时恒 null：快照是**一次读盘**的产物，调试层若在原读取时
+     * 在位则已并入快照 store；本宿主不再去开 `debug.config`（不构成第二次读盘）。
      */
     override val configDebug: ConfigDebugLoad? =
-        if (debugMode) EmueraConfigParser.loadDebugFromDisk(base, ConfigStore()) else null
+        if (configSnapshot != null) {
+            null
+        } else if (debugMode) {
+            EmueraConfigParser.loadDebugFromDisk(base, ConfigStore())
+        } else {
+            null
+        }
 
     /**
      * `_Replace.csv` 层（spec: `Process.cs:240-270` → `ConfigData.cs:594-639`）——
@@ -400,9 +471,13 @@ class RootedBuiltinHost(
      * 这里让宿主侧的条目快照先带上 Replace 值，[configOverrides] 与 [applyChainTo]
      * 再分别从同一份记录摊平 / 重放，消费者不会看到两套读数。
      *
+     * [configSnapshot] 在位时恒 null：_Replace 的值已并入快照 store（生产读取时由
+     * `configReplace` 就地写入链 store），本宿主不再开 `_Replace.csv`。
+     *
      * @see EmueraConfigParser.loadReplaceFromDisk
      */
-    val configReplace: ConfigReplaceLoad? = loadReplaceFor(base, configChain, analysisMode)
+    val configReplace: ConfigReplaceLoad? =
+        if (configSnapshot != null) null else loadReplaceFor(base, configChain, analysisMode)
 
     /**
      * 宿主级配置覆盖表 = **三层链 + `_Replace.csv` 合并后的值快照**（层序即优先级，
@@ -437,8 +512,13 @@ class RootedBuiltinHost(
      * （spec: `ConfigData.cs:625-635`），且它写不到 GAME 组任何条目。
      * TODO(verify)：若后续要对齐原版前缀语义，只改 [mergedOverrideMap] 里的中止守卫；
      * [applyChainTo] 那条通道已经是原版口径（逐层独立中止，互不牵连）。
+     *
+     * `CONTRACT-RT2-CFG16C`：[configSnapshot] 在位时直接取快照的原始条目表（同一次读盘的
+     * 另一半），不重摊平、不再读盘 —— 消费这张表的函数层（码页 / Compati / 扩展名白名单 /
+     * `SystemSaveInBinary`）与快照 store 不可能分叉。
      */
-    override val configOverrides: Map<String, String> = mergedOverrideMap(configChain, configReplace)
+    override val configOverrides: Map<String, String> =
+        configSnapshot?.rawEntries ?: mergedOverrideMap(configChain, configReplace)
 
     /**
      * 存档目录开关的**交出面**：`UseSaveFolder` 条目现值（注册默认 false，spec: `ConfigData.cs:97`；
@@ -483,8 +563,22 @@ class RootedBuiltinHost(
      * 再写（spec: `ConfigItem.cs:147-158`），同一批行重放多次结果一致；链层同理由
      * （每层都是「写值」而不是「追加」）。正常路径每个 VM 只调一次（见
      * `ConfigMethods.storeFromHost`：先新建 [ConfigStore] 再重放）。
+     *
+     * `CONTRACT-RT2-CFG16C`：传入 [configSnapshot] 时**不重放任何文件层** —— 开销为零次读盘、
+     * 零次重解析，改为把快照 store 的条目逐项复制到调用方的表（`ConfigItem.copyTo`，
+     * 值 + `Fixed` 钉位一起带过去，spec: `ConfigData.cs` 的 `Copy` 同形）。因此
+     * `ConfigMethods.storeFromHost` 的优先通道与 [configOverrides] / [moneyLabel] 读到的是
+     * 同一份数据；快照里没写到过的条目给出快照的注册默认（也就是原版单实例的那份终值），
+     * 而不是本宿主运行态种子值 —— 生产上两者同源（种子也取自同一次读取）。
      */
     override fun applyChainTo(store: ConfigStore): ConfigChainLoad {
+        val snapshot = configSnapshot
+        if (snapshot != null) {
+            for (item in snapshot.store.items) {
+                store.item(item.spec.key)?.let { target -> item.copyTo(target) }
+            }
+            return configChain
+        }
         EmueraConfigParser.replayChainOn(configChain, store, analysisMode)
         configDebug?.let { EmueraConfigParser.replayDebugOn(it, store) }
         configReplace?.let { EmueraConfigParser.replayReplaceOn(it, store) }
@@ -561,6 +655,34 @@ private fun loadReplaceFor(base: Path, load: ConfigChainLoad, analysisMode: Bool
 private fun mergedOverrideMap(load: ConfigChainLoad, replace: ConfigReplaceLoad? = null): Map<String, String> {
     if (load.results.any { it.abortedAtLine != null }) return emptyMap() // 本波合同：整表空，不抛
     return EmueraConfigParser.toOverrideMap(load, replace)
+}
+
+/**
+ * 快照 store → [ConfigChainLoad] 的**只读视图**（`CONTRACT-RT2-CFG16C`）。
+ *
+ * 为什么必须伪造一个链对象：`RootedBuiltinHost.configChain` 是公开读数（`ConfigChainWireTest` /
+ * `HostContractAuditTest` 直接读层定位与钉位），类型不能改成 nullable。快照路径下本宿主**没有**
+ * 读盘，所以三层如实报 [ConfigLayerPresence.ABSENT]、`results` 空表（无逐行记录、无告警）——
+ * 不把别人的读取冒充成自己的；`store` 就是快照那一份（同一实例，`fixedKeys` 之类读数照常
+ * 从条目表派生），`csvDir` 走字面目录名（不 stat 磁盘，避免这次「不读盘」又夹带一次目录探测）。
+ */
+private fun snapshotChainOf(base: Path, store: ConfigStore, analysisMode: Boolean): ConfigChainLoad {
+    val csv = base.resolve(CSV_DIR_NAME)
+    val layers = listOf(
+        ConfigChainLayer(
+            ConfigChainRole.DEFAULT, csv, DEFAULT_CONFIG_CANDIDATES,
+            ConfigLayerPresence.ABSENT, file = null, resolvedPath = null,
+        ),
+        ConfigChainLayer(
+            ConfigChainRole.EMUERA, base, EMUERA_CONFIG_CANDIDATES,
+            ConfigLayerPresence.ABSENT, file = null, resolvedPath = null,
+        ),
+        ConfigChainLayer(
+            ConfigChainRole.FIXED, csv, FIXED_CONFIG_CANDIDATES,
+            ConfigLayerPresence.ABSENT, file = null, resolvedPath = null,
+        ),
+    )
+    return ConfigChainLoad(store, layers, emptyList(), csv, analysisMode)
 }
 
 /**

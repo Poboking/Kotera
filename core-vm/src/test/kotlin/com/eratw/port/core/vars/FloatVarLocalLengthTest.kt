@@ -18,16 +18,11 @@ import kotlin.test.assertFailsWith
  * - `size` 从哪来：`VariableData.cs:376-379`（`new VariableLocal(ARGF, VariableFloatArrayLength[1], …)`），
  *   出厂 10 见 `ConstantData.cs:211-217`、可被 CSV 改写见 `:532-533`。
  *
- * ⚠ **两处与 fork 不同口径**（本路按 g1 契约取 max，逐条实测取证；改动会牵动 g1 已验收的
- * `FloatDeclFaceTest` ⇒ 留给组长裁决，详见交付报告）：
- * 1. fork 的 ARGF 只读 `ArgFloatLength`（`VariableLocal.cs:48-49`），`#LOCALFSIZE`
- *    记在 `LocalFloatLength` 上（`LogicalLineParser.cs:257-266`），**不互相抬界**；
- *    本式把 `floatLocal` 也并进了 ARGF 的上界；
- * 2. fork 对**非事件函数**的 LOCALF 不做下界钳制（钳制名单里没有 LOCALF），
- *    只有事件函数在分组时抬到档位（`LabelDictionary.cs:155-173` / `:226-253`）；
- *    本式对 LOCALF 一律取 max。
- *    对照：本仓整数侧 `resolveLocalSize` 已是 fork 口径（`ARG/ARGS` 取 max、
- *    `LOCAL/LOCALS` 声明优先可缩）——见下面那条同名对照用例。
+ * ✅ 两处口径差已按组长裁决（2026-11-14，CONTRACT-RT2-M32A 判据 2）**严格照抄**落地：
+ * 1. ARGF 只读 `ArgFloatLength`，`#LOCALFSIZE` 不抬 ARGF（`FloatDeclFaceTest`/
+ *    `FloatVarLocalLengthTest` 受影响断言已逐例刷新）；
+ * 2. 非事件函数的 LOCALF 不做下界钳制（声明可缩），档位下限只由事件组聚合抬
+ *    （`ProcessRuntime.init` 聚合段，本仓 `resolveLocalSize` 整数侧同口径早已落地）。
  *
  * 浮点侧无 1.824 对拍（1.824 没有浮点变量）⇒ 逐条 TODO(verify)；
  * 每个用例都带一条 1.824 侧的 int/str 对照，钉住非浮点面未变。
@@ -59,25 +54,40 @@ class FloatVarLocalLengthTest {
     // ------------------------------------------------------------------
 
     /**
-     * `floatArgFromParams`：形参表里 ARGF 的个数（与整数侧 erbcc 的「按个数分桶」同口径，
-     * spec: erbcc `CorpusCompile.kt:641-642`）。
+     * `declaredLength`：形参表里 ARGF 的声明长 = `max(下标 + 1)`（fork `ErbLoader.cs:709-710` 的
+     * `maxArgF`；初值 -1 ⇒ 无 ARGF 形参时为 0）。
      *
-     * TODO(verify)：fork 用的是 `max(下标 + 1)`（`ErbLoader.cs:709-710`），移植侧的
-     * `FuncLabelStmt.paramNames` 已剥掉下标 ⇒ 跳号形参（`@F(ARGF, ARGF:5)`）本层数成 2、
-     * 原版算 6；4.981 语料实测 0 处 ARGF 形参，无对拍样本。
+     * 形参表用 `paramRefs`（`:n` 原文），跳号形参 `ARGF:5` 与稠密的 `ARGF` 计数不同 ——
+     * 整数侧同一函数（`ARG` / `ARGS`）也由它算，见 `SparseArgLengthTest`。
      */
     @Test
     fun `形参表数出ARGF声明长`() {
-        fun f(names: List<String>) = VariableStore.LocalLengths.floatArgFromParams(names)
+        fun f(names: List<String>) = VariableStore.LocalLengths.declaredLength(names, "ARGF", 0)
         assertEquals(0, f(emptyList()), "无形参（含 .erbc v1 不带形参名表）⇒ 0，与改造前恒 0 同值")
         assertEquals(0, f(listOf("ARG")), "纯整型形参不算 ARGF")
         assertEquals(1, f(listOf("ARG", "ARGF")), "一条 ARGF ⇒ 1")
-        assertEquals(2, f(listOf("ARGF", "ARGF")), "两条 ⇒ 2")
+        assertEquals(1, f(listOf("ARGF", "ARGF")), "重复形参不抬高（原版 max(下标+1)，同一下标只算一次）")
         assertEquals(1, f(listOf("ARGF", "ARG", "ARGS")), "ARG/ARGS 不误计")
         assertEquals(1, f(listOf("argf")), "大小写不敏感（原版 Config.cs:33 OrdinalIgnoreCase）")
         assertEquals(1, f(listOf("ARGF$")), "变长尾标记仍算一条 ARGF")
         assertEquals(0, f(listOf("ARGS", "ARGS$")), "ARGS 与 ARGF 不同名")
         assertEquals(0, f(listOf("A", "B$", "RESULT")), "普通私有形参一律不算")
+        assertEquals(6, f(listOf("ARGF:5")), "跳号形参按 max(下标 + 1)（fork ErbLoader.cs:709-710）")
+        assertEquals(6, f(listOf("ARGF", "ARGF:5")), "下界不封顶下标")
+    }
+
+    /** 整数侧同一口径：`ARG` / `ARGS` 的声明长也为 `max(下标 + 1)`，[count] 只是个下界。 */
+    @Test
+    fun `形参表数出整数声明长`() {
+        fun arg(names: List<String>, count: Int = 0) =
+            VariableStore.LocalLengths.declaredLength(names, "ARG", count)
+        assertEquals(4, arg(listOf("ARG", "ARG:3")), "稀疏形参：个数 2、下标上界 4")
+        assertEquals(0, arg(emptyList()), "无段 8 且没有元数据个数 ⇒ 0（旧口径同值）")
+        assertEquals(2, arg(emptyList(), count = 2), "无段 8 ⇒ 回落元数据个数")
+        assertEquals(2, arg(listOf("ARG", "X"), count = 2), "私有形参混排：个数作为下界保留")
+        assertEquals(0, arg(listOf("ARGS", "ARGS:1"), count = 0), "ARGS 不误算进 ARG（ARGS:1 的 1 属另一桶）")
+        assertEquals(9, arg(listOf("arg:8")), "大小写不敏感")
+        assertEquals(0, arg(listOf("ARG:X")), "非十进制下标不猜（装载期已折成十进制）")
     }
 
     /**
@@ -150,13 +160,13 @@ class FloatVarLocalLengthTest {
     }
 
     /**
-     * 三者同现：`VARSIZE 档 20` + `#LOCALFSIZE 30` + 形参声明 12 ⇒ LOCALF/ARGF 都 30。
-     *
-     * TODO(verify) 口径差（见类 KDoc 第 1 条）：fork 严格算来 ARGF = `max(20, 12)` = 20，
-     * 本式把 `#LOCALFSIZE` 也并进来 ⇒ 30。本路按 g1 契约取 max，不动。
+     * `VARSIZE 档 20` + `#LOCALFSIZE 30` + 形参声明 12：LOCALF = 30（声明优先），
+     * ARGF = `max(20, 12)` = 20 —— ARGF 与 `#LOCALFSIZE` **不互相抬界**
+     * （严格照抄裁决落地，CONTRACT-RT2-M32A 判据 2 口径差 1；fork `VariableLocal.cs:48-49`
+     * 的 ARGF 支只读 `ArgFloatLength`。原 TODO(verify) 已销）。
      */
     @Test
-    fun `档位与LOCALFSIZE与形参声明三者取上界`() {
+    fun `档位与形参声明定ARGF而LOCALFSIZE只管LOCALF`() {
         val sizes = VariableSizes().apply {
             setFloat1D("LOCALF", 20)
             setFloat1D("ARGF", 20)
@@ -165,7 +175,7 @@ class FloatVarLocalLengthTest {
         store.enterFunction("T")
         try {
             assertEquals(30, store.getLength("LOCALF"))
-            assertEquals(30, store.getLength("ARGF"))
+            assertEquals(20, store.getLength("ARGF"), "ARGF = max(档位 20, 形参声明 12)，不吃 #LOCALFSIZE 30")
             store.writeFloat("LOCALF", longArrayOf(29), 1.0)
             assertFailsWith<CodeEE> { store.readFloat("LOCALF", longArrayOf(30)) }
         } finally {
@@ -191,7 +201,8 @@ class FloatVarLocalLengthTest {
     /**
      * 本仓整数侧已是 fork 的**分型口径**（ARG 取 max、LOCAL 声明优先可缩）：
      * spec: fork-src VariableLocal.cs:50-53 的钳制名单只有 ARG/ARGS（+ARGF），
-     * LOCAL/LOCALS 声明优先。留这条既作 1.824 面对照，也作浮点侧待裁决的镜像证据。
+     * LOCAL/LOCALS 声明优先。浮点侧经 CONTRACT-RT2-M32A 判据 2 裁决后与整数侧
+     * 分型对称：LOCALF 声明优先（可缩），ARGF 取上界；受影响的两条断言已刷新。
      */
     @Test
     fun `整数侧LOCAL声明优先可缩而ARG不可缩`() {
@@ -203,11 +214,11 @@ class FloatVarLocalLengthTest {
         } finally {
             store.leaveFunction()
         }
-        // 浮点侧当前对 LOCALF 也取 max ⇒ 与上面这条不对称（待组长裁决）
+        // 浮点侧同分型：LOCALF 声明优先可缩（fork 钳制名单无 LOCALF，非事件不钳制）
         val f = storeWith(floatLocal = 4)
         f.enterFunction("T")
         try {
-            assertEquals(10, f.getLength("LOCALF"), "本路口径：LOCALF 也取 max(10, 4)")
+            assertEquals(4, f.getLength("LOCALF"), "LOCALF 声明优先（可缩，与 LOCAL 同分型）")
         } finally {
             f.leaveFunction()
         }

@@ -667,4 +667,54 @@ class VariableStatementsTest {
         assertEquals(0x3042L, env.store.readInt("RESULT", longArrayOf(1)))
         assertEquals(66L, env.store.readInt("RESULT", longArrayOf(2)))
     }
+
+    // ---------------- 活动期投射变更闸的语句路旁路（M5-3） ----------------
+
+    /**
+     * 显式旁路负控（CONTRACT-RT2-M53 §1.4）：闸挂的是 SDK 行变更面
+     * （RealCharaSlotProjector.project/unproject），**不挡脚本语句路**——SORTCHARA /
+     * DELCHARA 的 ADR-005 即时语义照旧，五接点钩子自动平移映射。装置把闸绑成最严形态
+     * （probe 恒真 = 比「VM 执行中」更严），若闸错误地挂到了 store 行操作/钩子面上，
+     * 本例的任何一步都会炸。
+     *
+     * 判据 = 蓝图 era-arch-v61u.md §7 Mutation Boundary 原文：「原版脚本自身的
+     * DELCHARA/SORTCHARA 即时语义不动（ADR-005），钩子同步平移映射」。
+     */
+    @Test
+    fun `闸恒拒在场_SORTCHARA_DELCHARA语句路照常_钩子平移映射`() {
+        val env = envWithTemplate()
+        addChara(env, 10, 20, 10)
+        val kernel = com.eratw.port.core.entity.EntityKernel(
+            listOf(com.eratw.port.core.entity.ComponentSchema("bypass.pkg", "NativeChara")),
+            emptyList(),
+            listOf(com.eratw.port.core.entity.EntityArchetype("PERSON", listOf("NativeChara"))),
+        )
+        val pkgs = com.eratw.port.core.entity.PackageShortIdRegistry()
+        val projector = com.eratw.port.core.entity.RealCharaSlotProjector(
+            env.store,
+            kernel,
+            virtualNos = null,
+            pkgs = pkgs,
+        )
+        env.store.charaSlotProjector = projector
+        val e = kernel.create(pkgs.allocate("bypass.pkg"), "PERSON")
+        val row = projector.project(e)
+        assertEquals(3, row, "投射实体追加在 3 行原生角色之后")
+        // 闸绑最严形态（恒拒）——比「VM 活动调用栈」更严的保守面。
+        projector.bindActivityGate { true }
+        // SORTCHARA 语句（语句层驱动 store 行操作 + 五接点钩子）：闸不挡，映射平移。
+        env.store.writeInt("MASTER", longArrayOf(0), -1)
+        env.store.writeInt("BASE", longArrayOf(0, 0), 30)
+        env.store.writeInt("BASE", longArrayOf(1, 0), 10)
+        env.store.writeInt("BASE", longArrayOf(2, 0), 20)
+        env.store.writeInt("BASE", longArrayOf(3, 0), 5)
+        env.run(instr(FunctionCode.SORTCHARA, SpSortcharaArgument(iVar("BASE", 0, 0), SortOrder.ASCENDING)))
+        // 键 5（投射实体）最小 → 升序后实体的行平移到表头。
+        assertEquals(0, projector.charIndexOf(e), "SORTCHARA 后钩子把投射实体平移到新行")
+        assertEquals(e, projector.entityAt(0), "双向映射一致")
+        // DELCHARA 语句：删行钩子解映射（ADR-005 即时语义），闸同样不挡。
+        env.run(instr(FunctionCode.DELCHARA, ExpressionArrayArgument(listOf(IntLiteral(0)))))
+        assertEquals(-1, projector.charIndexOf(e), "删行钩子解映射")
+        assertEquals(3, env.store.characters.count)
+    }
 }

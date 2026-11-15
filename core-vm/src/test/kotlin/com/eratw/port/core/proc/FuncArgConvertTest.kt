@@ -411,4 +411,43 @@ class FuncArgConvertTest {
         }
         return ProcessRuntime(pb.program, store, FunctionTable(metas), VmConfig(), builtinHost = host)
     }
+
+    // ------------------------------------------------------------------
+    // 7. 实参多于形参 = 4.981 静默丢弃（两条宿主 API 通道，与 VM 建帧同一口径）
+    // ------------------------------------------------------------------
+
+    /**
+     * 宿主 API 通道（[ProcessRuntime.callF] → `executeMethod`）多传的实参按位置丢弃：
+     * 4.981 的 `ConvertArg` 只按 `func.Arg.Length` 逐位转换
+     * （`reference/emuera-skia-4.981/Emuera/Runtime/Script/Process.CalledFunction.cs:212-357`；
+     * 1.824 的 `TooManyFuncArgs` 硬判已删，fork 更新记录 CHANGELOG.md 明写「多余参数静默丢弃」）。
+     *
+     * 现场形态：`fromEN/Addition/lib/DATEPICKER.ERB:56` `GET_MONTH(ACTIVE_MONTH, 1)`
+     * 打在 `@GET_MONTH(ARG)` 上（单形参）。
+     */
+    @Test
+    fun `callF 实参多于形参静默丢弃多余实参`() {
+        val pb = compile(Fn("MTH", arrayOf("@MTH(NUM)", "RETURN")))
+        val store = VariableStore()
+        store.declareUserVar(intVar("NUM"), "MTH")
+        methodRuntime(pb, store).callF(
+            "MTH",
+            listOf(Value.IntV(7), Value.IntV(99), Value.IntV(123)),
+        )
+        assertEquals(7L, store.userVar("NUM", "MTH")!!.readInt(0, 0), "唯一形参 = 第 1 个实参")
+        assertEquals(0, store.callDepth(), "帧必须全部退出")
+    }
+
+    /** 重入方法通道（[ProcessRuntime.invokeUserMethod]，GETMETH 族）同一口径。 */
+    @Test
+    fun `invokeUserMethod 实参多于形参静默丢弃多余实参`() {
+        val pb = compile(Fn("MTH", arrayOf("@MTH(NUM)", "RETURN")))
+        val store = VariableStore()
+        store.declareUserVar(intVar("NUM"), "MTH")
+        methodRuntime(pb, store).invokeUserMethod(
+            "MTH",
+            listOf(Value.IntV(7), Value.IntV(99)),
+        )
+        assertEquals(7L, store.userVar("NUM", "MTH")!!.readInt(0, 0), "唯一形参 = 第 1 个实参")
+    }
 }

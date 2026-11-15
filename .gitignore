@@ -19,3 +19,9 @@ Thumbs.db
 # 产物（erbc 容器等派生文件不入库）
 *.erbc
 erbc-out/
+
+# golden 自跑快照（派生；PC 基准为准）
+fixtures/golden/baseline/self-*.txt
+
+# 语料 bug 上游 PR 导出产物（devtools/export_corpus_pr.py）
+out/

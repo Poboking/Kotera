@@ -454,10 +454,54 @@ class GraphicsBuffer(
             return s.width > 0 && s.height > 0
         }
 
-    /** `GCreate`：先 `GDispose` 再建位图（GraphicsImage.cs:102-117）。 */
+    /**
+     * `GCreate`：先 `GDispose` 再建位图（GraphicsImage.cs:102-117）。
+     *
+     * ## 分配前闸（2026-11-08 OOM 簇残余，bug-oom lane）
+     *
+     * 原版这一句是 `RealBitmap = new Bitmap(x, y, PixelFormat.Format32bppArgb)`
+     * （GraphicsImage.cs:109），失败时抛 `OutOfMemoryException`；PC 上 32bpp 位图落在 GDI+
+     * 的原生内存里，`largeHeap` 那套 512 MiB **Java 堆**上限根本不存在，所以原版没有、也不需要
+     * 「分配前预算」这一步 —— 把它搬到 Dalvik 堆上之后，这一步必须由移植侧补出来，否则
+     * `GCREATE` 的发包点就是一条**没有任何账本约束**的 `IntArray(w * h)`。
+     *
+     * 本波之前唯一的闸是 [GraphicsPool.get] 出口的
+     * [GraphicsPool.evictDeferredPixelsWithinBudget]，它量的是**图形池驻留**，不是**进程堆**：
+     * 上报样本 `2026-11-08 08:39:57`（0.2.39、HUAWEI AL-AL00）里池内驻留 258 MiB + 负号段
+     * 48 MiB 之外还有非像素那一大段（变量 55 MiB / 程序表 53 MiB / 行缓冲），闸按池账本
+     * 判停、看不见那一段，于是本函数照常发 1,000,016 B 的分配，`target footprint 536870912`
+     * 顶格后直接 `OutOfMemoryError`。headless 同形复现：池驻留 19 MiB（像素预算 32 MiB，
+     * 闸判「不需要动」）而堆已 125/128 MiB，`create(1000, 1000)` 当场 OOM。
+     *
+     * 两条落点：
+     * 1. **分配前**：[GraphicsBuffer.pixelAllocationRefusal] 判「本笔需求是否已经大到位图
+     *    无论如何都建不出来」（> 堆上限），命中就抛可诊断的 [CodeEE] —— 不静默返回假画布、
+     *    不重试、不吞；
+     * 2. **分配失败**：真发出去仍然 OOM 时，把它换成带堆读数的 [CodeEE] 再抛。这一支不是
+     *    「catch OOM 继续跑」：缓冲此刻已经是 [dispose] 后的未创建态（与原版 `GDispose()`
+     *    先行、`new Bitmap` 抛出后停在未创建态逐字同形），调用方拿到的是脚本可见的错误，
+     *    而不是一条穿过 core 的 `catch (e: Exception)` 把 VM 线程带走的闪退。
+     *
+     * 「越过安全线但还没到上限」的那一段**不在这里抛**：它由 [GraphicsPool.get] 出口的
+     * 堆余量档先逐出/降级（[GraphicsPool.evictWithinHeapHeadroom]），逐出后仍不够才轮到
+     * 上面第 2 条。分配点自己按读数硬抛会把「GC 本来能救回来」的正常形状误判成脚本错误 ——
+     * 页尾刚降级的那批像素还是垃圾、`totalMemory - freeMemory` 仍记着它们。
+     */
     fun create(w: Int, h: Int) {
         dispose()
-        val px = IntArray(w * h)
+        val need = w.toLong() * h.toLong() * 4L
+        pixelAllocationRefusal(need)?.let { throw CodeEE(it) }
+        val px = try {
+            IntArray(w * h)
+        } catch (_: OutOfMemoryError) {
+            // 不静默、不给假画布、不重试：按原版语义（GraphicsImage.cs:109 的 new Bitmap 抛
+            // OutOfMemoryException）折成携带堆读数的可诊断错误，让上报面拿到 CodeEE + ERB 帧栈。
+            throw CodeEE(
+                "函数 GCREATE：画布 ${w}x${h} 的像素分配失败（需要 ${need shr 20} MiB，" +
+                    "Java 堆已用 ${heapUsedBytes() shr 20} MiB / 上限 " +
+                    "${Runtime.getRuntime().maxMemory() shr 20} MiB）",
+            )
+        }
         synchronized(this) { publishSurfaceLocked(Surface(w, h, px, null, null)) }
     }
 
@@ -1078,11 +1122,11 @@ class GraphicsBuffer(
      * 黄金基准对自贴的钉法是 pc-golden-root.txt:652 `GDRAWG=1`
      * （GDRAWG(10,10,30,0,...)，src/dest 矩形不相交、只钉返回值）。
      *
-     * [matrix]（GFX-01 新增，只有 `GDRAWSPRITE` 的 7 参形态传非 null）是 GDI+ `ColorMatrix`
-     * 的 25 个 Float、**行主序、行 = 源通道、列 = 目标通道**（口径与出处见 [applyColorMatrix]）。
-     * 原版把矩阵交给 `ImageAttributes.SetColorMatrix(...)` 后由 `DrawImage` 消费
-     * （`GDRAWSPRITE` 链路：GraphicsImage.cs:291-303 → ASpriteSingle.cs:89-99 /
-     * SpriteAnime.cs:161-172），GDI+ 的顺序是**取样 → 颜色换算 → 合成**，故这里对
+     * [matrix]（GFX-01 新增，只有 `GDRAWSPRITE` 7 参 / `GDRAWG` 11 参形态传非 null）是
+     * 复刻目标蛇版 4.981 的 Skia 颜色滤镜口径的 25 个 Float，**行主序、行 = 目标通道、
+     * 列 = 源通道、第 5 列是偏移**（口径与出处见 [applyColorMatrix]）。目标宿主把矩阵交给
+     * `SKColorFilter` 后由 `GraphicsDraw` / `DrawBitmap` 消费（链路：`Creator.Method.cs:8582-8587`
+     * → `GraphicsImage.cs:504-518` / `:540-558`），顺序是**取样 → 颜色换算 → 合成**，故这里对
      * 「实际被采到的那个源像素」逐像素换算后再 [blendPixel]；1:1 贴图上与原版同序，
      * 缩放贴图时差异只可能来自取样模式（最近邻 vs 双线性），已按契约 §4 A4 登记。
      */
@@ -1433,6 +1477,126 @@ class GraphicsBuffer(
         /** GSAVE 文本载体魔数（见 [toSaveText]）。 */
         const val SAVE_MAGIC = "ERATW-GFX 1"
 
+        /**
+         * 堆内像素分配的**安全线百分比**（percent of `Runtime.maxMemory()`）。
+         *
+         * ## 它治哪条残余（bug-oom lane，2026-11-09）
+         *
+         * 本类此前唯一的分配侧约束是 [GraphicsPool.evictDeferredPixelsWithinBudget] 那道
+         * 「池内像素驻留 ≤ maxMemory ÷ [GraphicsPool.PIXEL_BUDGET_DIVISOR]」的预算档。它量的是
+         * **图形池账本**，不是**进程堆**：两者之间还夹着非像素那一大段（程序表 / 变量池 /
+         * 行缓冲），而预算档对那一段完全无感。上报簇「启动失败/应用崩溃
+         * `java.lang.OutOfMemoryError`、`target footprint 536870912`、栈顶
+         * `GraphicsBuffer.create`」正是这个缝：池内读数还在预算内，堆已被两段一起顶满。
+         *
+         * 判据统一上收到「已用堆 + 本笔需求 ≤ maxMemory × 本百分比」之后，闸看的是进程堆账面
+         * （[heapUsedBytes]），池账本只是其中一项（[heapHeadroomPixelBudget] 把非像素那一段
+         * 先扣掉，剩下的才是像素还能驻留多少）。
+         *
+         * ## 为什么是 80
+         *
+         * 与宿主水位档同源：`RunTrail.RELEASE_AT_PERCENT = 80`（`app` 模块
+         * `RunWatch.kt`）就是「该主动回收」的那根线；本闸挂在**每语句检查点**，比水位采样早，
+         * 于是水位档退化为兜底而不再是唯一触发面。`GC阈值=65%` 与 `预检系数=70%` 是
+         * *分配后* 与 *装载前* 的两个旋钮，与「分配前留多少余量」不是一回事，不并档。
+         *
+         * ## 取值边界（定向单测钉着）
+         *
+         * 取 100 = 撤销本闸（判据退化成 `used + need > max`），取 0 = 一点像素都不许驻留
+         * （每语句全表退，纯烧 CPU）。生产只取 80；单测用 [heapHeadroomPixelBudget] 的显式
+         * `maxMemoryBytes` 注入复刻各个边界，不读本常量以外的旋钮。
+         */
+        const val HEAP_SAFETY_PERCENT: Int = 80
+
+        /** 字节 → MiB（只进错误文案与报告读数，不参与判据）。 */
+        private const val MIB_BYTES: Long = 1024L * 1024L
+
+        /**
+         * 当前 Java 堆**已用**字节（`totalMemory - freeMemory`）。
+         *
+         * 与 `LoadTrace.usedBytes` / `HostMethods` 的 CLEARMEMORY 同源口径；不含 native 堆
+         * （那是 `Debug.getNativeHeapAllocatedSize` 的另一把尺，见 `LiveSetCensus`）。
+         *
+         * 注意它把**尚未回收的垃圾**也算进「已用」：这是刻意的保守方向 —— 本函数喂给
+         * [heapHeadroomPixelBudget] 只用于「该不该逐出」，多退一张的代价是下一次重解，
+         * 少退一张的代价是 OOM。**不许**拿它喂「该不该抛错」的判据（见
+         * [pixelAllocationRefusal] 为什么只认「物理上不可能」那一条）。
+         */
+        fun heapUsedBytes(): Long = Runtime.getRuntime().let { it.totalMemory() - it.freeMemory() }
+
+        /**
+         * 安全线字节数：`maxMemoryBytes × [HEAP_SAFETY_PERCENT]%`。
+         *
+         * 堆上限不可知（`<= 0` 或 [Long.MAX_VALUE]，宿主没给上限）时返回 [Long.MAX_VALUE] =
+         * 「本闸不生效」，与 [GraphicsPool.defaultPixelBudgetBytes] 的同款回落一致：绝不拿一个
+         * 拍出来的绝对值去截桌面装置。
+         */
+        fun heapSafetyLineBytes(maxMemoryBytes: Long = Runtime.getRuntime().maxMemory()): Long {
+            if (maxMemoryBytes <= 0L || maxMemoryBytes == Long.MAX_VALUE) return Long.MAX_VALUE
+            return maxMemoryBytes / 100L * HEAP_SAFETY_PERCENT
+        }
+
+        /**
+         * **堆余量预算**：在「已用堆 + 本笔需求 ≤ 安全线」这条约束下，图形像素最多还能驻留
+         * 多少字节。返回值直接当 [GraphicsPool.evictDeferredPixelsWithinBudget] 的
+         * `budgetBytes` 用（池级驻留超过它就逐出/降级）。
+         *
+         * 算式：`安全线 − (已用堆 − 本池驻留)`。减掉 `residentPixelBytes` 是因为池内像素本身
+         * 也在「已用堆」里，它正是这条预算要放行的那部分；不扣就会把自己的驻留当成「非像素
+         * 占用」，一轮一轮把自己越掐越死（每语句全表退 → 每语句重解）。
+         *
+         * 非像素占用按 `coerceAtLeast(0)` 夹住：并发换代的一瞬 `used` 可能读到比
+         * `residentPixelBytes` 更小的值（两根原子读数不在同一瞬间），负的「非像素占用」
+         * 会把预算弄得比安全线还大 —— 夹到 0 就是「这一瞬按最宽放行」，方向仍是保守的。
+         *
+         * 返回值下限 0（= 尽量退），与既有「预算 ≤ 0 ⇒ 退化成尽量退」的自洽读法一致，
+         * 不新增特判分支。
+         *
+         * @param usedHeapBytes 判定用的已用堆（生产取 [heapUsedBytes]；单测显式注入复刻边界）
+         * @param residentPixelBytes 本池当前驻留（生产取 `residentPixelBytes.get()`）
+         * @param maxMemoryBytes 判定用的堆上限（单测注入口径同
+         *   [GraphicsPool.defaultPixelBudgetBytes] 的 `maxMemoryBytes`）
+         */
+        fun heapHeadroomPixelBudget(
+            usedHeapBytes: Long = heapUsedBytes(),
+            residentPixelBytes: Long = 0L,
+            maxMemoryBytes: Long = Runtime.getRuntime().maxMemory(),
+        ): Long {
+            val line = heapSafetyLineBytes(maxMemoryBytes)
+            if (line == Long.MAX_VALUE) return Long.MAX_VALUE
+            val nonPixelBytes = (usedHeapBytes - residentPixelBytes).coerceAtLeast(0L)
+            return (line - nonPixelBytes).coerceAtLeast(0L)
+        }
+
+        /**
+         * 分配前的**可诊断拒绝**：本笔 [needBytes] 是否已经大到位图无论如何都建不出来。
+         *
+         * 返回 null = 放行（含「越过安全线但还没到上限」：那一段归逐出/降级闸管，见
+         * [heapHeadroomPixelBudget]）；非 null = 可直接进 [CodeEE] 的原因文本。
+         *
+         * 判据只有一个：`needBytes > maxMemoryBytes`。**刻意不看** `usedHeapBytes` ——
+         * 「已用 + 需求 > 上限」这一步在 ART 上会先触发 GC，垃圾一收就可能成功；拿含垃圾的
+         * 读数在这里硬抛，会把页尾刚降级、像素数组还挂在垃圾里的正常形状打成脚本错误。
+         * 真的收不动时，分配点自己会抛 `OutOfMemoryError`，由 [create] 折成同样的可诊断错误
+         * （见那边的 KDoc）：两条路给出同一种玩家可见形态，区别只是判据一个在分配前、
+         * 一个在分配后。
+         *
+         * 原版锚：`GraphicsImage.cs:109` 的 `new Bitmap(...)` 没有任何前置判据，失败即抛
+         * `OutOfMemoryException` —— 本函数补的是「移植侧把同一份分配搬进 Java 堆」之后
+         * 必须有的那一步，不是给原版加语义。
+         */
+        fun pixelAllocationRefusal(
+            needBytes: Long,
+            maxMemoryBytes: Long = Runtime.getRuntime().maxMemory(),
+        ): String? {
+            if (needBytes <= 0L) return null
+            if (maxMemoryBytes <= 0L || maxMemoryBytes == Long.MAX_VALUE) return null
+            if (needBytes <= maxMemoryBytes) return null
+            return "像素分配需要 ${needBytes / MIB_BYTES} MiB，超过本进程 Java 堆上限 " +
+                "${maxMemoryBytes / MIB_BYTES} MiB：这张画布无论如何都建不出来" +
+                "（原版 GraphicsImage.cs:109 在同形下抛 OutOfMemoryException，这里折成可诊断错误）"
+        }
+
         /** 大端写 32 位整数（PNG 的块长 / CRC 与 IHDR 的宽高都是大端）。 */
         private fun putIntBe(dst: ByteArray, at: Int, v: Int) {
             dst[at] = (v ushr 24).toByte()
@@ -1497,27 +1661,34 @@ class GraphicsBuffer(
         const val COLOR_MATRIX_SIZE = 25
 
         /**
-         * GDI+ `ColorMatrix` 的单像素换算（总账 GFX-01，`GDRAWSPRITE` 的 7 参形态）。
+         * 颜色矩阵的单像素换算（总账 GFX-01，`GDRAWSPRITE` 7 参 / `GDRAWG` 11 参形态）。
          *
-         * ## 索引口径（**不是**图形学课本的转置）
+         * ## 索引口径 = 复刻目标蛇版 4.981 的 Skia 滤镜，**不是** 1.824 的 GDI+
          *
-         * [m] 是 25 个 Float 的**行主序**数组，**行 = 源通道、列 = 目标通道**，第 4 行是常量项
-         * （偏移），即
-         * `out[dst] = in[R]*m[0][dst] + in[G]*m[1][dst] + in[B]*m[2][dst] + in[A]*m[3][dst] + m[4][dst]`。
-         * 依据：
-         * - 脚本侧矩阵元素按 `array[i][j] = 变量值 / 256f` 装进 `float[5][5]`
-         *   （spec: FunctionMethodCreator.cs:9427-9434 二维分支、:9454-9461 三维分支 ⇒ 第一个下标
-         *   是脚本里 `ARG_CM:i:j` 的 `i`，它直接进 `ColorMatrix` 的 Matrix i）；
-         * - `Matrix33` 被用作**不透明度**（spec: ConsoleBackground.cs:19-22 `colorMatrix.Matrix33 = opacity`）
-         *   ⇒ 通道下标 0..3 = R,G,B,A、4 = 常量行；
-         * - 通道换位的实测读数（2026-10-23 本机 System.Drawing / GDI+，`DrawImage(1x1, 1x1, Pixel, attr)`，
-         *   源像素 A255 R200 G100 B50、目标全透明，单位阵打底后只改指名的那一个元素）：
-         *   `m[0][0] = 0` 且 `m[0][1] = 1`（第 1 行仍是单位行）⇒ `A255 R0 G255 B50`
-         *   （源 R 落到目标 G：G' = 200 + 100 = 300 → 夹到 1.0 → 255；若按「行 = 目标通道」
-         *   应当得 `R100`，实测否掉了那一种）；
-         *   `m[1][1] = 0` 且 `m[1][2] = 1` ⇒ `A255 R200 G0 B150`（源 G 落到目标 B：100 + 50）；
-         *   偏移项取 `m[4][0] = 0.5` ⇒ `R200 → 255`（0.784+0.5 超过 1.0 后夹住），
-         *   而把同样的 0.5 写在 `m[0][4]` 不产生任何偏移 ⇒ 偏移确实住在**第 4 行**。
+         * [m] 是 25 个 Float 的**行主序**数组，**行 = 目标（输出）通道、列 = 源（输入）通道**，
+         * 第 5 列是常量偏移，第 5 行整行不参与（Skia 滤镜只取前 4 行），即
+         * `out[dst] = in[R]*m[dst][0] + in[G]*m[dst][1] + in[B]*m[dst][2] + in[A]*m[dst][3] + m[dst][4]`，
+         * `dst` 只取 0..3（R,G,B,A）。依据：
+         * - 蛇版 `Emuera/Runtime/Script/Statements/Function/Creator.Method.cs:7025-7060` 的
+         *   `ReadColormatrix` 把 `array[e1+x, e2+y] / 256f` 装进 `cm[x][y]`；同树 :8582-8587
+         *   把 7 参矩阵交给 `GDrawCImg`；`Emuera/UI/Game/image/GraphicsImage.cs:504-518`
+         *   把 `cm[0..3][0..4]` 按行原样铺进 `SKColorFilter.CreateColorMatrix` 的 20 元表，
+         *   其中 `cm[i][4] * 255f` 是该行的偏移；:540-558 的 `GDRAWG` 11 参同构。
+         *   Skia 颜色矩阵的一行就是一个输出通道 ⇒ 第一个下标是目标通道。
+         * - 1.824 基线 `MinorShift.Emuera.UI.Game.Image/GraphicsImage.cs:291-303` 走
+         *   `new ColorMatrix(cm)` + `ImageAttributes.SetColorMatrix`，GDI+ 按行向量乘矩阵，
+         *   口径正好相反（行 = 源通道、常量在第 5 行）。该树在 `specs/engine-profiles.yaml:60-64`
+         *   明确标为 `cs_reference ... NOT a target engine`；蛇版自己在
+         *   `reference/emuera-skia-4.981/CHANGELOG.md:1045` 也登记过「ColorMatrix GDI+→SkiaSharp
+         *   迁移修复：列优先→行优先布局、平移分量 * 255f」——GFX-01 初版照 1.824 实现，把 4.981
+         *   语料的矩阵整体转置，布娃娃染色因此塌成灰蓝（本次修复的根因，反向证明见
+         *   `GdrawSpriteCompositeTest` 的布娃娃回归用例）。下面 2026-10-23 的 GDI+ 实测读数
+         *   只作**数值**口径的取证，不再作索引口径的依据；对角阵转置不变、换位用例按新口径
+         *   改索引后读数相同，故那批期望仍成立。
+         * - 语料自证：`ERB/BBAS_MOB/MOB_SYSTEM_HELPERS.ERB:195-208` 的
+         *   `画像合成_COLORMATRIX_GS` 每行系数和为 256、第 3 列取底图蓝通道；
+         *   `ERB/BODY_INFO/SHOW_PANTIES.ERB:124-140` 的注释明写「读取蓝色通道（Col 2）
+         *   映射到输出的 红(Row 0)、绿(Row 1)、蓝(Row 2)」。两处都按行 = 目标通道写。
          *
          * ## 数值口径（实测 2026-10-23，同一装置）
          *
@@ -1543,7 +1714,7 @@ class GraphicsBuffer(
          * ±2 属契约 §4 A4 像素近似口径。dst 两端档逐通道一致（实测
          * 源(A128,R200,G100,B50) 叠 目标(A255,R10,G20,B30) → 两侧同得 `A255 R105 G60 B40`）。
          *
-         * @param m 25 个 Float，行主序，行 = 源通道、列 = 目标通道（见上）
+         * @param m 25 个 Float，行主序，行 = 目标通道、列 = 源通道（见上）
          */
         fun applyColorMatrix(argb: Int, m: FloatArray): Int {
             require(m.size == COLOR_MATRIX_SIZE) { "ColorMatrix 必须是 ${COLOR_MATRIX_SIZE} 个 Float" }
@@ -1558,12 +1729,18 @@ class GraphicsBuffer(
             return (na shl 24) or (nr shl 16) or (ng shl 8) or nb
         }
 
-        /** [applyColorMatrix] 的单通道式：`Σ 源通道 × m[源][dst] + m[4][dst]`，夹到 [0,1] 后四舍五入。 */
+        /**
+         * [applyColorMatrix] 的单通道式：`Σ 源通道 × m[dst][源] + m[dst][4]`（行 = 目标通道、
+         * 第 5 列是偏移；脚本第 5 行按蛇版 `GraphicsImage.cs:512-517` 不进 Skia 滤镜，故不读
+         * `m[20..24]`），夹到 [0,1] 后四舍五入。
+         */
         private fun mixChannel(r: Int, g: Int, b: Int, a: Int, m: FloatArray, dst: Int): Int {
-            val f = (r / 255f) * m[dst] + (g / 255f) * m[5 + dst] + (b / 255f) * m[10 + dst] +
-                (a / 255f) * m[15 + dst] + m[20 + dst]
-            // Float 溢出可能是 NaN（脚本侧矩阵元素没有范围检查，spec: FunctionMethodCreator.cs:9432
-            // 只做 `(float)long / 256f`）；NaN 走夹取会原样漏到 round 里，显式折 0。
+            val row = dst * 5
+            val f = (r / 255f) * m[row] + (g / 255f) * m[row + 1] + (b / 255f) * m[row + 2] +
+                (a / 255f) * m[row + 3] + m[row + 4]
+            // Float 溢出可能是 NaN（脚本侧矩阵元素没有范围检查，两版装载都只做
+            // `(float)long / 256f`：1.824 FunctionMethodCreator.cs:9432、蛇版
+            // Creator.Method.cs:7054（二维）/ :7083（三维））；NaN 走夹取会原样漏到 round 里，显式折 0。
             val v = if (f.isNaN()) 0f else f.coerceIn(0f, 1f)
             return Math.round(v * 255f)
         }
@@ -1718,10 +1895,16 @@ class GraphicsPool {
     @Synchronized
     fun get(id: Int, payloadStore: PngPayloadStore? = null): GraphicsBuffer {
         val buffer = buffers.getOrPut(id) { GraphicsBuffer(id, residentPixelBytes, sourceMisses) }
-        // 预算档自动检查（fix-pixelbudget 车道）：驻留像素超过 Java 堆侧预算就先退「重解必得
-        // 同一张图」的那一档。判据全部复用 [evictDeferred]，这里只补它缺的**触发面**；
-        // 每条 G 语句都经 [get]（`GraphicsMethods.readGraphics`），所以像素落地后的下一个
-        // 语句点就是检查点。未超预算时零遍历。
+        // 预算档自动检查（fix-pixelbudget 车道 → bug-oom lane 扩到进程堆口径）：驻留像素超过
+        // Java 堆侧预算就先退「重解必得同一张图」的那一档。判据全部复用 [evictDeferred]，这里
+        // 只补它缺的**触发面**；每条 G 语句都经 [get]（`GraphicsMethods.readGraphics`），所以
+        // 像素落地后的下一个语句点就是检查点。未超预算时零遍历。
+        //
+        // 2026-11-09 起这一发走 [evictWithinHeapHeadroom]：预算是
+        // `min(pixelBudgetBytes, 堆余量预算)`，后者把「非像素那一段（程序表 / 变量池 / 行缓冲）」
+        // 先从安全线里扣掉。只按池账本判停会漏掉上报簇那一形 —— 池读数还在预算内、进程堆已
+        // 贴顶，`GraphicsBuffer.create` 一发 1 MiB 分配就 OOM（本波 headless 复现：池 19 MiB /
+        // 预算 32 MiB，堆 125/128 MiB，`create(1000,1000)` 当场 OutOfMemoryError）。
         //
         // `protect = buffer`：**不许把刚交出去的这一张退掉**。少这道护栏时，「单张可重解图
         // 自己就超预算」的形状（小挡位机型 + 一张整工作表）会退化成
@@ -1734,10 +1917,11 @@ class GraphicsPool {
         // 外还付一次 [pixelBudgetBytes]，而它内含 `System.getProperty`（libcore 是属性表
         // 线性扫）；2026-11-03 内存分档起再加**一发**属性查表（[MemoryTier] 的 sdkInt 性质，
         // Hashtable 锁内），`Runtime.maxMemory()` 仍只读一发（档位判式复用同一个读数，
-        // 见 [defaultPixelBudgetBytes]）。G 语句量级远小于变量访问，未超预算时也只付这一发，
-        // 眼下没有实测证据说它贵；但**这两发的成本未实测**，已按「热路径代价实测」的规矩
-        // 登记为下一手（回执在册）。
-        evictDeferredPixelsWithinBudget(pixelBudgetBytes(), protect = buffer, payloadStore = payloadStore)
+        // 见 [defaultPixelBudgetBytes]）；2026-11-09 起再多两发 `Runtime` 读数
+        // （`totalMemory` / `freeMemory`，见 [evictWithinHeapHeadroom]）。G 语句量级远小于
+        // 变量访问，未超预算时也只付这几发，眼下没有实测证据说它贵；但**它们的成本未实测**，
+        // 已按「热路径代价实测」的规矩登记为下一手（回执在册）。
+        evictWithinHeapHeadroom(protect = buffer, payloadStore = payloadStore)
         return buffer
     }
 
@@ -1864,6 +2048,85 @@ class GraphicsPool {
                 if (buffer === protect) continue
                 freed += buffer.demotePixelsToPng(payloadStore)
                 if (System.nanoTime() >= deadline) break
+            }
+        }
+        return freed
+    }
+
+    /**
+     * **堆余量档**（bug-oom lane，2026-11-09）：按**进程堆**账面逐出/降级，而不是只按池账本。
+     *
+     * ## 与 [evictDeferredPixelsWithinBudget] 的分工
+     *
+     * 那一道的预算 = [pixelBudgetBytes]（`maxMemory ÷ 4`），量的是「池内像素驻留」；它看不见
+     * 非像素那一段（程序表 / 变量池 / 行缓冲），于是出现「池读数还在预算内、进程堆已贴顶」的
+     * 形状 —— 上报簇栈顶 `GraphicsBuffer.create` 的 `Failed to allocate … target footprint
+     * 536870912` 就是它。本档把那道闸的预算换成
+     * `min(pixelBudgetBytes, [GraphicsBuffer.heapHeadroomPixelBudget])`：
+     * 后者 = `安全线 − 非像素占用`，于是每语句检查点保证的是
+     * `已用堆 ≤ maxMemory × [GraphicsBuffer.HEAP_SAFETY_PERCENT]%`
+     * 这条**进程级**约束（逐出/降级都走既有通道，判据与候选集一个字没改）。
+     *
+     * 不新增阈值、不新增候选判据、不新增释放路径：[evictDeferredPixelsWithinBudget] 的两档
+     * （可重解先退 → 画过的压 PNG）原样复用，本函数只负责把 `budgetBytes` 算成两者的小值。
+     *
+     * ## 为什么两段取小而不是各设一档
+     *
+     * 取小 = 「两个上限同时成立」。各设一档会把驻留上限抬到 2× 像素预算，正是
+     * [SpritePool.evictDeferredPixelsWithinSharedBudget] 的 KDoc 判死过的形状（512 MiB 挡
+     * 抬到 256 MiB 驻留，叠上基线就顶水位）。
+     *
+     * ## 紧急档：取消降级时间帽
+     *
+     * 当**堆余量**比像素预算更紧时（`headroom < pixelBudget`），本函数在
+     * [evictDeferredPixelsWithinBudget] 那一发（带 25 ms 帽）之后**把第二档补完**、不再设帽：
+     * 绑定约束已经不是「池预算超一点，下一发语句再推」而是「下一条分配就可能 OOM」。
+     * headless 实测（`-Xmx128m`、20 张 500×500 画布）：帽内只来得及降 2 张，紧接着的
+     * `create(1000, 1000)` 仍然分配失败；补完第二档后同一形状整档退完（池级驻留 19 MiB → 0）、
+     * 分配成功。代价是这一发语句最多付「整页合成图编码」的秒级停顿 —— 与闪退相比这是较小的
+     * 代价，且只在越过安全线时发生。
+     *
+     * ## 线程与成本
+     *
+     * 本函数 `@Synchronized`（与 [get] 同锁、同侧：VM 线程），锁内**不**解码、不绘制、不回调。
+     * 每发多付两处 `Runtime` 读数（`totalMemory` / `freeMemory`，各是一次 native 调用）——
+     * 与 [get] 已有的 `maxMemory` + 两次属性查表同量级，已按「热路径代价实测」的规矩登记为
+     * 下一手（TODO(verify)：真机 G 语句量级下这两发的分摊，卡点 = 需要 RunWatch 的
+     * 语句吞吐轨迹；桌面测不出 ART 的 native 调用成本）。
+     *
+     * @param usedHeapBytes 判定用的已用堆；生产取 [GraphicsBuffer.heapUsedBytes]，单测显式注入
+     *   复刻「非像素堆已越过安全线」的形状（真机上要到 0.8×512 MiB 才成立，headless 造不出来）
+     * @param maxMemoryBytes 判定用的堆上限；口径同 [GraphicsBuffer.heapHeadroomPixelBudget]
+     * @param protect 同 [evictDeferredPixelsWithinBudget]
+     * @param payloadStore 同 [evictDeferredPixelsWithinBudget]（mmap 载荷通道）
+     * @return 退掉的像素条数（口径同 [evictDeferredPixelsWithinBudget]）
+     */
+    @Synchronized
+    fun evictWithinHeapHeadroom(
+        usedHeapBytes: Long = GraphicsBuffer.heapUsedBytes(),
+        maxMemoryBytes: Long = Runtime.getRuntime().maxMemory(),
+        protect: GraphicsBuffer? = null,
+        payloadStore: PngPayloadStore? = null,
+    ): Long {
+        val pixelBudget = pixelBudgetBytes()
+        val headroom = GraphicsBuffer.heapHeadroomPixelBudget(
+            usedHeapBytes = usedHeapBytes,
+            residentPixelBytes = residentPixelBytes.get(),
+            maxMemoryBytes = maxMemoryBytes,
+        )
+        val budget = if (pixelBudget < headroom) pixelBudget else headroom
+        var freed = evictDeferredPixelsWithinBudget(budget, protect = protect, payloadStore = payloadStore)
+        // 紧急档判据：绑定约束是**进程堆安全线**（headroom 比像素预算更紧）而不是池预算。
+        // 这一档把 25 ms 单发时间帽取消 —— 帽的立档理由是「整页合成图第一次越线别秒级停顿」，
+        // 那是池预算越线、可以摊到后续语句点；进程堆越线是「下一条分配就可能 OOM」，摊不过去
+        // （2026-11-09 headless 复现：帽只来得及降 2 张，紧接着的 create(1000, 1000) 仍然分配
+        // 失败）。上面那一发已经跑过第一档（可重解）与第二档的帽内部分，这里把第二档剩下的
+        // 候选用同一通道（[GraphicsBuffer.demotePixelsToPng]）退完，不新开释放路径。
+        if (headroom < pixelBudget) {
+            for (buffer in buffers.values) {
+                if (residentPixelBytes.get() <= budget) break
+                if (buffer === protect) continue
+                freed += buffer.demotePixelsToPng(payloadStore)
             }
         }
         return freed

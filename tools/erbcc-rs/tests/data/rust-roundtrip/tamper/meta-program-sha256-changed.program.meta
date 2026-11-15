@@ -1,4 +1,4 @@
-format-version 1
+format-version 3
 engine "erbcc 0.1.0-SNAPSHOT"
 program-sha256 "28cb86808befa07a24b92a3003ebeadc598ee82c785524dd86037c60f40af87b"
 labels 7
@@ -31,10 +31,10 @@ global-dim "T1_GLOBALS.ERH" 0 "#DIM AUDIT_T_INT, 3"
 global-dim "T1_GLOBALS.ERH" 1 "#DIMS AUDIT_T_STR"
 global-dim "T1_GLOBALS.ERH" 2 "#DIM AUDIT_T_ARR, 3, 3"
 private-dims 4
-private-dim "AUDIT_A2" "AUDIT_LOCAL_VAR" 0 0 0 0 0 0 1 1 5 - -
-private-dim "AUDIT_A2" "AUDIT_KEY" 1 0 0 0 0 0 1 1 1 - -
-private-dim "AUDIT_A5" "AUDIT_SVAR" 1 0 0 0 0 0 1 1 1 - -
-private-dim "AUDIT_A5" "AUDIT_IVAR" 0 0 0 0 0 0 1 1 1 - -
+private-dim "AUDIT_A2" "AUDIT_LOCAL_VAR" 0 0 0 0 0 0 1 1 0 5 - -
+private-dim "AUDIT_A2" "AUDIT_KEY" 1 0 0 0 0 0 1 1 0 1 - -
+private-dim "AUDIT_A5" "AUDIT_SVAR" 1 0 0 0 0 0 1 1 0 1 - -
+private-dim "AUDIT_A5" "AUDIT_IVAR" 0 0 0 0 0 0 1 1 0 1 - -
 dim-config 0
 macros 0
 constants 0

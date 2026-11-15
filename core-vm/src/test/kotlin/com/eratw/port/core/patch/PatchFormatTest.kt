@@ -714,11 +714,13 @@ class PatchFormatTest {
             )
         }
         assertTrue(e3.message!!.contains("offset 重复"), "撞键必须点名：${e3.message}")
-        // 16 位域
+        // 尺寸域官方合法域 = 0..int.MaxValue-1（spec: LogicalLineParser.cs:236-244）：
+        // >= int.MaxValue 才拒，16 位以上仍是合法值（#LOCALSIZE 3000000 实战见 eratohoYMAEM）。
         val e4 = assertFailsWith<IllegalArgumentException> {
-            header(functionMetas = listOf(FunctionMetaRecord(0, "X", false, false, false, 0x10000, 0, 0)))
+            header(functionMetas = listOf(FunctionMetaRecord(0, "X", false, false, false, 0, Int.MAX_VALUE, 0)))
         }
-        assertTrue(e4.message!!.contains("floatLocalSize 越 16 位域"), "超域必须点名：${e4.message}")
+        assertTrue(e4.message!!.contains("localSize 越官方合法域"), "超域必须点名：${e4.message}")
+        header(functionMetas = listOf(FunctionMetaRecord(0, "X", false, false, false, 0x10000, 0x10000, 0x10000)))
     }
 
     @Test

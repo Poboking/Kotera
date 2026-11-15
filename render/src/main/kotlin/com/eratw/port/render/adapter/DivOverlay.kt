@@ -61,6 +61,25 @@ class DivOverlayPlanner(
      * [ChildRow.runs]，不再各自展平，「画在哪」与「点哪里」天然同源。
      */
     private val childFlattener: HtmlRunFlatten,
+    /**
+     * 脚本像素所依据的**基准行高**（= 引擎生效 `Config.LineHeight`，脚本 px）。
+     *
+     * div 的**面板高度 / 上下边 / 子行推进**必须走**同一把尺**：面板高与 margin/border/padding
+     * 经 [CellMetrics.scriptPixels] 按「脚本 px → 设备 px」折算（[scriptFontPixelSize]），
+     * 子行推进也必须按同一个折算口径取 `Config.LineHeight` 的设备值，不能直接吃
+     * [CellMetrics.lineHeight] —— 后者是**版面**行高（`view/ScreenLayout.resolve` 的
+     * `round(font × LINE HEIGHT / FONT SIZE)`），与 [CellMetrics.scriptPixels] 的
+     * 「先乘后除向零截断」在非整数档位上会差 1px；19 行子行累计就是一行量级。
+     *
+     * 原版没有这个问题：`ConsoleDivPart.cs:202` 的子行推进
+     * `pointY += Config.LineHeight` 与 `:178` 的面板高 `rect.height = Height` 是**同一个
+     * 脚本像素单位**；端口把一个单位拆成横/竖两把尺后，竖向上必须让「面板高」与
+     * 「子行推进」共用**同一把**（这里取 `[CellMetrics.scriptPixels]`，与面板高一致）。
+     *
+     * 0/负 = 不折算（headless、黄金装置与全部既有用例的恒等档：推进量仍取
+     * [CellMetrics.lineHeight]，读数逐值不变）。
+     */
+    private val scriptLineHeightPx: Int = 0,
 ) {
 
     /** 画布矩形（设备像素，块锚定坐标系内）。 */
@@ -163,6 +182,9 @@ class DivOverlayPlanner(
     ): Plan {
         if (blocks.isEmpty()) return Plan.EMPTY
         val lineHeight = metrics.lineHeight
+        // 子行推进与面板高同尺：面板高/上下边走 `scale(scriptPx)`（字号尺），子行推进也按
+        // 同一把尺折 `Config.LineHeight`；未给基准行高（0）时退回版面行高，既有读数不变。
+        val childPitchPx = if (scriptLineHeightPx > 0) scale(scriptLineHeightPx) else lineHeight
         val behind = ArrayList<Block>()
         val front = ArrayList<Block>()
         for (block in blocks) {
@@ -207,7 +229,7 @@ class DivOverlayPlanner(
                             alignOffsetCells = row.alignOffsetCells,
                         ),
                     )
-                    childY += lineHeight
+                    childY += childPitchPx
                 }
             }
             val item = Block(

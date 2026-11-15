@@ -9,12 +9,17 @@ import java.nio.file.Path
  * 新增根/换列时两处一起改）。
  *
  * 判根：读语料根下 DIM.ERH 的 `#DIM CONST NOW_VERSION` 值（两根实测：
- * 4.980=20260326、4.981=20261017，各在 DIM.ERH:2）。判不出/不在册 ⇒ AssertionError 判红：
+ * 4.980=20260326、4.981=20261111（2026-11-14 换代；261017 时代的 20261017 已退役）。判不出/不在册 ⇒ AssertionError 判红：
  * 语料被换/被改必须让闸报红，不许退成静默 skip。
  *
  * 钉位出处：
  * - 标签基线：specs/loader.md 附录 D.3 + SymbolsTest KDoc 的两根实测
- *   （4.980=110,066/110,042/6 组；4.981=117,055/117,025/7 组；2026-11-05 本路 A/B 实跑复核）；
+ *   （4.980=110,066/110,042/6 组；4.981=118,527/118,497/7 组）。
+ *   4.981 列于 2026-11-14（L34 PINS-REFRESH-1）在 4.981 根重测：**同一 `NOW_VERSION=20261017`
+ *   下语料又加了口上包**（ERB/ERH 4,258→4,324 文件），标签数随之 +1,472；
+ *   本列此前登记的是 2026-11-05 的 4.981 读数（117,055/117,025），故 4.981 语料根曾恒红。
+ *   7 组重名逐组与 2026-11-05 相同（EVENTFIRST 2 / EVENTLOAD 8 / EVENTTURNEND 2 / EVENTEND 2 /
+ *   EVENTCOMEND 10 / EVENTTRAIN 9 / EVENTCOM 4），只有总数与去重名字数变；
  * - PRINT_COLORBAR 生效行：两根 魔改内容/PRINT系/UI_Components_&_Tables.ERB 实读（959 / 1010）；
  * - NOW_VERSION 折叠读数：DimErhFamilyConstTest 两根实跑（其余 ERH 常量两根同值）。
  */
@@ -42,13 +47,14 @@ enum class ErbccCorpusProfile(
         colorBarLine = 959,
     ),
     V4_981(
-        nowVersion = 20261017L,
-        labelsTotal = 117_055,
-        labelsUnique = 117_025,
+        // 2026-11-14 语料换代 261017→261111：NOW_VERSION 随根重锚；标签数列待本机 261111 实测回填。
+        nowVersion = 20261111L,
+        labelsTotal = 119_156, // 2026-11-14 语料换代 261111 实测（261017=118_527；与 corpusSmoke 切片总数 119_156 互证）
+        labelsUnique = 119_125, // 2026-11-14 语料换代 261111 实测（261017=118_497）
         dupGroups = 7,
         dupGroupCounts = mapOf(
             "EVENTFIRST" to 2,
-            "EVENTLOAD" to 8,
+            "EVENTLOAD" to 9, // 2026-11-14 语料换代 261111：261017=8（其余组不变）
             "EVENTTURNEND" to 2,
             "EVENTEND" to 2,
             "EVENTCOMEND" to 10,

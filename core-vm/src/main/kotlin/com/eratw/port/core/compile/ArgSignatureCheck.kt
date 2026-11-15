@@ -7,6 +7,8 @@ import com.eratw.port.core.expr.FormConversion
 import com.eratw.port.core.expr.FormPart
 import com.eratw.port.core.expr.FuncCall
 import com.eratw.port.core.fn.Builtins
+import com.eratw.port.core.fn.CompileBuiltinView
+import com.eratw.port.core.fn.FullRegistryView
 import com.eratw.port.core.stmt.Argument
 import com.eratw.port.core.stmt.CaseExpression
 import com.eratw.port.core.stmt.MixedIntegerExprTerm
@@ -25,10 +27,17 @@ import java.lang.reflect.Field
  *
  * | 检查 | C# 证据 |
  * |---|---|
- * | 实参过多（`array.Length < srcArgs.Count`） | `CalledFunction.cs:138-140`（`TooManyFuncArgs`） |
  * | 形参省略且无默认值（`CompatiFuncArgOptional=NO`） | `CalledFunction.cs:167-172`（`CanNotOmitArgWithMessage`） |
  * | 实参与形参类型不符 | `CalledFunction.cs:174-199`（`CanNotConvertStrToInt` :178 / `CanNotConvertIntToStr` :183） |
  * | 表达式位内建函数个数/类型 | `IdentifierDictionary.cs:576-585`（回落 `methodDic` + `CheckArgumentType`，:580-584 抛 CodeEE）；个数分支实现 `FunctionMethod.cs:302-330`（`ArgsCountNotMatches` :311 / `ArgsNotNeeded` :314 / `ArgIsNotInt` :327 / `ArgIsNotStr` :329） |
+ *
+ * **实参过多不在此表**：蛇版 4.981 的 `ConvertArg` 已删除 1.824 的
+ * `array.Length < srcArgs.Count → TooManyFuncArgs` 硬判，多余实参静默丢弃
+ * （`reference/emuera-skia-4.981/Emuera/Runtime/Script/Process.CalledFunction.cs:212-357`
+ * 只循环 `func.Arg.Length` 次；fork 更新记录 CHANGELOG.md「ConvertArg() 多余参数静默丢弃」）。
+ * 照 1.824 报「参数过多」会把真机宿主上正常的多参写法误判成缺陷
+ * （现场：`fromEN/Addition/lib/DATEPICKER.ERB:56` `GET_MONTH(ACTIVE_MONTH, 1)` 打在
+ * `@GET_MONTH(ARG)` 上，见 [com.eratw.port.core.proc.ProcessRuntime] 的「实参多于形参」注释块）。
  *
  * ## 数据面（为什么能零改动接到编译产物上）
  *
@@ -84,11 +93,8 @@ import java.lang.reflect.Field
  *   TODO(verify)：可靠类型源是 `DimSpecLayout`/`LocalDim.isStr`，属 erbcc 侧。
  * - 内建**占位**（[BuiltinRegistry.isPlaceholder]）的 arity 元数据是家族标签
  *   （`registerUnimplemented(name, ret, 0, 4)` 的 4 不是真上限），跳过不判。
- * - 装载装置给「未定义 CALL 目标」补的 0 参空体桩也会触发参数过多告警 —— 那是既有
- *   stub 机制的回声（原版执行到该行才报未定义）。**运行期已同向收紧**：
- *   `ProcessRuntime.checkTooManyArgs` 对 `argc > arity` 抛 `{0}函数: 参数过多`
- *   （CalledFunction.cs:136-140），于是这类调用不再「静默跑空桩」而是就地报错 ——
- *   与原版「执行到该行才报错」同向，只是文案取参数过多而非未定义（stub 机制所致）。
+ * - 用户函数位**不再有「实参过多」这一类**（TOO_MANY 只剩内建表达式位；4.981 容忍多余实参，
+ *   见类头表下注释）。装载装置给「未定义 CALL 目标」补的 0 参空体桩也不再因此报红。
  */
 object ArgSignatureCheck {
 
@@ -135,6 +141,24 @@ object ArgSignatureCheck {
     fun checkProgram(
         program: Program,
         options: Options = Options(),
+        /**
+         * 内建查表视图（ENGC-3b，B6 组长接线）：缺省 [FullRegistryView] = 直查 registry，
+         * 行为与改前逐位相同；erbcc `--engine-profile` 通道传目标档视图，被裁名字在本类
+         * 的内建调用位扫描里判 null。
+         */
+        builtinView: CompileBuiltinView = FullRegistryView,
+        /**
+         * 目标档不可见内建名收集钩（`--engine-report` 数据面）：视图判 null 且非用户函数、
+         * 非降级哨兵的 [FuncCall] 上报 `(名字, 行)`；行可为 -1（池折叠抹行号），消费方取舍。
+         * 缺省 null = 零开销零行为差（I7）。
+         *
+         * 本扫描位只是**报告数据面**，不改变判决：被裁名照旧走既有「未定义的函数」路径
+         * （I4/D7，不新增文案），sink 只是把命中处 `(名字, 行)` 抄给 `--engine-report`。
+         * 卡点：表达式里调用被裁内建可能在更早的解析期（`ExprCallTable.classify`）就被拒、
+         * 走不到这里 ⇒ `unknownFunctions` 半边在某些夹具下恒空，属已知现象，其真实可达性由
+         * B7-E2E 定量（见 CONTRACT §8.5 留验），不许在此处为凑命中放宽门控。
+         */
+        builtinUnknownSink: ((String, Int) -> Unit)? = null,
     ): List<ArgSignatureWarning> {
         // 基线折回（R7-C1 最小注入，组长授权 2026-11-01）：带基线的补丁段（codeBase /
         // functionBase 非零，L1 的窗口语义）按 Program.instructionBase / functionBase 折回
@@ -145,7 +169,7 @@ object ArgSignatureCheck {
         // 与改前的无基线扫描逐位相同（erbcc 全量产物指纹不变的自证口径）。
         val out = ArrayList<ArgSignatureWarning>()
         checkUserCalls(program, options, out)
-        checkBuiltinCalls(program, out)
+        checkBuiltinCalls(program, out, builtinView, builtinUnknownSink)
         if (options.strict && out.isNotEmpty()) {
             val first = out.first()
             val detail = buildString {
@@ -202,18 +226,8 @@ object ArgSignatureCheck {
         val line = program.lineOf(pc)
         val callee = fi.name
         val where = "调用方 ${caller ?: "?"}:$line"
-        if (argc > fi.arity) {
-            // spec: CalledFunction.cs:138-140（TooManyFuncArgs）
-            out.add(
-                ArgSignatureWarning(
-                    kind = ArgSignatureWarningKind.TOO_MANY,
-                    caller = caller, line = line, callee = callee, position = 0,
-                    argc = argc, arity = fi.arity,
-                    message = "$callee 函数: 参数过多（$where：形参 ${fi.arity} 个，实参 $argc 个）",
-                ),
-            )
-            return
-        }
+        // 实参多于形参**不告警**：4.981 的 ConvertArg 静默丢弃多余实参（类头「实参过多不在此表」），
+        // 运行期绑定点也只写被调形参覆盖的位。此处只继续判省略位与类型。
         val callArgs = program.callArgsAt(pc)
         // 逐位省略判定：callArgs 与实参位一一对应（stageArgs 每位置一条）；
         // 事件入口的 _CALL 不登记 callArgs，退回裸 argc 比较。
@@ -300,11 +314,18 @@ object ArgSignatureCheck {
      * （program.functions 命中即跳过，`_CALL` 路径已判或运行期重入），
      * 表达式位降级哨兵（`EXPR_TEMP_PREFIX`，`#` 开头）不是真函数名。
      */
-    private fun checkBuiltinCalls(program: Program, out: MutableList<ArgSignatureWarning>) {
+    private fun checkBuiltinCalls(
+        program: Program,
+        out: MutableList<ArgSignatureWarning>,
+        builtinView: CompileBuiltinView,
+        unknownSink: ((String, Int) -> Unit)?,
+    ) {
         val userNames = HashSet<String>(program.functions.size * 2)
         for (f in program.functions) userNames.add(f.name.uppercase())
         val seen = HashSet<String>()
-        val visit: (FuncCall, Int) -> Unit = { fc, line -> checkOneBuiltin(fc, line, userNames, seen, out) }
+        val visit: (FuncCall, Int) -> Unit = { fc, line ->
+            checkOneBuiltin(fc, line, userNames, seen, out, builtinView, unknownSink)
+        }
         for (e in program.expressions()) {
             walk(e, 0, -1, visit)
         }
@@ -320,13 +341,20 @@ object ArgSignatureCheck {
         userNames: Set<String>,
         seen: MutableSet<String>,
         out: MutableList<ArgSignatureWarning>,
+        builtinView: CompileBuiltinView,
+        unknownSink: ((String, Int) -> Unit)?,
     ) {
         val key = fc.name.uppercase()
         if (key in userNames) return
         if (key.startsWith("#")) return   // 表达式位方法调用降级哨兵，不是函数名
-        val m = Builtins.registry[fc.name] ?: return
+        val m = builtinView.method(fc.name) ?: run {
+            // ENGC-3b：目标档视图判 null（被裁或未注册）⇒ 上报缺口后走既有「未定义」路径。
+            // 缺省视图 + 缺省 sink 时与改前逐位相同（纯 return，无上报）。
+            unknownSink?.invoke(fc.name, line)
+            return
+        }
         // 占位的 min/max 是家族标签不是真签名（registerUnimplemented(name, ret, 0, 4)）
-        if (Builtins.registry.isPlaceholder(key)) return
+        if (builtinView.isPlaceholder(key)) return
         val n = fc.args.size
         // 规范折叠让同一 FuncCall 实例被多条语句共享：按 (名字, 个数, 行) 去重
         if (!seen.add("$key|$n|$line")) return
@@ -463,7 +491,11 @@ object ArgSignatureCheck {
 
 /** 告警类别（与 C# Lang 文案一一对应）。 */
 enum class ArgSignatureWarningKind {
-    /** 实参多于形参（`TooManyFuncArgs`，spec: CalledFunction.cs:138-140）。 */
+    /**
+     * 内建函数实参多于槽位（`TooManyFuncArgs`，4.981 仍保留：
+     * `reference/emuera-skia-4.981/Emuera/Runtime/Script/Statements/Function/FunctionMethod.cs:263`、
+     * `Creator.Method.cs:3381`）。用户函数位不产这一类 —— 4.981 的多余实参静默丢弃。
+     */
     TOO_MANY,
 
     /** 形参位无实参且无默认值（`CanNotOmitArgWithMessage`，spec: CalledFunction.cs:167-172）。 */

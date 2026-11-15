@@ -2,6 +2,7 @@ package com.eratw.port.core.proc
 
 import com.eratw.port.core.audio.SoundChannelTable
 import com.eratw.port.core.code.CallArg
+import com.eratw.port.core.code.EventRegistry
 import com.eratw.port.core.code.InfiniteLoopAlert
 import com.eratw.port.core.code.InfiniteLoopAnswer
 import com.eratw.port.core.code.RuntimeCallArg
@@ -27,14 +28,17 @@ import com.eratw.port.core.expr.FormStringTerm
 import com.eratw.port.core.expr.IdentifierResolver
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.ParserConfig
+import com.eratw.port.core.compat.StringCompareDialect
 import com.eratw.port.core.expr.Value
 import com.eratw.port.core.expr.VarInfo
 import com.eratw.port.core.expr.VarRef
 import com.eratw.port.core.expr.VariableReader
+import com.eratw.port.core.expr.toCodeEE
 import com.eratw.port.core.fn.BuiltinEvalContext
 import com.eratw.port.core.fn.BuiltinHost
 import com.eratw.port.core.fn.Builtins
 import com.eratw.port.core.fn.ConfigMethods
+import com.eratw.port.core.fn.EngineSurface
 import com.eratw.port.core.fn.UserFunctionKind
 import com.eratw.port.core.fn.EmDataPools
 import com.eratw.port.core.fn.formatDotNet
@@ -126,9 +130,10 @@ import java.util.IdentityHashMap
  *   Def[i] 替换）；`ARG`/`ARGS`/私有形参的隐式默认 0/"" 由 [bindImplicitArgDefault]
  *   在绑定点补写（spec: ErbLoader.cs:714-722）。实参类型失配与省略位的报错/写值同属
  *   原版 ConvertArg 的分派，逐条见 [bindCallArgs] 的 KDoc。
- *   实参过多（TooManyFuncArgs，CalledFunction.cs:136-140）由 [checkTooManyArgs] /
- *   [requireArgCount] 在建帧绑定点补齐（`{0}函数: 参数过多`，zhs:901）；原版静态名在
- *   装载期就 Warn 成 error，本侧相位晚于装载期（与省略位/类型失配同一条时点差）。
+ *   实参**多于**形参**不报错**：蛇版 4.981 的 `ConvertArg` 已移除 1.824 的
+ *   TooManyFuncArgs 硬判，多余实参按位置被静默丢弃（`Process.CalledFunction.cs:212-357`
+ *   只循环 `func.Arg.Length` 次；fork 更新记录 CHANGELOG.md「ConvertArg() 多余参数静默丢弃」）。
+ *   本侧同样只按被调形参位绑定，多余位不读不写。
  * - 根级调用（无调用方帧）时实参由 API 参数直接给出：`List<Value?>` 通道（[invokeUserMethod]
  *   / [callF] / [tryCallF]）位置完整 ⇒ [bindPositionalValues] 按形参位绑定；旧
  *   `callFunction(key, intArgs, strArgs)` 通道的 int/str 两数组本身已丢位置 ⇒
@@ -274,6 +279,50 @@ class ProcessRuntime(
      * 失败一律回落 [InfiniteLoopAnswer.NoUi]（同 onPressureCheckpoint 的纪律）。
      */
     private val infiniteLoopPrompt: ((InfiniteLoopAlert) -> InfiniteLoopAnswer)? = null,
+    /**
+     * `loopguard.device_budget_continue` 轨迹行的落点（宿主运行轨迹通道）。
+     *
+     * 生产 = app `GameHost` 的 `LoadTrace.mark`，经 `GameSession` 的 `stageMark` 原样传进来
+     * （同一根 lambda，不新开写盘面）。只写**取证行**、不参与任何判定：null = 宿主不要这条
+     * 踪迹（装置 / 测试），回调抛错一律吞掉（写轨迹失败不该反过来把这一局打死）。
+     *
+     * 为什么要留这一行：装置预算被「继续」抬过一次，是把 10 亿步口径的现场往后推的唯一原因；
+     * 没有它，事后看失败报告只会看到一条「执行步数超过上限」而答不出「玩家是不是点过继续」。
+     */
+    private val loopGuardTrace: ((String) -> Unit)? = null,
+    /**
+     * `loopalert.escalate` / 告警现场里「累计后台毫秒」的读数源（见
+     * [VmHost.loopGuardBackgroundMs]）。
+     *
+     * 生产 = app `GameHost` 的后台记账（`onPause`→`onResume` 累计，与注入给
+     * `VmConfig.monotonicMs` 的那把尺**同源**）；null（缺省）= 装置 / 测试 / 不记账的宿主，
+     * 读数恒 0 —— 取证位缺省即可，不参与任何判定。
+     */
+    private val backgroundMsProvider: (() -> Long)? = null,
+    /**
+     * 目标引擎的函数面门控（ENGC-3）。null（缺省）= 不过滤 = eraTW 零干扰 / 装置旧路径；
+     * 显式目标档由 [GameSession] 传入，落点只有 [BuiltinEvalContext.surface] 一处：
+     * 派发、解析期返回类型、`ENUMFUNC*` 候选表三条读同一份可见性。
+     */
+    private val engineSurface: EngineSurface? = null,
+    /**
+     * 字符串关系比较方言（ENGC-4）。缺省 [StringCompareDialect.FIXED] = 4.981 实跑口径；
+     * 显式目标档由 [GameSession] 从 [RuntimeCompatibilityProfile.stringCompare] 传入，
+     * 落点只有 [EvalContext.stringCompareDialect] 一处（`strCompare` 的 `>=`/`<=` 读它）。
+     */
+    private val stringCompareDialect: StringCompareDialect = StringCompareDialect.FIXED,
+    /**
+     * 事件一对多四桶表（M2-6）：Mod 链在场时的**运行期事件派发唯一真源**。
+     *
+     * 由 [GameSession] 从 [com.eratw.port.core.mod.ModChainRuntimePlan.eventRegistry]
+     * 单路注入，与 program / FunctionTable / dispatch 同源（LSC 一次派生、运行期只读）。
+     * null（缺省）= 关态 / 无 Mod / 未接线前：[executeEvent] 走原有
+     * [FunctionTable.eventCallOrder] 路径，行为逐位不变。
+     *
+     * **在场即接管，不静默回落**：表在场但事件名为空时按「事件不存在」处理（含非事件名
+     * 负控），绝不退回旧表造出第二套派发源。
+     */
+    val eventRegistry: EventRegistry? = null,
 ) : VmHost {
 
     private val table: FunctionTable = functionTable
@@ -318,6 +367,69 @@ class ProcessRuntime(
      */
     @Volatile var functionProbe: FunctionProbe? = null
 
+    /**
+     * TEMP(perf-probe) E0：嵌套 VM 通道墙钟探针（形状见 [NestedChannelProbe]）。
+     * **null = 生产缺省 = 零行为**：所有接线点都是「先判空、再取 nanoTime」。
+     */
+    @Volatile var nestedChannelProbe: NestedChannelProbe? = null
+
+    /** [nestedChannelProbe] 的逐段计时暂存（单线程 ADR-003；只在 probe != null 时写）。 */
+    private var probeArgNs: Long = 0L
+    private var probeRefNs: Long = 0L
+    private var probeToValueNs: Long = 0L
+    private var probeScratchNs: Long = 0L
+
+    /**
+     * E1c：REF 形参判定是否复用 [ParamPlan] 缓存（缺省开）。
+     * `-Deratw.perf.noParamPlanRef=true` 为关态（回到每次 `refUserParamAt` 现算）。
+     *
+     * 实测（2026-11-09，save03 + `.tmp/erbc-e0`，`GMF_METHOD_UPDATE` ×10/批，10 对奇偶翻转）：
+     * off 1.589 ms → on 1.305 ms，逐对比值 **median 1.205×**（9/10 对 ≥1.04）；
+     * 等价对拍 **3360 次 / 0 不一致**；全量产物 `program.erbc` sha256
+     * `5AD90E99C9F20B9F281A2F16C253CBAF4965CFC903D4769EB0BDEC3C1590E9C0` 逐字节不变。
+     * 收益来自 Java 宿主侧（`store.userVar` 查表），不是动态指令数。
+     */
+    @Volatile var useParamPlanRef: Boolean = !java.lang.Boolean.getBoolean("eratw.perf.noParamPlanRef")
+
+    /**
+     * E1c 等价性对拍开关：true 时每个实参同时算「缓存值」与「现算值」，
+     * 不一致累计到 [refDetectionMismatches]。缺省 false = 生产零额外成本。
+     */
+    @Volatile var checkParamPlanRef: Boolean = java.lang.Boolean.getBoolean("eratw.perf.checkParamPlanRef")
+
+    /** E1c 对拍计数（只在 [checkParamPlanRef] 为 true 时增长）。 */
+    internal var refDetectionChecks: Long = 0L
+        private set
+    internal var refDetectionMismatches: Long = 0L
+        private set
+
+    internal fun resetRefDetectionCounters() {
+        refDetectionChecks = 0L
+        refDetectionMismatches = 0L
+    }
+
+    /** 最近一次外层 `invokeUserMethod` 的 nested VM 执行步数（步数等价断言用）。 */
+    internal var lastNestedSteps: Long = 0L
+        private set
+
+    internal fun lastNestedStepsForTest(): Long = lastNestedSteps
+
+    /** 外层一次 `invokeUserMethod` 的**总**步数（rootSteps + 所有嵌套 rootSteps 之和）。 */
+    internal var lastTotalNestedSteps: Long = 0L
+        private set
+
+    internal fun lastTotalNestedStepsForTest(): Long = lastTotalNestedSteps
+
+    /** 测试用逐函数步数归因：name -> [calls, rootSteps]。 */
+    @Volatile var stepAttributionEnabled: Boolean = false
+    internal val stepAttribution = LinkedHashMap<String, LongArray>()
+    internal fun resetStepAttribution() { stepAttribution.clear() }
+    internal fun stepAttributionSnapshot(): Map<String, LongArray> =
+        stepAttribution.mapValues { it.value.copyOf() }
+    private var probeEnterNs: Long = 0L
+    private var probeExitNs: Long = 0L
+    private var probeInNestedRun: Boolean = false
+
     // ------------------------------------------------------------------
     // VM（唯一一份 Program，任意入口执行）
     // ------------------------------------------------------------------
@@ -353,6 +465,11 @@ class ProcessRuntime(
         activeVm = vm
 
         // 局部长度注册（spec: VariableLocal.cs:40-90 —— LOCAL/LOCALS 声明优先，ARG/ARGS 取 max）
+        // ARG/ARGS/ARGF 的声明长是**原版口径 max(下标 + 1)**（spec: ErbLoader.cs:565-576,612-613
+        // 整数侧；fork-src ErbLoader.cs:709-710,787 的 ARGF），不是形参个数 —— 见
+        // [VariableStore.LocalLengths.declaredLength]。稀疏形参（`@F(ARG, ARG:3)`）必须按 4 开；
+        // 按个数算会在第三方把 `VariableSize.csv` 的 ARG 缩到 1 时让省略位写回直接越界
+        // （2026-11-12 真机 eratohoReverse 的 `ARG[3]`）。
         // PERF: the full corpus has 110,072 metadata rows; the old loop allocated
         // 110,072 LocalLengths objects plus 110,072 uppercase() calls and HashMap
         // puts. Two equivalent merges:
@@ -362,50 +479,88 @@ class ProcessRuntime(
         //    map has no iteration reader => final observable semantics are equal;
         // 2) count non-zero rows first and pre-size the bucket table once
         //    (reserveLocalLengths), avoiding repeated HashMap rehash/copies.
-        // PERF(MEM)：ARGF 的形参名走 `paramNamesPeek`（段 8 只读视图）而不是
+        // PERF(MEM)：形参名走 `paramNamesPeek`（段 8 只读视图）而不是
         //    `program.paramNames(...)` —— 后者对惰性表是 `functions.get(i)`，会把 M11-MEM
         //    按需解码的 110,072 个 FunctionInfo 全量物化并**永久驻留**（每装配一次 store 付一次）；
-        //    容器根本没有段 8（v1/v2 产物）时整趟读数直接省掉，恒 0 与改造前同值。
+        //    容器根本没有段 8（v1/v2 产物）时整趟读数直接省掉，声明长回落到元数据里的个数
+        //    （与改造前同值）。形参表每函数只取一次（旧实现两趟各取一次）。
         val functions = table.all()
-        val scanArgf = program.hasAnyParamNames()
-        var lengthEntries = 0
-        for (m in functions) {
-            if (m.localSize != 0 || m.localsSize != 0 || m.floatLocalSize != 0 ||
-                m.argIntCount != 0 || m.argStrCount != 0 ||
-                (scanArgf &&
-                    VariableStore.LocalLengths.floatArgFromParams(program.paramNamesPeek(m.index)) != 0)
-            ) {
-                lengthEntries++
-            }
-        }
-        store.reserveLocalLengths(lengthEntries)
-        for (m in functions) {
-            // ARGF 的形参声明长：原版是 `label.ArgFloatLength`（spec: fork-src ErbLoader.cs:787），
-            // 由 VariableLocal 拿去和 VARIABLESIZE.CSV 的浮点档位取 max（spec: :48-53）——
-            // 「声明只增不减」。移植侧从程序表的形参名数出来（口径与逐字等价于整数侧
-            // erbcc 的 argInt/argStr 分桶，见 VariableStore.LocalLengths.floatArgFromParams）。
-            val floatArg = if (scanArgf) {
-                VariableStore.LocalLengths.floatArgFromParams(program.paramNamesPeek(m.index))
+        val peekNames = program.hasAnyParamNames()
+        // 先算后注册：行数在聚合趟结束后统计（[reserveLocalLengths] 的容量提示），
+        // 数组只活到构造结束（4 B × 函数数）；替代旧实现的两趟 110k 形参名扫描。
+        val lengths = arrayOfNulls<VariableStore.LocalLengths>(functions.size)
+        for ((i, m) in functions.withIndex()) {
+            val refs = if (peekNames) program.paramNamesPeek(m.index) else emptyList()
+            // 整数侧个数来自元数据（erbcc 分桶），浮点侧没有对应的个数字段 ⇒ 下界 0。
+            val arg = VariableStore.LocalLengths.declaredLength(refs, ARG_VAR, m.argIntCount)
+            val args = VariableStore.LocalLengths.declaredLength(refs, ARGS_VAR, m.argStrCount)
+            val floatArg = if (peekNames) {
+                VariableStore.LocalLengths.declaredLength(refs, ARGF_VAR, 0)
             } else {
                 0
             }
             if (m.localSize == 0 && m.localsSize == 0 && m.floatLocalSize == 0 &&
-                m.argIntCount == 0 && m.argStrCount == 0 && floatArg == 0
+                arg == 0 && args == 0 && floatArg == 0
             ) {
                 continue
             }
-            store.defineLocalLengths(
-                m.key,
-                VariableStore.LocalLengths(
-                    local = m.localSize,
-                    locals = m.localsSize,
-                    arg = m.argIntCount,
-                    args = m.argStrCount,
-                    // `#LOCALFSIZE`：必须在首次 LOCALF/ARGF 访问前注册（FloatLocal 实例懒建并缓存长度）。
-                    floatLocal = m.floatLocalSize,
-                    floatArg = floatArg,
-                ),
+            lengths[i] = VariableStore.LocalLengths(
+                local = m.localSize,
+                locals = m.localsSize,
+                arg = arg,
+                args = args,
+                // `#LOCALFSIZE`：必须在首次 LOCALF/ARGF 访问前注册（FloatLocal 实例懒建并缓存长度）。
+                floatLocal = m.floatLocalSize,
+                floatArg = floatArg,
             )
+        }
+        // 事件组聚合（契约 CONTRACT-RT2-M32A 判据 1；C# 锚 = LabelDictionary.cs →
+        // `SortLabel` 事件支：同名事件的全部成员共享 LOCAL/LOCALS/LOCALF 有效尺寸 =
+        // 组内声明 max，再抬 `IdentifierDictionary.getLocalDefaultSize` 的档位下限，
+        // 然后回写全部成员——事件成员声明 `#LOCALSIZE 1` 不等于它只有 1 格）。
+        // 聚合在**装配期**一次算好、只改注册值；执行派发面（dispatchEventMembers）不动。
+        // 档位值 = `VariableStore.localDefaultSize`（registry dims[0]，即部署 VariableSize.csv
+        // 覆盖后的档）：本作 CSV 实值 LOCAL=200 / LOCALS=100（CSV/VariableSize.csv:119-120）、
+        // LOCALF 未声明 ⇒ 出厂 10（fork-src ConstantData.cs:309）。
+        // C# 事件支不 resize ARG（事件成员无形参），arg/args/floatArg 三字段照抄各成员
+        // 原值（全 0）；同名成员共用注册键（帧 funcKey = 大写名），聚合值对组内全体生效。
+        // 分组视图 = FunctionTable.eventCallOrder（与 eventMembersByKey 同源）；
+        // 非事件函数不进本段（C# 只在事件支聚合），`#LOCALSIZE 1` 缩到 1 是原版语义。
+        val eventGroups = LinkedHashMap<String, MutableList<Int>>()
+        for ((i, m) in functions.withIndex()) {
+            if (m.isEvent) eventGroups.getOrPut(m.key) { ArrayList() }.add(i)
+        }
+        for ((key, idxs) in eventGroups) {
+            if (table.eventCallOrder(key) == null) continue // 双视图一致性守卫（同源时恒非 null）
+            var localMax = 0
+            var localsMax = 0
+            var floatLocalMax = 0
+            for (i in idxs) {
+                val l = lengths[i]
+                if (l != null) {
+                    if (l.local > localMax) localMax = l.local
+                    if (l.locals > localsMax) localsMax = l.locals
+                    if (l.floatLocal > floatLocalMax) floatLocalMax = l.floatLocal
+                }
+            }
+            if (localMax < store.localDefaultSize("LOCAL")) localMax = store.localDefaultSize("LOCAL")
+            if (localsMax < store.localDefaultSize("LOCALS")) localsMax = store.localDefaultSize("LOCALS")
+            if (floatLocalMax < store.localDefaultSize("LOCALF")) floatLocalMax = store.localDefaultSize("LOCALF")
+            for (i in idxs) {
+                val l = lengths[i]
+                lengths[i] = VariableStore.LocalLengths(
+                    local = localMax,
+                    locals = localsMax,
+                    arg = l?.arg ?: 0,
+                    args = l?.args ?: 0,
+                    floatLocal = floatLocalMax,
+                    floatArg = l?.floatArg ?: 0,
+                )
+            }
+        }
+        store.reserveLocalLengths(lengths.count { it != null })
+        for ((i, m) in functions.withIndex()) {
+            lengths[i]?.let { store.defineLocalLengths(m.key, it) }
         }
     }
 
@@ -459,6 +614,41 @@ class ProcessRuntime(
 
     /** 运行时自己的帧深度（含无元数据函数帧），用于识别"根调用的直接被调帧"。 */
     private var scopeDepth = 0
+
+    /**
+     * 每帧**建帧调用点 pc** 的诊断镜像（只读取证口，语义零改动）。
+     *
+     * 下标 = 帧深度（与 [scopeDepth] 同源：本次 enter 之后 `scopeDepth - 1`），
+     * 值 = `VirtualMachine.lastCallPc`（根帧/重入入口为 -1）。写入点只有
+     * [onFunctionEnter] 一处，退帧**不回卷**（同 `Vm.retPc` 的既有口径）——
+     * 这样 `run()` 的 finally 把调用栈回卷之后，[erbFrameStack] 仍能按
+     * [VirtualMachine.funcStackAtThrow] 的帧数读回本次异常每一帧的调用点。
+     *
+     * 为什么需要它：`funcStackAtThrow` 只镜像了函数下标，行号/pc 不在其中；
+     * 而 `retPc` 是 VM 的 private 字段，本类不可见。建帧那一刻 `lastCallPc`
+     * 正是调用点在**调用方**函数里的 pc，按深度记下来即可反推外层的挂起行。
+     *
+     * 容量按需翻倍且写前判界：嵌套 VM 与主 VM 共用 [scopeDepth]，极端深度下
+     * 宁可丢这一帧的调用点读数，也不许让取证口抛错。
+     */
+    private var frameCallSitePcs = IntArray(64)
+
+    /**
+     * 记录一次建帧的调用点 pc（[activeVm] 侧读取，见 [frameCallSitePcs]）。
+     *
+     * 由 [onFunctionEnter] 在 `scopeDepth++` 之后调用；`idx < 0`（不该发生）与
+     * 扩容失败都静默跳过 —— 取证面绝不反向影响执行。
+     */
+    private fun recordFrameCallSite(callSitePc: Int) {
+        val idx = scopeDepth - 1
+        if (idx < 0) return
+        var a = frameCallSitePcs
+        if (idx >= a.size) {
+            a = a.copyOf(maxOf(idx + 1, a.size * 2))
+            frameCallSitePcs = a
+        }
+        a[idx] = callSitePc
+    }
 
     /**
      * 根级调用待绑定的实参；首个带元数据的被调帧消费一次（见 [pendingRootBind]）。
@@ -775,6 +965,10 @@ class ProcessRuntime(
         effectiveBuiltinHost,
         // FN-05：只注入「当前行」这一条现读通道，其余参数维持缺省。
         currentScriptLineProvider = { currentScriptLineNow() },
+        // ENGC-3：显式目标档才给门控；null 保持全量注册表（eraTW 零干扰）。
+        surface = engineSurface,
+        // ENGC-4：比较方言只影响 `>=`/`<=`；缺省 FIXED 与 B5 之前等价。
+        stringCompareDialect = this@ProcessRuntime.stringCompareDialect,
     ) {
         override fun callFunction(name: String, args: List<Value?>): Value {
             exprSentinelValue(name)?.let { return it }
@@ -879,6 +1073,14 @@ class ProcessRuntime(
             val meta = methodMetaOf(name)
                 ?: throw CodeEE("表达式位置调用用户方法 $name 失败（符号表无该方法的非事件定义）")
             val paramNames = program.paramNames(meta.index)
+            val plans = if (useParamPlanRef || checkParamPlanRef) paramPlansOf(meta) else null
+            val probe = nestedChannelProbe
+            val probeT0 = if (probe != null) System.nanoTime() else 0L
+            if (probe != null) {
+                probeRefNs = 0L
+                probeToValueNs = 0L
+                probeScratchNs = 0L
+            }
             // PERF（2026-10-27 第四批）：两张逐位实参表从**借还池**取（见 [refCallScratchPool]）。
             // 旧实现每次调用现开 `ArrayList<Value?>(args.size)` + `ArrayList<VarRef?>(args.size)`，
             // JFR 分配采样实测占执行循环内分配的 **18.6%（82.89 MiB）**，其中 `Object[]` 45.95 +
@@ -888,13 +1090,34 @@ class ProcessRuntime(
             // 按深度索引会撞上同一格；借还池天然隔离。
             // 归还时机 = `invokeUserMethod` 返回之后：它内部 `pendingRoot`/`pendingRefBindings`
             // 只在这期间持有这两张表，返回前已在 finally 里置空，故复用安全。
+            val scratchT0 = if (probe != null) System.nanoTime() else 0L
             val scratch = borrowRefCallScratch()
+            if (scratchT0 != 0L) probeScratchNs += System.nanoTime() - scratchT0
             val values = scratch.values
             val refs = scratch.refs
             try {
                 for (i in args.indices) {
                     val pn = paramNames.getOrNull(i)
-                    if (pn != null && refUserParamAt(pn, meta) != null) {
+                    val refT0 = if (probe != null) System.nanoTime() else 0L
+                    val cachedRef = plans?.getOrNull(i)?.isRef == true
+                    val isRef: Boolean
+                    if (useParamPlanRef) {
+                        isRef = cachedRef
+                        if (checkParamPlanRef) {
+                            val liveRef = pn != null && refUserParamAt(pn, meta) != null
+                            refDetectionChecks++
+                            if (cachedRef != liveRef) refDetectionMismatches++
+                        }
+                    } else {
+                        val liveRef = pn != null && refUserParamAt(pn, meta) != null
+                        isRef = liveRef
+                        if (checkParamPlanRef) {
+                            refDetectionChecks++
+                            if (cachedRef != liveRef) refDetectionMismatches++
+                        }
+                    }
+                    if (refT0 != 0L) probeRefNs += System.nanoTime() - refT0
+                    if (isRef) {
                         val e = args[i]
                             ?: throw CodeEE.keyed(LangKey.CanNotOmitRefArg, meta.name, i + 1)
                         val vr = e as? VarRef
@@ -902,15 +1125,19 @@ class ProcessRuntime(
                         values.add(null) // REF 位不求值（原版只取数组本体）
                         refs.add(vr)
                     } else {
+                        val valueT0 = if (probe != null) System.nanoTime() else 0L
                         values.add(args[i]?.toValue(this))
+                        if (valueT0 != 0L) probeToValueNs += System.nanoTime() - valueT0
                         refs.add(null)
                     }
                 }
                 for (p in args.size until paramNames.size) {
-                    if (refUserParamAt(paramNames[p], meta) != null) {
+                    val tailRef = if (useParamPlanRef) plans?.getOrNull(p)?.isRef == true else refUserParamAt(paramNames[p], meta) != null
+                    if (tailRef) {
                         throw CodeEE.keyed(LangKey.CanNotOmitRefArg, meta.name, p + 1)
                     }
                 }
+                if (probe != null) probeArgNs = System.nanoTime() - probeT0
                 return invokeUserMethod(name, values, refs)
                     ?: throw CodeEE("表达式位置调用用户方法 $name 失败（符号表无该方法的非事件定义）")
             } finally {
@@ -1085,6 +1312,10 @@ class ProcessRuntime(
         // perf 池普查（PoolCensus/SizeModel）须在建 ProcessRuntime 之前做。
         program.releaseStatementRaws()
         store.lineCountSource = { consoleBridge.lineCount }
+        // 4.981 钳制类告警（RAND:n 伪变量等）唯一上屏出口：存储层拿不到 EvalContext，
+        // 由这里把系统行桥到 evalContext.printSystemLine —— 它会先 setUseUserStyle(false)
+        // 再 print + newLine，走文字流唯一出口 consoleBridge（契约 C6），不另开第二通道。
+        store.systemLineSink = { evalContext.printSystemLine(it) }
     }
 
     /**
@@ -1232,16 +1463,36 @@ class ProcessRuntime(
      */
     private fun currentScriptLineNow(): Pair<String, Int>? {
         val key = activeVm.currentFunctionKey ?: return null
-        // 缺省从帧下标直取 meta.position（不持有侧车 fileByKey 表，也不经键表，见 B6 FN-05）；
-        // 显式注入的 sourceFileOf 优先（装置可直接钉文件表）。
-        val file = sourceFileOf?.invoke(key)
-            ?: table.sourceFileOfIndex(activeVm.currentFunctionIndex)
-            ?: return null
-        if (file.isEmpty() || file.startsWith("·")) return null
+        val file = scriptFileOfIndex(activeVm.currentFunctionIndex, key) ?: return null
         val line = program.lineOf(activeVm.lastPc)
         if (line < 0) return null
         return file to line
     }
+
+    /**
+     * 函数键 + **帧下标** → 源文件显示名（[currentScriptLineNow]、[stampPosition] 与
+     * [scriptFileOf] 共用的唯一判据）：显式注入的 [sourceFileOf] 优先（装置可直接钉文件表）；
+     * 缺省从帧下标直取 meta.position（不持有侧车 fileByKey 表，也不经键表，见 B6 FN-05）。
+     * 空串与 `·` 起头的合成入口 → null。
+     *
+     * 下标是**显式参数**而不是就地读 `activeVm.currentFunctionIndex`：跨帧查询（错误在
+     * 内层帧抛出、在调用帧被捕获）时两者不同帧，拿当前帧下标配上别帧的 key 会查错文件。
+     */
+    private fun scriptFileOfIndex(index: Int, key: String): String? {
+        val file = sourceFileOf?.invoke(key)
+            ?: table.sourceFileOfIndex(index)
+            ?: return null
+        return if (file.isEmpty() || file.startsWith("·")) null else file
+    }
+
+    /**
+     * 见 [com.eratw.port.core.code.VmHost.scriptFileOf]：VM 抛点自带的文件维度（MODERN-R8-A）。
+     *
+     * 判据与语句层逐字同源（[scriptFileOfIndex]）：注入通道按键查、缺省按帧下标直取
+     * meta.position。默认宿主没有这条通道（缺省 null），本类是全工程唯一接线方。
+     */
+    override fun scriptFileOf(functionIndex: Int, functionKey: String): String? =
+        scriptFileOfIndex(functionIndex, functionKey)
 
     /**
      * 当前脚本行的**身份位**（原版 `Process.getCurrentLine` 的对象身份）。
@@ -1305,7 +1556,7 @@ class ProcessRuntime(
             // OperatorMethodManager.cs:99-101），由 Process 显示时携带当前行；移植侧
             // ExprEvalException 若裸穿，失败屏就没有「（函数 行N）」现场 —— 2026-10-25
             // 真机「负数(-16)不能与字符串相乘」启动失败无定位，就是这一处漏盖章。
-            throw stampPosition(CodeEE(e.message ?: "表达式求值失败"), env)
+            throw stampPosition(e.toCodeEE(), env)
         }
         // `LOADDATA` 成功 → `state.ClearFunctionList()`（Process.cs:1860）：
         // 整个函数栈立刻作废（含正在执行本语句的帧及其全部调用者），`begintype` 一并清空
@@ -1380,6 +1631,53 @@ class ProcessRuntime(
     /** 见 [VmHost.askInfiniteLoop]；宿主回调缺席或抛异常时一律按「没有可用 UI」走。 */
     override fun askInfiniteLoop(alert: InfiniteLoopAlert): InfiniteLoopAnswer =
         infiniteLoopPrompt?.let { runCatching { it(alert) }.getOrNull() } ?: InfiniteLoopAnswer.NoUi
+
+    /**
+     * 见 [VmHost.askDeviceBudgetContinue]：与墙钟告警**同一条弹框通道**
+     * （[infiniteLoopPrompt]，不另造第二张框），区别只在答「继续」时多落一条
+     * `loopguard.device_budget_continue` 轨迹行。
+     *
+     * 缺省（[infiniteLoopPrompt] 为 null = 装置 / headless）返回
+     * [InfiniteLoopAnswer.NoUi]，由 VM 走既有可诊断中止 —— 与 [askInfiniteLoop] 的
+     * 缺省口径同源，不在这一维引入「没有 UI 也自动继续」的新行为。
+     */
+    override fun askDeviceBudgetContinue(
+        alert: InfiniteLoopAlert,
+        steps: Long,
+        budget: Long,
+        nextBudget: Long,
+    ): InfiniteLoopAnswer {
+        val answer = infiniteLoopPrompt?.let { runCatching { it(alert) }.getOrNull() }
+            ?: InfiniteLoopAnswer.NoUi
+        if (answer == InfiniteLoopAnswer.Continue) {
+            runCatching {
+                loopGuardTrace?.invoke(
+                    "loopguard.device_budget_continue steps=$steps budget=$budget next=$nextBudget",
+                )
+            }
+        }
+        return answer
+    }
+
+    /**
+     * 见 [VmHost.loopAlertEscalated]：玩家答「继续」后阈值翻倍的留痕。
+     *
+     * 落 `loopalert.escalate base=<原始阈值> eff=<新生效阈值> nth=<下一问序号>`，走与
+     * `loopguard.device_budget_continue` **同一条** trace 通道（`loopGuardTrace`，
+     * 生产 = app `LoadTrace.mark`）。这份台账是「同一段到底问了几次」的唯一事后证据：
+     * 没有它，`elapsedMs` 很大的现场分不清「一次跑了 6 分钟」与「问过一次又跑 6 分钟」。
+     *
+     * 只写取证：回调缺席 / 抛错一律吞掉（写轨迹失败不该反过来把这一局打死）。
+     */
+    override fun loopAlertEscalated(baseMs: Long, effectiveMs: Long, nth: Int) {
+        runCatching {
+            loopGuardTrace?.invoke("loopalert.escalate base=$baseMs eff=$effectiveMs nth=$nth")
+        }
+    }
+
+    /** 见 [VmHost.loopGuardBackgroundMs]：宿主后台记账的原样读数（缺席 ⇒ 0）。 */
+    override fun loopGuardBackgroundMs(): Long =
+        backgroundMsProvider?.let { runCatching { it() }.getOrNull() } ?: 0L
 
     /**
      * 见 [VmHost.infiniteLoopSourceName]：取当前语句的源文件显示名。
@@ -1636,14 +1934,18 @@ class ProcessRuntime(
 
     override fun onFunctionEnter(funcIndex: Int) {
         val meta = table.byFunctionIndex(funcIndex)
-        // 原版 `ConvertArg` 的**第一条**硬判：实参数 > 形参数 → TooManyFuncArgs
-        // （spec: CalledFunction.cs:136-140，静态名在装载期 `SetJumpTo` 就报、动态名在
-        // `DoInstruction` 抛）。本侧统一在建帧绑定点报，与省略位/类型失配同一相位。
-        // 必须早于 scopeDepth++ 与 enterFunction：本函数抛错时 VM 不会为本帧发
-        // onFunctionExit（callInto 的 depth 尚未 ++，见 Vm.kt:888-900），
-        // 任何已改状态都会泄漏成「作用域栈多一层」。
-        if (meta != null) checkTooManyArgs(meta)
+        // **实参多于形参不报错**：本工程的复刻目标是蛇版 4.981（`reference/emuera-skia-4.981`），
+        // 该 fork 的 `ConvertArg` 只按 `func.Arg.Length` 逐位转换、多余实参静默丢弃
+        // （Process.CalledFunction.cs:212-357 无 1.824 的 `array.Length < srcArgs.Count` 硬判；
+        // fork 更新记录 CHANGELOG.md「ConvertArg() 多余参数静默丢弃：移除 TooManyFuncArgs 报错」）。
+        // 1.824 的 `CalledFunction.cs:137-142` TooManyFuncArgs 只是历史对照锚 —— 照它复刻会让
+        // 语料里「多传一个参数」的合法写法（如 `fromEN/Addition/lib/DATEPICKER.ERB:56`
+        // `GET_MONTH(ACTIVE_MONTH, 1)` 打在 `@GET_MONTH(ARG)` 上）在端口上抛 CodeEE、
+        // 在真机宿主上正常运行。绑定点只写被调形参覆盖的位（[bindCallArgs] 的
+        // `plans.getOrNull(a.position) ?: continue`），多余位本来就不会被读取。
         scopeDepth++
+        // 抛点帧栈取证（只读镜像）：把本帧的建帧调用点按深度记下来，见 frameCallSitePcs。
+        recordFrameCallSite(activeVm.lastCallPc)
         // DBG4 P3 观测口：无元数据帧（meta == null）照样发事件（FunctionProbe KDoc）
         functionProbe?.let { fp -> runCatching { fp.onFunctionEnter(meta) } }
         if (meta == null) return // 无元数据函数：不进变量层
@@ -1663,7 +1965,10 @@ class ProcessRuntime(
         val refArgSources = if (pendingRootBind) null else resolveRefArgsBeforeEnter(meta, callerKey)
         // PERF（2026-10-26）：`FuncMeta.key` 本就是大写归一键（FuncMeta.kt:25），
         // 旧的 `.uppercase()` 是每次 `_CALL` 一次的多余分配；enterFunction 内部另有归一。
+        val probeForEnter = if (probeInNestedRun) nestedChannelProbe else null
+        val enterT0 = if (probeForEnter != null) System.nanoTime() else 0L
         store.enterFunction(meta.key)
+        if (enterT0 != 0L) probeEnterNs = System.nanoTime() - enterT0
         val root = if (pendingRootBind) pendingRoot else null
         if (root != null) {
             // 根级/重入调用的直接被调帧：实参来自 API 数组（见 pendingRootBind KDoc）。
@@ -1705,7 +2010,10 @@ class ProcessRuntime(
         functionProbe?.let { fp -> runCatching { fp.onFunctionExit(meta, FunctionExitKind.EXIT) } }
         if (meta == null) return
         // spec: Process.cs:531-536 —— ScopeOut（finally 配对，由 VM 的 finally 兜底异常退出）
+        val probeForExit = if (probeInNestedRun) nestedChannelProbe else null
+        val exitT0 = if (probeForExit != null) System.nanoTime() else 0L
         store.leaveFunction()
+        if (exitT0 != 0L) probeExitNs = System.nanoTime() - exitT0
     }
 
     /**
@@ -1718,6 +2026,96 @@ class ProcessRuntime(
     override fun frameSnapshotLines(): List<String> = store.frameSnapshotLines()
 
     /**
+     * 一次 ERB **抛点帧**（[erbFrameStack] 的元素；列表首位 = 最内帧）。
+     *
+     * 行号口径与 [com.eratw.port.core.err.CodeEE.line] 同源，**一律 0 基**：
+     * [line] = 该帧当前挂起语句的 0 基源码行下标，物理行 = [line] + 1；
+     * [callSiteLine] 同理（= 该帧被调用时，调用方那一行的 0 基下标）。
+     * 报告层必须同时标注两种口径，不许把 [line] 直接当物理行打印
+     * （见 `ErbStack.frameLine` 的 `行N（物理行N+1）`）。
+     *
+     * @property functionIndex `Program.functions` 下标（名读不出时仍可定位）
+     * @property function 源码书写名；null = 运行期函数表读不出（不回落惰性解码面）
+     * @property line 本帧挂起语句的 0 基行；-1 = 未知
+     * @property pc 本帧当前/挂起指令的绝对 pc；-1 = 未知
+     * @property callSiteFunction 调用方帧的函数名；根帧为 null
+     * @property callSiteLine 调用点所在行的 0 基下标；-1 = 根帧/未知
+     * @property callSitePc 调用点指令的绝对 pc；-1 = 根帧/未知
+     */
+    data class ErbFrame(
+        val functionIndex: Int,
+        val function: String?,
+        val line: Int,
+        val pc: Int,
+        val callSiteFunction: String?,
+        val callSiteLine: Int,
+        val callSitePc: Int,
+    )
+
+    /**
+     * 最近一次 `run` **异常离栈**时的 ERB 帧栈（最内帧在前，含函数名/0 基行/pc/调用点）。
+     *
+     * ## 取数来源（全是只读，分配有界）
+     *
+     * 1. 函数帧：`VirtualMachine.funcStackAtThrow` —— VM 在 `run()` 的 catch 里、
+     *    `unwindScopes` 回卷**之前**镜像的帧表（最外层在前）；正常返回时恒 null，
+     *    新一次 run 起跑清零，所以不会把上一局的链挂到本报告。
+     * 2. 最内帧 pc：`VirtualMachine.lastPc`（抛错指令的绝对 pc，回卷不清）。
+     * 3. 外层帧挂起 pc：本类的 [frameCallSitePcs]（建帧时记下的 `lastCallPc`）——
+     *    第 i 帧的挂起行 = 第 i+1 帧的调用点所在行。
+     * 4. 函数名：只走 [FunctionTable.byFunctionIndex]（一次数组读）。**不读**
+     *    `program.functions`：`.erbc` 产物档那张表是未加锁的惰性解码面，错误报告
+     *    在崩溃线程上采集时读它会与 VM 线程抢解码缓冲（见 `ErrorReportVmStackTest`）。
+     *
+     * ## 降级纪律
+     *
+     * 任何一步失败（镜像缺失、字段越界、行号表越界、函数名读不出）都只降级该帧读数；
+     * 整个函数包在 `runCatching` 里，**绝不抛**。没有异常离栈镜像（普通
+     * RuntimeException 的非 VM 线程、正常返回、已回卷且无镜像）时返回空表。
+     *
+     * ## 隐私口径
+     *
+     * 只导出函数名、行号、pc 与调用点，**不含任何变量取值**，与
+     * `core/diag/ErrorReport` 类头的报告隐私口径同源。
+     */
+    fun erbFrameStack(): List<ErbFrame> = runCatching { erbFrameStackOrEmpty() }.getOrDefault(emptyList())
+
+    private fun erbFrameStackOrEmpty(): List<ErbFrame> {
+        val mirror = vm.funcStackAtThrow() ?: return emptyList()
+        if (mirror.isEmpty()) return emptyList()
+        val top = mirror.size - 1
+        val out = ArrayList<ErbFrame>(mirror.size)
+        for (i in top downTo 0) {
+            val funcIndex = mirror[i]
+            // 最内帧用抛错指令 pc；外层帧用「下一帧的调用点」= 本帧此刻的挂起指令。
+            val pc = if (i == top) vm.lastPc else callSitePcAt(i + 1)
+            val callPc = callSitePcAt(i)
+            out += ErbFrame(
+                functionIndex = funcIndex,
+                function = functionNameOf(funcIndex),
+                line = lineOfPc(pc),
+                pc = pc,
+                callSiteFunction = if (i > 0) functionNameOf(mirror[i - 1]) else null,
+                callSiteLine = lineOfPc(callPc),
+                callSitePc = callPc,
+            )
+        }
+        return out
+    }
+
+    /** 第 [frameIndex] 帧的建帧调用点 pc；越界/未记 = -1（只降级读数，不抛）。 */
+    private fun callSitePcAt(frameIndex: Int): Int =
+        if (frameIndex in frameCallSitePcs.indices) frameCallSitePcs[frameIndex] else -1
+
+    /** 函数下标 → 源码书写名；只走运行期 [FunctionTable]，读不出 = null。 */
+    private fun functionNameOf(functionIndex: Int): String? =
+        runCatching { table.byFunctionIndex(functionIndex)?.name }.getOrNull()?.takeIf { it.isNotBlank() }
+
+    /** 绝对 pc → 0 基源码行；-1/越界/行号表缺失一律 -1。 */
+    private fun lineOfPc(pc: Int): Int =
+        if (pc < 0) -1 else runCatching { program.lineOf(pc) }.getOrDefault(-1)
+
+    /**
      * 当前建帧调用点的实参数；-1 = 非 `_CALL`/`_CALL_BY_NAME` 建帧（根级入口 / 重入 API）。
      *
      * [VirtualMachine.lastCallPc] 在 `callInto`/`jumpInto` 调 [onFunctionEnter] 期间有效，
@@ -1728,46 +2126,27 @@ class ProcessRuntime(
         return if (pc < 0) -1 else program.b(pc) and Opcode.ARG_COUNT_MASK
     }
 
-    /**
-     * **实参过多**（`Lang.Error.TooManyFuncArgs`，spec: CalledFunction.cs:136-140）：
-     * `ConvertArg` 先按被调形参数建 `AExpression[arity]`，`array.Length < srcArgs.Count`
-     * 即 `errMes = TooManyFuncArgs` —— 静态名在装载期 `SetJumpTo`（FunctionIdentifier.cs:3550）
-     * 就 Warn 成 error、动态名在 `DoInstruction`（:3592-3596）抛 CodeEE，两条路都到不了
-     * `IntoFunction`。旧实现两个相位都没有这一判：`callInto` 把实参按 `min(argc, arity)`
-     * **静默裁剪**、`bindCallArgs` 对越界位 `getOrNull ?: continue` 直接丢弃 —— 于是
-     * `CALL F(1,2)`（F 只收 1 个）在端口上照常执行，在原版是硬错。
-     *
-     * 文案取本作 zhs 语言表 `lang.emuera-zhs.xml:901` = `{0}函数: 参数过多`，
-     * `{0}` = 被调标签名（**不带 `@`**，spec: `topLabel.LabelName`）。
-     *
-     * 实参数口径 = `_CALL`/`_CALL_BY_NAME` 的 b 操作数（`ARG_COUNT_MASK`）：
-     * 编译器 `stageArgs` 写的是**实参位置数**（`StagedArgs.argc = row.size`，
-     * ErbProgramCompiler.kt:1655），不是 int/str 两个桶的 max —— 混合类型调用
-     * （`CALL F(1,"a",2)`）下两者不同，用 max 会漏判。形参数取 `Program.functions` 的
-     * `arity`（= 头部形参数，`FuncSig.paramNames` 同源）。
-     *
-     * 静默跳过的两种情形：`argc < 0`（根级/重入 API 建帧，没有调用点）与 `argc == 0`
-     * （零实参调用点，原版 `srcArgs.Count == 0` 恒不超限）。
-     */
-    private fun checkTooManyArgs(meta: FuncMeta) = requireArgCount(meta, callSiteArgc())
-
-    /**
-     * [checkTooManyArgs] 的共同实现：`argc` 是**实参位置数**（不是类型桶数）。
-     *
-     * 两条来源共用（原版都过同一个 `ConvertArg`）：
-     * - VM 建帧（`_CALL`/`_CALL_BY_NAME`/尾跳）⇒ `argc` = b 操作数的实参数段；
-     * - 宿主/重入 API（[callF] / [tryCallF] / [invokeUserMethod]）⇒ `argc` = `args.size`，
-     *   位置信息完整（`CALLF F("a", 1)` 的 2 个位置），故必须在这里判，
-     *   不能靠 [rootBindOf] 的类型桶（桶丢了位置，也丢了个数）。
-     *
-     * `argc < 0` = 没有调用点（根级 [runEntry]，实参来自 API 的 `intArgs/strArgs` 数组，
-     * 由调用方保证）⇒ 不判。
-     */
-    private fun requireArgCount(meta: FuncMeta, argc: Int) {
-        if (argc <= 0) return
-        val arity = program.functions.getOrNull(meta.index)?.arity ?: return
-        if (argc > arity) throw CodeEE("${meta.name}函数: 参数过多")
-    }
+    // ------------------------------------------------------------------
+    // 「实参多于形参」的处置口径（2026-11-12 按蛇版 4.981 校准）
+    //
+    // **不报错、按位置静默丢弃多余实参。** 依据是复刻目标（reference/emuera-skia-4.981）的
+    // ConvertArg：它只按 func.Arg.Length 逐位转换（Emuera/Runtime/Script/Process.CalledFunction.cs:212-357），
+    // 1.824 里那句 `array.Length < srcArgs.Count → TooManyFuncArgs`
+    // （reference/emuera-cs/MinorShift.Emuera.Runtime.Script/CalledFunction.cs:137-142）在 fork
+    // 里已被删除，fork 更新记录写明「ConvertArg() 多余参数静默丢弃：移除 TooManyFuncArgs 报错」
+    // （reference/emuera-skia-4.981/CHANGELOG.md 的 2.0.0 Fixed 段）。
+    //
+    // 为什么必须这样：语料（含第三方附件）有合法写入依赖这一宽容行为。典型形态
+    // fromEN/Addition/lib/DATEPICKER.ERB:56 `MONTH_TEXT '= GET_MONTH(ACTIVE_MONTH, 1)`
+    // 打在 `@GET_MONTH(ARG)`（ERB/日時天候管理.ERB:189）上 —— 真机宿主正常、端口按 1.824
+    // 复刻就会在「婚礼策划 → 日期」处抛「GET_MONTH函数: 参数过多」。
+    //
+    // 绑定点本来就只写被调形参位：[bindCallArgs] 用 `plans.getOrNull(a.position) ?: continue`，
+    // [bindArgs] 只写 ARG/ARGS 的 meta.argIntCount/argStrCount 段，多余实参不读不写。
+    // 同理三条宿主/重入通道（[executeMethod] / [invokeUserMethod]）也不另设 arity 闸。
+    // 内建函数/方法的个数校验不受影响（4.981 仍保留：Emuera/Runtime/Script/Statements/Function/FunctionMethod.cs:263、
+    // Creator.Method.cs:3381），见 fn/Builtins.kt 的 checkArity。
+    // ------------------------------------------------------------------
 
     /**
      * 实参绑定。三种来源：
@@ -2076,6 +2455,13 @@ class ProcessRuntime(
         // 其余才落到省略配置分支。
         if (args.size < plans.size) {
             val paramNames = program.paramNames(meta.index)
+            val probe = nestedChannelProbe
+            val probeT0 = if (probe != null) System.nanoTime() else 0L
+            if (probe != null) {
+                probeRefNs = 0L
+                probeToValueNs = 0L
+                probeScratchNs = 0L
+            }
             for (p in args.size until plans.size) {
                 if (refUserParamAt(paramNames[p], meta) != null) {
                     throw CodeEE.keyed(LangKey.CanNotOmitRefArg, meta.name, p + 1)
@@ -2308,6 +2694,8 @@ class ProcessRuntime(
         upperName: String,
         /** 冒号后的常量下标（`NAME:1:2` → `[1, 2]`）；无下标 = 空数组。 */
         val constIdx: LongArray,
+        /** 该形参位是否解析到 `#DIM REF` 私有用户变量；构建时算一次，判据同 `refUserParamAt`。 */
+        val isRef: Boolean = false,
     ) {
         /** 形参是 `ARG`（整型实参桶）。 */
         val isArg: Boolean = upperName == ARG_VAR
@@ -2364,6 +2752,7 @@ class ProcessRuntime(
                 baseName = baseName,
                 upperName = baseName.uppercase(),
                 constIdx = foldParamSubscripts(parts.drop(1), meta.name),
+                isRef = store.userVar(baseName, meta.key)?.spec?.isRef == true,
             )
         }
     }
@@ -3171,10 +3560,31 @@ class ProcessRuntime(
         "对为被标记为#FUNCTION的函数\"@$name\"使用了CALLF系列的命令进行调用",
     )
 
-    /** 语句层抛出的 CodeEE 若不带位置，用 [StmtEnv] 补齐（契约 C4：报错必须能定位函数/行/pc）。 */
+    /**
+     * 语句层抛出的 CodeEE 若不带位置，用 [StmtEnv] 补齐（契约 C4：报错必须能定位函数/行/pc）；
+     * 位置与文件都缺时随重建一并带上。
+     *
+     * **已定位的错误原样返回，不再补文件**（MODERN-R8-A）：文件维度已上移到抛点帧
+     * （[com.eratw.port.core.code.VirtualMachine] 的 `errorAt` / 步数闸 / 调用栈闸一族经
+     * [scriptFileOf] 自带），语句层只可能是**别的帧**的捕获点，按本帧查文件会写出错的文件名
+     * —— R7-F1 的 `sameFrame` 守卫与「已定位只补文件」分支就是为绕开这一点而生的猜帧启发式，
+     * 抛点自带文件后它的前提不存在。原版口径同此：位置挂在异常自己身上
+     * （`CodeEE.cs:5-8`、`EmueraException.cs:7-13`），上屏时优先于捕获点那一行
+     * （`Process.cs:598-606`）。
+     *
+     * 重建分支仍要带文件：语句层自抛的 CodeEE / ExprEvalException 都是**无位置**的
+     * （`funcName == null && line < 0 && pc < 0`），它们属于本帧，本帧文件就是它的源文件。
+     */
     private fun stampPosition(e: CodeEE, env: StmtEnv): CodeEE {
+        // 首写为准：不带位置即「语句层自抛」，只有这一支需要盖章。
         if (e.funcName != null || e.line >= 0 || e.pc >= 0) return e
-        return CodeEE(e.message ?: "", env.functionName ?: env.functionKey, env.line, env.pc)
+        return CodeEE(
+            e.message ?: "",
+            env.functionName ?: env.functionKey,
+            env.line,
+            env.pc,
+            scriptFile = scriptFileOfIndex(activeVm.currentFunctionIndex, env.functionKey),
+        )
     }
 
     // ------------------------------------------------------------------
@@ -3254,8 +3664,8 @@ class ProcessRuntime(
         if (methodDepth >= METHOD_STACK_LIMIT) {
             throw CodeEE(OVERFLOW_FUNC_STACK_MES)
         }
-        // 实参过多：宿主 API 通道没有调用点 pc，按 `args` 的位置数判（同 [requireArgCount]）。
-        requireArgCount(meta, args.size)
+        // 实参多于形参不报错：与 VM 建帧同一条 4.981 口径（见上方「实参多于形参」注释块），
+        // 多余位由 [bindPositionalValues] 的 `plans.getOrNull(i) ?: continue` 丢弃。
         methodDepth++
         try {
             // 逐位实参必须一起交出（`rootBindOf(args, args)`）：只给类型桶会让
@@ -3343,6 +3753,9 @@ class ProcessRuntime(
         // UserDefinedMethodTerm（IdentifierDictionary.cs:561-564）并由 GETMETH 执行
         // （FunctionMethodCreator.cs:8571）。非方法事件名到不了这里：GETMETH 在种类位
         // （PLAIN）处先抛（SymbolQueryMethods.getMethRef，IdentifierDictionary.cs:557-560 口径）。
+        val probe = nestedChannelProbe
+        val t0 = if (probe != null) System.nanoTime() else 0L
+        if (methodDepth == 0) lastTotalNestedSteps = 0L
         val meta = methodMetaOf(name) ?: return null
         // 引擎级函数屏蔽（[EngineFunctionPolicy]）：本通道用派生 VM 的 `run(index)` 直接起跑，
         // 同样绕开 `callInto` —— 被屏蔽方法按空体 `RETURN 0`/`RETURN ""` 就地短路，
@@ -3359,8 +3772,7 @@ class ProcessRuntime(
         if (methodDepth >= METHOD_STACK_LIMIT) {
             throw CodeEE(OVERFLOW_FUNC_STACK_MES)
         }
-        // 实参过多：同 [executeMethod]（GETMETH 族经本通道调用户方法，原版同样过 ConvertArg）。
-        requireArgCount(meta, args.size)
+        // 实参多于形参不报错：同 [executeMethod]（GETMETH 族经本通道调用户方法，4.981 同一条 ConvertArg 口径）。
         methodDepth++
         // REF 形参的名字要在**调用方**作用域解析（enterFunction 之后 currentFunction 已换人）。
         val callerKey = store.currentFunction
@@ -3372,8 +3784,24 @@ class ProcessRuntime(
             pendingRoot = rootBindOf(args, args)
             pendingRootBind = true
             pendingRefBindings = refs
+            val t2 = if (probe != null) System.nanoTime() else 0L
+            if (probe != null) {
+                probeEnterNs = 0L
+                probeExitNs = 0L
+                probeInNestedRun = true
+                nested.runResetProbe = true
+            }
             try {
                 val ret = nested.run(meta.index)
+                lastNestedSteps = nested.executedSteps
+                lastTotalNestedSteps += nested.executedSteps
+                if (stepAttributionEnabled) {
+                    val a = stepAttribution.getOrPut(name.uppercase()) { LongArray(2) }
+                    a[0]++
+                    a[1] += nested.executedSteps
+                }
+                val t3 = if (probe != null) System.nanoTime() else 0L
+                if (probe != null) probeInNestedRun = false
                 // 三条返回通道（4.981：g2 补浮点通道，g7 把选道判据改到**声明面**）：
                 // * `#FUNCTIONS`（str）→ `VirtualMachine.stringResult`（`_RETS` 落的寄存器）。
                 // * 浮点方法（`FuncMeta.returnsFloat`）→ `VirtualMachine.floatResult`
@@ -3387,7 +3815,7 @@ class ProcessRuntime(
                 //   消费侧 `UserDefinedMethodTerm.cs:19-38` 按**项类型**取值、不符静默 0/""/0.0。
                 // * 其余（`#FUNCTION` int）→ `_RET` 的 long 读数。
                 val floatRet = nested.floatResult
-                return when {
+                val out = when {
                     // 浮点判位先于字符串判位，与 [executeMethod]、本文件 :908 的
                     // `OperandType` 选定和编译期 `ErbProgramCompiler.kt:350/:1066` 同序。
                     meta.returnsFloat -> {
@@ -3405,10 +3833,18 @@ class ProcessRuntime(
                         Value.intV(ret)
                     }
                 }
+                val t4 = if (probe != null) System.nanoTime() else 0L
+                if (probe != null) {
+                    runCatching {
+                        probe.onCall(name, probeArgNs, probeRefNs, probeToValueNs, probeScratchNs, t4 - t0, t3 - t2, nested.lastResetNanos, probeEnterNs, probeExitNs, t4 - t3)
+                    }
+                }
+                return out
             } finally {
                 pendingRoot = null
                 pendingRootBind = false
                 pendingRefBindings = emptyList()
+                if (probe != null) probeInNestedRun = false
             }
         } finally {
             activeVm = prevActive
@@ -3509,8 +3945,44 @@ class ProcessRuntime(
     private var eventActive = false
 
     /**
-     * 事件派发：按 eventCallOrder（ONLY → PRI → NORMAL → LATER，同桶装载序）逐成员
-     * 执行。
+     * 事件派发的统一成员引用（M2-6）：四桶表与 FunctionTable 两条装载视图归一到同一形状，
+     * 执行器只认物理下标 + 桶位 + ONLY / SINGLE 旗标，不关心元数据来自哪张表。
+     */
+    private class EventMemberRef(
+        val physicalIndex: Int,
+        val bucket: Int,
+        val isOnly: Boolean,
+        val isSingle: Boolean,
+    )
+
+    /**
+     * 解析事件成员执行序（M2-6 派发源裁定）：[eventRegistry] 在场即接管，否则回退
+     * [FunctionTable.eventCallOrder]。
+     *
+     * **在场即接管，不静默回落**：四桶表在场而该事件无成员时返回 null（按「事件不存在」
+     * 处理），绝不退回旧表造出第二套派发源。两条路的成员形状归一到 [EventMemberRef]，
+     * 调用方只认物理下标 + 桶位 + 旗标。
+     */
+    private fun resolveEventMembers(name: String): List<EventMemberRef>? {
+        val registry = eventRegistry
+        if (registry != null) {
+            val fromRegistry = registry.membersOf(name)
+            return fromRegistry.takeIf { it.isNotEmpty() }?.map {
+                EventMemberRef(it.physicalIndex, it.bucket, it.isOnly, it.isSingle)
+            }
+        }
+        return table.eventCallOrder(name)?.map {
+            EventMemberRef(it.index, it.eventBucket, it.isOnly, it.isSingle)
+        }
+    }
+
+    /**
+     * 事件派发：按四桶执行序（ONLY → PRI → NORMAL → LATER，同桶链接序）逐成员执行。
+     *
+     * **派发源（M2-6）**：[eventRegistry] 在场（Mod 链装配）时以它为唯一真源，成员来自
+     * LSC 的显式一对多事件视图，base 与各 Mod 同名事件成员全保留；null（关态 / 无 Mod）
+     * 时走 [FunctionTable.eventCallOrder]，逐位不变。**在场即接管**，事件名为空按「不存在」
+     * 处理，不静默退回旧表造出第二套派发源。
      * - #ONLY 成员执行完即终止整个派发。spec: ProcessState.cs:326-333（IsOnly →
      *   FinishEvent）+ CalledFunction.cs:259-264。
      * - #SINGLE 成员返回 1 → 跳过同桶剩余成员。spec: ProcessState.cs:306-310 +
@@ -3525,8 +3997,7 @@ class ProcessRuntime(
      * @return 是否执行了至少一个成员（false = 事件不存在）
      */
     fun executeEvent(name: String): Boolean {
-        val order = table.eventCallOrder(name)
-        if (order == null) {
+        val order = resolveEventMembers(name) ?: run {
             // spec: CalledFunction.cs:69-76 —— GetEventLabels 为空但 GetNonEventLabel 命中
             // ⇒ CalleventToNonEventFunc（官方 zhs 文案，含被命中非事件 label 的文件:行号）。
             table.nonEvent(name)?.let { throw nonEventAsEventError(name, it) }
@@ -3537,38 +4008,46 @@ class ProcessRuntime(
             throw CodeEE("EVENT函数结束前执行了CALLEVENT命令")
         }
         eventActive = true
-        // 整链终止（2026-10-26 深审补）：原版事件成员全在同一次 runScriptProc 行泵里派发
-        // （ProcessState.cs:326-337 的 ShiftNext 逐成员推进，泵条件 Process.cs:1081
-        // `while (console.IsRunning && !state.ScriptEnd)`）。任一成员把整条脚本链停掉后后续成员
-        // 一律不再派发：QUIT 家族只置 ConsoleState.Quit（Process.cs:1307-1319 → EmueraConsole.cs:731-735，
-        // IsRunning 转假 :270-284）；SAVEGAME/LOADGAME 把 state 换成 Clone() 出的空 functionList
-        // （ProcessState.cs:475-484）、LOADDATA 清空函数栈（:202-217）⇒ ScriptEnd（:34）即为真。
-        // 移植侧每个成员是独立一次 runEntry，其 StmtOutcome.Unwind 只结束该次 run、退回本循环继续
-        // i++ —— 故在每次成员 run 之后按「整链终止读数」收尾：quitRequested（QUIT 粘滞位）或
-        // SaveLoadHandoff 新落下的待消费系统状态位（SAVEGAME/LOADGAME/LOADDATA 的脚本链作废信号）。
-        // 入口快照用于区分「本就挂着待消费状态」（不该由本循环认领）与「本循环内新落下」。
-        val handoff = SaveLoadHandoff.of(store)
-        val handoffAtEntry = handoff?.systemState
         try {
-            var i = 0
-            while (i < order.size) {
-                val member = order[i]
-                val ret = runEntry(member.index, null)
-                if (quitRequested || handoff?.systemState?.let { it != handoffAtEntry } == true) {
-                    return true
-                }
-                if (member.isOnly) return true
-                if (member.isSingle && ret == 1L) {
-                    val bucket = member.eventBucket
-                    i++
-                    while (i < order.size && order[i].eventBucket == bucket) i++
-                    continue
-                }
-                i++
-            }
+            dispatchEventMembers(order)
             return true
         } finally {
             eventActive = false
+        }
+    }
+
+    /**
+     * 逐成员派发（[executeEvent] 的循环体）：ONLY 命中即整链终止，SINGLE 返回 1 只截断本桶。
+     *
+     * 整链终止（2026-10-26 深审补）：原版事件成员全在同一次 runScriptProc 行泵里派发
+     * （ProcessState.cs:326-337 的 ShiftNext 逐成员推进，泵条件 Process.cs:1081
+     * `while (console.IsRunning && !state.ScriptEnd)`）。任一成员把整条脚本链停掉后后续成员
+     * 一律不再派发：QUIT 家族只置 ConsoleState.Quit（Process.cs:1307-1319 → EmueraConsole.cs:731-735，
+     * IsRunning 转假 :270-284）；SAVEGAME/LOADGAME 把 state 换成 Clone() 出的空 functionList
+     * （ProcessState.cs:475-484）、LOADDATA 清空函数栈（:202-217）⇒ ScriptEnd（:34）即为真。
+     * 移植侧每个成员是独立一次 runEntry，其 StmtOutcome.Unwind 只结束该次 run、退回本循环继续
+     * i++ —— 故在每次成员 run 之后按「整链终止读数」收尾：quitRequested（QUIT 粘滞位）或
+     * SaveLoadHandoff 新落下的待消费系统状态位（SAVEGAME/LOADGAME/LOADDATA 的脚本链作废信号）。
+     * 入口快照用于区分「本就挂着待消费状态」（不该由本循环认领）与「本循环内新落下」。
+     */
+    private fun dispatchEventMembers(order: List<EventMemberRef>) {
+        val handoff = SaveLoadHandoff.of(store)
+        val handoffAtEntry = handoff?.systemState
+        var i = 0
+        while (i < order.size) {
+            val member = order[i]
+            val ret = runEntry(member.physicalIndex, null)
+            if (quitRequested || handoff?.systemState?.let { it != handoffAtEntry } == true) {
+                return
+            }
+            if (member.isOnly) return
+            if (member.isSingle && ret == 1L) {
+                val bucket = member.bucket
+                i++
+                while (i < order.size && order[i].bucket == bucket) i++
+                continue
+            }
+            i++
         }
     }
 
@@ -4379,6 +4858,9 @@ class ProcessRuntime(
 
         const val ARG_VAR = "ARG"
         const val ARGS_VAR = "ARGS"
+
+        /** 4.981 fork 的浮点 ARG 面（形参声明长口径与 ARG/ARGS 相同，spec: fork-src ErbLoader.cs:709-710,787）。 */
+        const val ARGF_VAR = "ARGF"
 
         /** 角色 0 维字符串列名（`SystemLayout.charaStr0D` 的 0/1 位，spec: CharacterData.cs:131-134）。 */
         const val NAME_VAR = "NAME"

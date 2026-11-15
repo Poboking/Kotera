@@ -9,6 +9,7 @@ import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.Value
 import com.eratw.port.core.expr.VarInfo
 import com.eratw.port.core.expr.VarRef
+import com.eratw.port.core.expr.toCodeEE
 import com.eratw.port.core.lexer.CharStream
 import com.eratw.port.core.lexer.ErbLexer
 import com.eratw.port.core.lexer.LangKey
@@ -244,7 +245,7 @@ private fun parseExpression(c: BuiltinContext, fn: String, text: String): Expr {
     } catch (e: LexError) {
         throw CodeEE("函数 $fn：${e.message}")
     } catch (e: ExprEvalException) {
-        throw CodeEE("函数 $fn：${e.message}")
+        throw e.toCodeEE(messagePrefix = "函数 $fn：")
     } catch (e: ExprParseException) {
         throw CodeEE("函数 $fn：${e.message}")
     }

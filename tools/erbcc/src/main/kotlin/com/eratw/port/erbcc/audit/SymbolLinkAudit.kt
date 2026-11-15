@@ -486,6 +486,8 @@ object SymbolLinkAudit {
         val report = try {
             val write = ErbcArtifacts.write(
                 dir, program, root, result.sourceFiles, result.stats, result.bootMetadata,
+                // P15S：审计落盘镜像生产形态（带签名段），roundtrip 的读侧容忍才有生产代表性。
+                signatures = result.signatures,
             )
             val metaPath = write.metaPath
                 ?: throw IllegalStateException("落盘没有写出侧车（bootMetadata 为空）")

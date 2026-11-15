@@ -95,6 +95,39 @@ data class CsvValuePatch(
 }
 
 /**
+ * 角色变量路由声明（M5-4 刀 1，era-arch-v61u.md:1807「全量域清单须由声明事务喂」；
+ * RECON-RT2-M54 裁定 R1/R2 方案 B：族级路由 + freeze 派生镜像）。
+ *
+ * 族级路由行 = 变量族名 ± 格下标清单，两档粒度：[cells] 空 = **全族全跨度**
+ * （freeze 期以 `VariableSizes` 出厂尺寸展开）；非空 = **显式格**（格级，逐格派生）。
+ * 声明不携带 isStr、不携带镜像字段名：isStr 由 freeze 期 `SystemLayout` 派生（系统族）
+ * 或 attach 期以 `def` 类型终审（用户变量，RECON §2 Q2/Q3 两段式）；镜像字段名
+ * `族名:格号` 由 freeze 合成，Mod 不写（Mod 声明量 O(族数) 不是 O(格数)）。
+ *
+ * freeze 期拒载名单（fail-closed，逐类报冲突不静默丢，RECON §2 Q2）：
+ * - `RELATION`：关系格读写由关系投影桥独占（M5-3），路由即双写冲突；
+ * - `NO`：身份列，虚拟 NO 由 `VirtualCharaNoRegistry` 独占写；
+ * - `CDFLAG`：C_INT2 扁平格的「关键字与扁平格」映射语义未定义（M1-4B 整表排除沿用），不猜；
+ * - 0 维族（NAME / CALLNAME / NICKNAME / MASTERNAME / ISASSI）：投射行上的语义未取证
+ *   （RECON TODO-2 在案），v1 不开放；
+ * - 同变量族重名（跨包与包内一律，大写归一后判）：镜像字段与逐格行会双写。
+ *
+ * 用户角色变量（非 `SystemLayout` 注册名）：显式格路由放行（逐格行 isStr/镜像类型以
+ * 占位 INT 冻结，attach 期以 `def` 类型终审）；全跨度路由 freeze 期拒（尺寸只在运行期
+ * 存在，freeze 不可能替它兜，不猜 —— 解锁路径 = attach 期以 `def.dims` 展开，刀 2 面）。
+ */
+data class CharaRouteDeclaration(
+    val variable: String,
+    val cells: List<Int> = emptyList(),
+) {
+    init {
+        require(variable.isNotBlank()) { "路由变量族名不能为空" }
+        require(cells.all { it >= 0 }) { "路由格下标必须非负：$cells（变量 $variable）" }
+        require(cells.toSet().size == cells.size) { "路由格下标重复：$cells（变量 $variable）" }
+    }
+}
+
+/**
  * 位置无关模块描述符（Manifest 核心字段，ABI-5）。
  *
  * - [externalCalls]：本模块 `_CALL(22)` 引用的外部函数名表；指令字侧以负下标
@@ -120,6 +153,24 @@ data class CsvValuePatch(
  *   五域一张 Registry，不再游离）；
  * - [exportedMacros]：导出的 .ERH #DEFINE 宏（跨包依赖编译期可见）；
  * - [artifactSha256]：本模块 .erbc 字节流摘要（链接指纹与出包对账用）。
+ *
+ * ## requires 版本约束语法（RT2 P1-3，裁定 = CONTRACT-RT2-P13 §1 c/b：
+ *    约束内嵌字符串，requires 全链保留 List<String>，零格式涟漪）
+ *
+ * - 条目两形态：`<pkgId>`（裸包名，无约束 = 既有行为）｜ `<pkgId>@[<min>,<max>]`
+ *   （**双闭区间**，含两端点）；解析入口 [parseRequiresConstraint]，单一语法权威。
+ * - `<pkgId>` 口径不变（大小写不归一，指纹期才大写）；约束语法只在 [requires] 生效，
+ *   [loadAfter] 软序不参与版本约束（软序语义不动）。
+ * - `<min>` / `<max>`：点分段全数字——段 ≥1 位数字、禁前导零（单 0 合法，口径同
+ *   ManifestCodec.parseDec）、无空段与点结尾，≥1 段；比较缺段补 0（`1.2 == 1.2.0`、
+ *   `1.2 < 1.10`）；`min ≤ max` 构造期强校验。解析见 [parseVersionSegments]、
+ *   比较见 [compareVersionSegments]。
+ * - 语法非法（含 min > max）⇒ 构造期抛 IllegalArgumentException（消息含原条目串）；
+ *   decode 期被 ManifestCodec 的 guarded("ModuleDescriptor") 包裹，自动变成带行号的
+ *   ManifestFormatException（行号由 decode 侧携带，本类不带）。
+ * - 版本裁决在链接期 ModuleLinkOrder.buildGraph（先存在性后版本）：被依赖方 version
+ *   为空串 / 不可解析 + 对方设了约束 ⇒ 链接期拒绝并点名实际串；本类**不**对自身
+ *   [version] 做全局强校验（超面扩权不做）。
  */
 data class ModuleDescriptor(
     val packageId: String,
@@ -148,11 +199,46 @@ data class ModuleDescriptor(
      * 名字是全局命名空间（`addRelation(from, kind, to)` 按名寻址），跨包重名 = 冲突。
      */
     val relationshipSchemas: List<RelationshipSchema> = emptyList(),
+    /**
+     * hooks 声明域（v6.6-c §20.1，ABI-9）：函数 Prefix/Postfix 钩子槽。
+     * 同包同目标同相位重复 = 冲突；跨包同目标合法（多 Mod 扩展同一函数即本域目的）。
+     */
+    val hookDeclarations: List<HookDeclaration> = emptyList(),
+    /**
+     * interaction-hooks 声明域（v6.6-c §20.3，ABI-11）：交互五阶段钩子。
+     * 同包同阶段重复 = 冲突；跨包合法。
+     */
+    val interactionHookDeclarations: List<InteractionHookDeclaration> = emptyList(),
+    /**
+     * phase-jobs 声明域的相位形（v6.6-c §20.2，ABI-10）：Mod 自定义相位名。
+     * 相位名全局命名空间；不得占用 [BuiltinPhases] 固定名。
+     */
+    val phaseDeclarations: List<PhaseDeclaration> = emptyList(),
+    /**
+     * phase-jobs 声明域的任务形（v6.6-c §20.2，ABI-10）：定时/周期任务槽。
+     * jobId 包内唯一；phase 必须是固定相位或已声明相位。
+     */
+    val jobDeclarations: List<JobDeclaration> = emptyList(),
+    /**
+     * phase-jobs 声明域的模板形（§21.1，ABI-10 扩展项）：动态任务模板。
+     * templateKey 包内唯一且与 jobId 不共享命名空间；补算策略 REPLAY 必带 maxCatchUp。
+     */
+    val jobTemplateDeclarations: List<JobTemplateDeclaration> = emptyList(),
     val exportedMacros: Map<String, String> = emptyMap(),
     val artifactSha256: String = "",
+    /**
+     * chara-field-routes 声明域（M5-4 刀 1）：角色变量路由行（[CharaRouteDeclaration]）。
+     * wire 载体 = component-schemas 段内判别 tag 子类型（B1；段数 18 不变，phase-jobs
+     * B0/B1/B2 先例）；freeze 期进声明事务 chara-field-routes 域做拒载名单 / 重名闸与
+     * 镜像派生（见 [DeclarationRegistry.freeze]）。无路由 = 缺省空表，字节与旧档逐位一致。
+     */
+    val charaRoutes: List<CharaRouteDeclaration> = emptyList(),
 ) {
     init {
         require(packageId.isNotEmpty()) { "packageId 不能为空" }
+        // requires 约束条目语法 fail-closed（含 min ≤ max，语法见类 KDoc）：非法即整包拒。
+        // decode 期经 ManifestCodec 的 guarded("ModuleDescriptor") 自动带行号。
+        for (entry in requires) parseRequiresConstraint(entry)
     }
 
     /** 覆盖声明键归一（大写，IGNORE CASE 口径同 Config.StrComper）。 */
@@ -170,7 +256,109 @@ data class ModuleDescriptor(
         } else {
             OverridePolicy.FORBID
         }
+
+    companion object {
+        /**
+         * requires 条目解析（单一语法权威；语法钉死见类 KDoc「requires 版本约束语法」节）。
+         *
+         * 裸包名（无 `@`）原样放行、不校验包名形状（既有行为）；带约束形态按
+         * `<pkgId>@[<min>,<max>]` 全量校验：第一个 `@` 定界（包名内含 `@` 无法表达
+         * 约束，fail-closed）、区间必须是 `[min,max]` 双端点、端点必须是合法点分段
+         * 版本（[parseVersionSegments]）、且 min ≤ max。
+         *
+         * 纯函数、与构造期校验同源：[ModuleLinkOrder.buildGraph] 对已过构造校验的
+         * 描述符重放本解析必成功。
+         *
+         * @throws IllegalArgumentException 语法非法（含 min > max），消息含原条目串。
+         */
+        fun parseRequiresConstraint(entry: String): RequiresConstraint {
+            val at = entry.indexOf('@')
+            if (at < 0) return RequiresConstraint(entry)
+            val packageId = entry.substring(0, at)
+            val body = entry.substring(at + 1)
+            require(packageId.isNotEmpty()) { "requires 约束条目缺包名：「$entry」" }
+            require(body.length >= 2 && body.first() == '[' && body.last() == ']') {
+                "requires 约束条目的区间必须形如 [min,max]：「$entry」"
+            }
+            val inner = body.substring(1, body.length - 1)
+            val comma = inner.indexOf(',')
+            require(comma >= 0) { "requires 约束条目的区间缺逗号：「$entry」" }
+            val minRaw = inner.substring(0, comma)
+            val maxRaw = inner.substring(comma + 1)
+            val minSegments = parseVersionSegments(minRaw)
+            require(minSegments != null) {
+                "requires 约束下端不是合法点分段版本：「$minRaw」（原条目「$entry」）"
+            }
+            val maxSegments = parseVersionSegments(maxRaw)
+            require(maxSegments != null) {
+                "requires 约束上端不是合法点分段版本：「$maxRaw」（原条目「$entry」）"
+            }
+            require(compareVersionSegments(minSegments, maxSegments) <= 0) {
+                "requires 约束区间下端大于上端：「$minRaw」>「$maxRaw」（原条目「$entry」）"
+            }
+            return RequiresConstraint(packageId, minSegments, maxSegments)
+        }
+
+        /**
+         * 点分段版本串解析（语法权威的宽松形态）。
+         *
+         * 合法：≥1 段、每段 ≥1 位数字、禁前导零（单 0 合法，口径同
+         * ManifestCodec.parseDec）、无空段（`1..0` / 点结尾 / 首点）、段值落在 Long 域。
+         * 空串或非法返回 null —— 链接期对被依赖方 version 的宽容探测用（空 / 不可解析
+         * + 对方设了约束 = 链接期拒绝并点名实际串，见 ModuleLinkOrder.buildGraph）；
+         * 约束端点的严格校验走 [parseRequiresConstraint]（构造期 fail-closed）。
+         */
+        fun parseVersionSegments(version: String): List<Long>? =
+            version.split('.')
+                .takeIf { segments -> segments.none { it.isEmpty() } }
+                ?.map { segment -> versionSegmentValue(segment) }
+                ?.takeIf { values -> values.none { it == null } }
+                ?.filterNotNull()
+
+        /** 单段版本数值：全数字、禁前导零（单 0 合法）、Long 域（溢出 = 非法）。 */
+        private fun versionSegmentValue(segment: String): Long? =
+            when {
+                !segment.all { it in '0'..'9' } -> null
+                segment.length > 1 && segment[0] == '0' -> null
+                else -> segment.toLongOrNull()
+            }
+
+        /**
+         * 点分段全数值比较（缺段补 0：`1.2 == 1.2.0`、`1.2 < 1.10` —— 字典序会给出
+         * 反向结果）。链接期版本裁决与构造期 min ≤ max 校验共用的唯一比较口径。
+         */
+        fun compareVersionSegments(a: List<Long>, b: List<Long>): Int {
+            for (i in 0 until maxOf(a.size, b.size)) {
+                val left = a.getOrElse(i) { 0L }
+                val right = b.getOrElse(i) { 0L }
+                if (left != right) return left.compareTo(right)
+            }
+            return 0
+        }
+    }
 }
+
+/**
+ * requires 条目的解析结果（RT2 P1-3 B 案：约束内嵌字符串，requires 全链保留
+ * `List<String>`，本类只是解析视图、不进任何序列化面）。
+ *
+ * 两形态（语法权威见 [ModuleDescriptor] 类 KDoc「requires 版本约束语法」节）：
+ * - 裸包名 `<pkgId>`：无版本约束，[minSegments] / [maxSegments] 均为 null（既有行为）；
+ * - `<pkgId>@[<min>,<max>]`：双闭区间（含两端点），两端点成对出现，构造期已保证
+ *   min ≤ max。
+ *
+ * [minSegments] / [maxSegments] 是点分段数值段（比较缺段补 0，见
+ * [ModuleDescriptor.compareVersionSegments]）；解析保证无前导零、无空段，因此段值
+ * `joinToString(".")` 与声明原文逐字节互逆（链接期报错原文回显即用它）。
+ */
+data class RequiresConstraint(
+    /** 依赖目标包 ID（`@` 前段；与裸形态条目同口径，不归一大小写）。 */
+    val packageId: String,
+    /** 区间下端段值；null = 裸包名无约束。 */
+    val minSegments: List<Long>? = null,
+    /** 区间上端段值；[minSegments] 非 null 时必非 null（双闭区间两端成对）。 */
+    val maxSegments: List<Long>? = null,
+)
 
 /**
  * `_CALL.a` 哨兵协议（ABI-4）——链接期回填，运行期不可见。

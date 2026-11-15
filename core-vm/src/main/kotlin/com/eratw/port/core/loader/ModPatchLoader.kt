@@ -9,6 +9,7 @@ import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.StrLiteral
 import com.eratw.port.core.frontend.Symbols
 import com.eratw.port.core.patch.FunctionMetaRecord
+import com.eratw.port.core.patch.ModuleContainerFormat
 import com.eratw.port.core.patch.PatchArtifacts
 import com.eratw.port.core.patch.PatchHeader
 import com.eratw.port.core.patch.patchBaseIdentity
@@ -21,6 +22,7 @@ import com.eratw.port.core.stmt.PrintDataStmt
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.logging.Logger
 
 /**
  * R7-C4：mods 补丁装载器（CONTRACT-R7-C §2/C4）。扫描 mods 目录里的补丁产物，
@@ -65,6 +67,15 @@ import java.nio.file.Path
  * - 候选 = **普通文件** 且扩展名是 [PATCH_EXTENSION]（大小写不敏感）。跳过（不报错）：
  *   隐藏文件（`.` 开头）、子目录、其它扩展名 —— 玩家把 readme 或 `.nomedia` 丢进来
  *   不该报红；源 `.ERB`（C5 导入链存在 mods 目录里的编译输入）天然被扩展名过滤掉。
+ * - **容器补丁分流（CONTRACT-RT2-M2CODEC 裁定 3）**：候选读入后先经
+ *   [ModuleContainerFormat.probe] 探测（先探后读：探测只看前缀 8 字节，任何解析都不发生），
+ *   命中（magic `ERBM`/`ERBC` v3）= 四池容器件，**跳过 legacy 解析**、只留 FINE 级日志 ——
+ *   容器件归 Mod 链装配（`ModChainAssembly`）消费，不归本装载器。行为面变化：
+ *   探测引入前容器件会被 legacy 文本头解析炸成 I5 整体回退；改跳过后关态（Mod 链旁路）
+ *   会话照常开（容器件不生效），与 `eratw.demo` 关态语义一致；开态由链消费。
+ *   负控锚：legacy 文本头首行是 `erbc-patch <版本>`（`PatchHeader` 的 `FIELD_FORMAT`，
+ *   `PatchHeaderCodec.encode` 固定首行），首 4 字节为小写 `erbc`，按字节比较永不可能
+ *   等于大写 `ERBM`/`ERBC` —— 探测对 legacy 补丁恒 miss，不会误跳真补丁。
  * - 装载序 = 文件名序（[compareNames]：ASCII 大小折叠、locale 无关，与 platform
  *   `ModStore.compareNames` 同款口径 —— 那边管源文件导入面，这边管补丁装载面，
  *   两边对同一目录给出同一排序）。
@@ -88,6 +99,9 @@ import java.nio.file.Path
  * 无私有声明的补丁产物字节与 v1 的 15 字段形逐字节相同。
  */
 object ModPatchLoader {
+
+    /** 纯 JDK logger：容器补丁分流的 FINE 留痕（裁定 3「跳过 + FINE 留痕」）。 */
+    private val LOGGER: Logger = Logger.getLogger(ModPatchLoader::class.java.name)
 
     /**
      * 补丁产物的扩展名（含点，小写形）。C5 导入链把设备端补丁编译器（C1 的 PatchCompiler）
@@ -223,6 +237,18 @@ object ModPatchLoader {
         for (candidate in candidates) {
             try {
                 val bytes = Files.readAllBytes(candidate)
+                // 容器补丁分流（裁定 3，先探后读）：probe 命中 = 四池容器件，跳过 legacy
+                // 解析（容器件归 Mod 链装配消费）。FINE 留痕但不进 failures/warnings ——
+                // 这是设计内的分流而非异常；探测只看前缀，legacy 文本头（小写 erbc-patch
+                // 首行）按字节比较永不可能命中（类 KDoc「扫描口径」负控锚）。
+                val probedRole = ModuleContainerFormat.probe(bytes)
+                if (probedRole != null) {
+                    LOGGER.fine(
+                        "mods/${candidate.fileName} 是四池容器件（CONTAINER_ROLE=$probedRole）" +
+                            "—— 跳过 legacy 补丁装载，归 Mod 链装配消费",
+                    )
+                    continue
+                }
                 val artifact = PatchArtifacts.read(bytes)
                 artifact.checkAgainst(baseIdentity)
                 val patchProgram = ErbcReader.decode(artifact.bodyBytes(), programBaseOf(artifact.header))

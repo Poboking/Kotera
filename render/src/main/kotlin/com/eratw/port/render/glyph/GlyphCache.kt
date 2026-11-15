@@ -2,6 +2,8 @@ package com.eratw.port.render.glyph
 
 import com.eratw.port.render.Grid
 import com.eratw.port.render.GlyphKey
+import com.eratw.port.render.font.BundledFontFamilies
+import com.eratw.port.render.font.GlyphFallback
 
 /**
  * 缓存桶：归一化后的 (字体名, 样式位, 字号, 码位)。
@@ -63,14 +65,23 @@ private data class BucketKey(val fontName: String, val styleMask: Int, val sizeP
  *
  * ## 缺字回退链（不得抛）
  *
- * 请求字体 → 默认字体 → 方框。三跳都不许抛：光栅化器异常按「这一跳没拿到字形」处理，
- * 照抄 `FontFactory.cs:52-54` 的 `catch` 后 `return null`。
+ * **请求族 → 随包兜底族链 → 后端默认族 → 方框**（跳序见 [hopPlan]，语义见 [build]）。
+ *
+ * - 兜底段的成员与顺序只由 [GlyphFallback.chainFor] 回答（与度量尺、绘制侧同一条链），
+ *   命中即 [GlyphSource.FALLBACK]；
+ * - 后端默认族（[GlyphRaster.defaultFontName]）不在链里时才作为末跳，命中即
+ *   [GlyphSource.DEFAULT]；
+ * - 每一跳都不许抛：光栅化器异常按「这一跳没拿到字形」处理，
+ *   照抄 `FontFactory.cs:52-54` 的 `catch` 后 `return null`。
+ *
  * 与原版的差异（如实记录，不静默）：原版当 **Font 对象本身构造失败** 时把整段标 `Error`，
  * 宽度归 0 且完全不绘制（spec: `ConsoleStyledString.cs:26-30,77-81,99-102`）；
  * 只有「Font 可用但码位缺字」才由 GDI+ 的 .notdef 字形画方框（那几个绘制调用前没有任何
- * 码位检查）。本波把两种情形统一收成第三跳的方框，方框宽度按 [CellMetrics.cellsOf] 的
+ * 码位检查）。本波把两种情形统一收成末跳的方框，方框宽度按 [CellMetrics.cellsOf] 的
  * Shift-JIS 半角格模型给。
  * TODO(verify)：.notdef 的真实前进宽度是字体自带的，无解密行号可依据，真机截图验收时复核。
+ * TODO(verify)：族链的**判据**与绘制侧 `Paint.hasGlyph` 仍是两套能力源（sidecar 有行 /
+ * 平台字体栈有字形），CONTRACT-MODERN-R11-T4B S5 显式出界，须真机截图逐码位对账后再统一。
  *
  * ## 线程与单位
  *
@@ -82,7 +93,8 @@ private data class BucketKey(val fontName: String, val styleMask: Int, val sizeP
  * @property maxEntries 常驻条目上限；负数夹到 0（沿用原版对配置值先夹后用的口径，
  *   spec: `Config.cs:431-434`、`Config.cs:451-454`）。0 表示**不缓存**（直通：每次都新建实例）。
  * @property raster 字形光栅化器；本波默认 [StaticGlyphRaster]（确定性实现，度量走 §3 表或退化），
- *   真机由 `:render-canvas` 注入 Android 实现。
+ *   真机由 `:render-canvas` 注入 `AndroidGlyphRaster`（Typeface + Paint）。
+ *   **它只回答「这一族有没有这一字形」**，族级回落链归 [GlyphFallback]（见 [hopPlan]）。
  * @property cellMetrics 默认字号（[defaultSizePx]）的像素 ↔ 半角格换算器；必须与 [raster] 的度量同源，
  *   否则 [GlyphEntry.advanceCells] 与位图宽会脱节。
  * @property defaultSizePx 请求侧没给字号（`GlyphKey.size <= 0`）时的归一目标；
@@ -146,8 +158,12 @@ class GlyphCache(
     var evictionCount: Long = 0L
         private set
 
-    /** 由默认字体代画的条目数（回退链第二跳命中）。 */
+    /** 由默认字体代画的条目数（回退链的**后端默认族**那一跳命中，[GlyphSource.DEFAULT]）。 */
     var defaultFallbackCount: Long = 0L
+        private set
+
+    /** 由随包兜底族代画的条目数（族链兜底段命中，[GlyphSource.FALLBACK]）。 */
+    var fallbackFamilyCount: Long = 0L
         private set
 
     /** 方框兜底的条目数（回退链第三跳）。 */
@@ -281,24 +297,69 @@ class GlyphCache(
         return BucketKey(fontName, key.styleMask, normalizeSize(key.size), key.codePoint)
     }
 
-    /** 回退链第一跳 + 第二跳；两跳都空手则第三跳方框。两跳都带**同一个字号**。 */
+    /**
+     * 缺字回退链的跳序（CONTRACT-MODERN-R11-T4B S1）：**请求族 → 随包兜底段 → 后端默认族**。
+     *
+     * 1. 请求族〔= 桶里的字体名，空名已归一到 [GlyphRaster.defaultFontName]〕先试一次 ——
+     *    与 `FontFactory.GetFont` 先按请求名找字体同序（spec: `FontFactory.cs:33-48`）；
+     * 2. 兜底段**只**由 [GlyphFallback.chainFor] 回答（请求族在前、兜底段去重），
+     *    本类不再自带第二套「缺字往哪一族找」；注册族名下第 1 跳与链首同一，测试里
+     *    用任意族名注册的假光栅化器才会在链首之外多出这一跳；
+     * 3. 后端默认族（[raster] 的 `defaultFontName`）**若不在链里**才补成一跳（末跳）。
+     *
+     * 于是真机后端把默认族选成链上成员（`Sarasa Mono SC`，`BundledFontFamilies.DEFAULT_FAMILY`）时
+     * 第 3 跳恒不存在，[GlyphSource.DEFAULT] 也就不出现 —— 缺字一律由 [GlyphSource.FALLBACK] 或
+     * 方框交代；桌面假实现把默认族登记成别的名字时，它仍是前两跳之外的兜底。
+     *
+     * 每次未命中新建一个 [HopPlan]（命中路径零分配）；这不引入任何静态可变状态。
+     */
+    private fun hopPlan(requestedFont: String): HopPlan {
+        val names = ArrayList<String>(MAX_HOP_SLOTS)
+        names.add(requestedFont)
+        for (family in GlyphFallback.chainFor(BundledFontFamilies.resolve(requestedFont))) {
+            if (!names.contains(family.family)) names.add(family.family)
+        }
+        val defaultFont = raster.defaultFontName
+        val defaultHop = if (names.contains(defaultFont)) {
+            NO_DEFAULT_HOP
+        } else {
+            names.add(defaultFont)
+            names.lastIndex
+        }
+        return HopPlan(names, defaultHop)
+    }
+
+    /** 一次未命中的跳序：族名序列 + 末跳（后端默认族）的下标；-1 = 默认族已在链里。 */
+    private class HopPlan(val names: List<String>, val defaultHop: Int)
+
+    /** 回退链：按 [hopPlan] 的族序逐跳光栅化，首命中即返回；全落空画方框。 */
     private fun build(key: GlyphKey, bucket: BucketKey): GlyphEntry {
         val requestedFont = bucket.fontName
-        val defaultFont = raster.defaultFontName
         val sizePx = bucket.sizePx
         val converter = cellMetricsFor(sizePx)
-        val hopCount = if (requestedFont == defaultFont) 1 else 2
-        for (hop in 0 until hopCount) {
-            val fontName = if (hop == 0) requestedFont else defaultFont
+        val plan = hopPlan(requestedFont)
+        val hops = plan.names
+        for (hop in hops.indices) {
+            val fontName = hops[hop]
             val glyph = rasterizeSafely(fontName, key.styleMask, key.codePoint, sizePx)
             if (glyph != null) {
-                if (hop > 0) {
-                    defaultFallbackCount++
+                val servedBy = when {
+                    // 请求族自己画出来了（空名归一后的默认族也算请求族，spec: FontFactory.cs:13-17）
+                    fontName == requestedFont -> GlyphSource.REQUESTED
+                    // 末跳 = 后端默认族（只在它不在链里时才存在，见 hopPlan）
+                    hop == plan.defaultHop -> GlyphSource.DEFAULT
+                    // 随包兜底族命中（族链兜底段）
+                    else -> GlyphSource.FALLBACK
+                }
+                when (servedBy) {
+                    GlyphSource.DEFAULT -> defaultFallbackCount++
+                    GlyphSource.FALLBACK -> fallbackFamilyCount++
+                    else -> Unit
                 }
                 return GlyphEntry(
                     key = key,
                     servedFont = fontName,
-                    servedBy = if (hop == 0) GlyphSource.REQUESTED else GlyphSource.DEFAULT,
+                    servedBy = servedBy,
                     advanceCells = converter.pixelsToCells(glyph.advancePixels),
                     advancePixels = glyph.advancePixels,
                     lsbPixels = glyph.lsbPixels,
@@ -362,6 +423,15 @@ class GlyphCache(
          * 只约束 [evictedKeys]，[evictionCount] 不受影响。
          */
         private const val EVICTED_HISTORY_LIMIT = 256
+
+        /**
+         * 跳序列表的预分配槽位：登记 8 族时最长 = 请求名 + 链上 ≤3 族 + 后端默认族；
+         * 取 6 让常见配置不必扩容。只是预分配提示，不参与任何语义。
+         */
+        private const val MAX_HOP_SLOTS = 6
+
+        /** [HopPlan.defaultHop] 的「后端默认族已经在链里，没有独立末跳」取值。 */
+        private const val NO_DEFAULT_HOP = -1
 
         /**
          * 方框占位的边框色，ARGB `0xAARRGGBB` 的 `0xFF808080`（alpha 满、RGB 中灰）。

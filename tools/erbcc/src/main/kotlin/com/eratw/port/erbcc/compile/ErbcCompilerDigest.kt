@@ -20,38 +20,51 @@ import java.security.MessageDigest
  * app staging）都会放行。真机红 J 的 `NEXT`/`FOR STEP` 死循环（`1c1c3e0d` 修）就是这样被
  * 旧产物带进包的：语料没变、产物自洽，唯独编译器换了。
  *
- * ## 文件集判据（为什么是 core-vm 整树）
+ * ## 文件集判据（为什么是两棵整树）
  *
  * 编译链的 Kotlin 依赖是**跨包**的，逐个枚举包必然漏（新增一个包/文件不会自动进集合）：
- * - `compile/`：`ErbProgramCompiler.kt:3-25` 的 import 覆盖 `code`（CodeBuilder/Opcode/
+ * - `core-vm` 的 `compile/`：`ErbProgramCompiler.kt:3-25` 的 import 覆盖 `code`（CodeBuilder/Opcode/
  *   Program/CallArg/SlotAddr/StatementAliases）、`expr`、`fn`（Builtins）；`:26` 起还有整族 `stmt`；
  * - `code/ErbcWriter.kt:3-7`：容器字节的直接写入者，先引 `ErbcFormat` 的标签表；`:8-42` 起是
  *   `expr` / `stmt`；
  * - `tools/erbcc` 侧的驱动 `CorpusCompile.kt:3-43` 还引 `lexer`、`vars`、`data.csv`、
- *   `config`、`proc`、`loader`、`err`。
+ *   `config`、`proc`、`loader`、`err` —— 驱动是「读语料 → 调 core-vm → 落产物」的编排者：
+ *   清单行序、bootMetadata、build-mode 档位、补丁应用都出自它，改驱动不改 core-vm 同样
+ *   改变落盘产物与清单的生成方式。
  *
- * 所以本对象取 **`core-vm/src/main/kotlin` 整棵树**：core-vm 是编译器与装载器的单模块，
- * 任何一处改动都可能进入产物字节；整树哈希的代价只有一次 mb 级读盘 + SHA-256（实测几十
- * 毫秒），远比「漏一个包 ⇒ 判据静默失效」便宜。**宁可多不可漏**。
- *
- * TODO(verify)：`tools/erbcc` 的驱动 `CorpusCompile`/`CorpusScan` 也在链上却不在本集合里
- * （本波范围只到 core-vm）；要覆盖它得把集合改成多根，属组长接线面。
+ * 所以本对象取**两棵整树**：`core-vm/src/main/kotlin`（编译器与装载器的单模块）+ 
+ * `tools/erbcc/src/main/kotlin`（erbcc CLI 与驱动）。任何一处改动都可能进入产物字节或
+ * 落盘方式；整树哈希的代价只有一次 mb 级读盘 + SHA-256（实测几十毫秒），远比「漏一个包
+ * ⇒ 判据静默失效」便宜。**宁可多不可漏**。（2026-11-09 前集合只有 core-vm 单根，
+ * `CorpusCompile`/`CorpusScan` 不在内 ⇒ 改驱动不重编、旧 `.erbc` 照放行 —— 本波收口。）
  *
  * ## digest 口径（确定性）
  *
- * 1. 文件集：`core-vm/src/main/kotlin` 下**递归**的全部 `.kt` 普通文件（不含测试源集）；
+ * 1. 文件集：[SOURCE_ROOTS_REL] 两棵树各自**递归**的全部 `.kt` 普通文件（不含测试源集）；
  * 2. 相对路径 = 相对**仓库根**的路径，`\` 统一成 `/`（清单里的路径口径同 `artifact` 行）；
- * 3. 按相对路径做字典序排序（`String` 自然序，与平台无关）；
+ * 3. 按相对路径做字典序排序（`String` 自然序，与平台无关）—— 两根合流后**全局**排序，
+ *    不是根内排序后按根拼接；
  * 4. 逐文件喂 `SHA-256`：`u32be(路径字节数) ‖ 路径 UTF-8 ‖ u32be(文件字节数) ‖ 文件字节`。
  *    长度前缀让「路径/内容任意拼接」不产生歧义；
  * 5. 同一源码树两次计算逐字节相同（无时间戳、无绝对路径、无主机名）。
+ *
+ * 任一根缺失、或合流后一个 `.kt` 都没有，都必须报错（不能返回空哈希冒充「一致」——
+ * 那等于把判据关掉）。
  *
  * `compiler-sources N` 单独写一行只为人读；判据只认 `compiler-digest`。
  */
 object ErbcCompilerDigest {
 
-    /** 编译器源码根（相对仓库根）：core-vm 主源集的整棵树。 */
-    const val SOURCE_ROOT_REL: String = "core-vm/src/main/kotlin"
+    /**
+     * 编译器源码根集合（相对仓库根）：core-vm 主源集 + erbcc 驱动两棵整树。
+     *
+     * 集合里的每根都必须存在（缺一根 = 判据缺一角，[compute] 直接报错，不许静默降级成
+     * 单根继续算）；两根的相对前缀天然互不为前缀，合流后按 [compute] 的口径 3 全局排序。
+     */
+    val SOURCE_ROOTS_REL: List<String> = listOf(
+        "core-vm/src/main/kotlin",
+        "tools/erbcc/src/main/kotlin",
+    )
 
     /**
      * 定位仓库根的标记文件（相对仓库根）。
@@ -72,23 +85,26 @@ object ErbcCompilerDigest {
     /**
      * 计算 [repoRoot] 对应的编译器指纹。
      *
-     * @throws IllegalStateException 源码树不存在或一个 `.kt` 都没有（不能返回空哈希冒充
-     *   「一致」—— 那等于把判据关掉）
+     * @throws IllegalStateException [SOURCE_ROOTS_REL] 里任一根源码树不存在、或两根合流后
+     *   一个 `.kt` 都没有（不能返回空哈希冒充「一致」—— 那等于把判据关掉）
      */
     fun compute(repoRoot: Path): Result {
         val root = repoRoot.toAbsolutePath().normalize()
-        val srcRoot = root.resolve(SOURCE_ROOT_REL)
-        check(Files.isDirectory(srcRoot)) {
-            "编译器源码树不存在：$srcRoot（compiler-digest 没有判据；repoRoot=$root）"
+        val srcRoots = SOURCE_ROOTS_REL.map { root.resolve(it) }
+        for (srcRoot in srcRoots) {
+            check(Files.isDirectory(srcRoot)) {
+                "编译器源码树不存在：$srcRoot（compiler-digest 没有判据；repoRoot=$root）"
+            }
         }
-        val files = Files.walk(srcRoot).use { stream ->
-            stream.iterator().asSequence()
-                .filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".kt") }
-                .map { root.relativize(it).toString().replace('\\', '/') to it }
-                .toList()
-                .sortedBy { it.first }
-        }
-        check(files.isNotEmpty()) { "编译器源码树里没有 .kt 文件：$srcRoot（compiler-digest 没有判据）" }
+        val files = srcRoots.flatMap { srcRoot ->
+            Files.walk(srcRoot).use { stream ->
+                stream.iterator().asSequence()
+                    .filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(".kt") }
+                    .map { root.relativize(it).toString().replace('\\', '/') to it }
+                    .toList()
+            }
+        }.sortedBy { it.first }
+        check(files.isNotEmpty()) { "编译器源码树里没有 .kt 文件：$srcRoots（compiler-digest 没有判据）" }
 
         val sha = MessageDigest.getInstance("SHA-256")
         for ((rel, path) in files) {

@@ -66,9 +66,13 @@ import java.util.Locale
  * ## 输出
  *
  * `--out <目录>`（必填）：`sweep.jsonl`（每函数一条终态记录，字段 fn/key/status/cls/
- * line/pc/msg/steps/elapsedMs/covered/stmts/coverPct）+ `summary.md`（状态计数 +
+ * line/pc/msg/steps/elapsedMs/covered/stmts/coverPct/file）+ `summary.md`（状态计数 +
  * 失败指纹 TOP 表 + 语句覆盖率仪表，指纹算法见 [Ledger.fingerprint]）。
  * 目录不落时间戳，两次同语料 sweep 可逐字节 diff（墙钟类状态除外）。
+ *
+ * `file` 是**该记录函数自身**的源文件（`position` 的文件列，不是失败点所在文件 ——
+ * 失败点看 `line/pc`）：sweep 一行一个被清函数，这一列回答「这个函数定义在哪个文件」；
+ * 失败点归属要按 `pc` 另查 [SourceMap.at]。该列只做显示，不进 [Ledger.fingerprint]。
  *
  * ## 语句覆盖率（DBG1 增量 2026-10-25）
  *
@@ -369,6 +373,11 @@ class SweptRecord(
     val covered: Int = -1,
     /** 覆盖率分母 = 函数区间内语句 marker 总数；-1 = 不可得，0 = 函数无语句。 */
     val stmts: Int = -1,
+    /**
+     * **该函数自身**的源文件（`position` 的文件列；无 position / 合成标记 / 不可拆 / 绝对路径
+     * 按 [fileColumn] 的口径落 `-` 或 `<absolute>`）。不做判定，只供人工与外部脚本。
+     */
+    val file: String = "-",
 ) {
 
     /** 非 PASS 即失败（RUNNING 不会出现在终态文件；手工档里出现也按失败计）。 */
@@ -392,6 +401,7 @@ class SweptRecord(
             "covered" to covered,
             "stmts" to stmts,
             "coverPct" to coverPct,
+            "file" to file,
         ),
     )
 
@@ -411,6 +421,8 @@ class SweptRecord(
                 else -> error.javaClass.simpleName
             }
             val ee = error as? com.eratw.port.core.err.CodeEE
+            // 函数自身的文件（不是失败点文件）：失败点 pc 可能落在被调方，见类头输出段。
+            val pos = SourceMap.parsePosition(m.position)
             return SweptRecord(
                 fn = m.name,
                 key = m.key,
@@ -423,6 +435,7 @@ class SweptRecord(
                 elapsedMs = elapsedMs,
                 covered = covered,
                 stmts = stmts,
+                file = fileColumn(pos.file, pos.kind),
             )
         }
 
@@ -441,6 +454,8 @@ class SweptRecord(
                 elapsedMs = f["elapsedMs"]?.toLongOrNull() ?: -1L,
                 covered = f["covered"]?.toIntOrNull() ?: -1,
                 stmts = f["stmts"]?.toIntOrNull() ?: -1,
+                // 旧档（R7 之前）没有该键 ⇒ `-`：不当真实文件，也不编造。
+                file = f["file"] ?: "-",
             )
         }
     }

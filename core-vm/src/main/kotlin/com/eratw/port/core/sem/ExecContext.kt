@@ -60,13 +60,17 @@ data class SemConfig(
     /** TODO(verify) 预留：限时超时后是否强制跳过。**无读写方、原版无对应物**（全仓 grep `TimeoutForce` 零命中，配置项侧只有 `ConfigCode.cs:93` 的 TimeupLabel）；旧注释所述「MesSkip 初始状态 / SKIPLOG」是 mesSkip 一族（`Process.cs:1830-1833`），与字段名不符 —— 保留声明只为不破坏既有构造调用，接线前先回 C# 找语义。 */
     val timeupTimeoutForce: Boolean = false,
     /**
-     * VARI/VARS 作用域变量语句开关。本游戏 setting.json `UseScopedVariableInstruction:false`，
-     * 原版在标识符解析期即抛 CodeEE（spec: IdentifierDictionary.cs:624-627 CanNotUseVAR），
-     * 语料零使用 ⇒ 语义按**禁用**处理（门控消费点见 StatementExecutor.execVarDecl）。
-     * 解析期同口径门控已落地：`core.stmt.StmtParseConfig.useScopedVariableInstruction`
-     * （LineParser 构造参数；M3-A A3）。默认 true 保持既有解析行为，本作口径显式传 false；
-     * 若启用，原版在 ParseLine 手工解析参数（LogicalLineParser.cs:412-511），
-     * execVarDecl 的初值语义随之生效。
+     * VARI/VARS 作用域变量语句开关。
+     *
+     * 缺省 false = 原版 `JSONConfigData.cs:13` 的 C# `bool` 缺省（`setting.json` 缺文件/
+     * 缺键时同值）；**生产的游戏目录有文件**时由 proc/GameSession.kt 经
+     * [com.eratw.port.core.config.JsonSetting.loadGameDir] 注入实值 —— eratw 4.980 是
+     * false（语料零使用），eraFL 是 true（大量使用）。原版关闭时在标识符解析期即抛
+     * CodeEE（spec: IdentifierDictionary.cs:624-627 CanNotUseVAR），门控消费点见
+     * StatementExecutor.execVarDecl。
+     * 解析期同口径门控：`core.stmt.StmtParseConfig.useScopedVariableInstruction`
+     * （LineParser 构造参数；M3-A A3）。若启用，原版在 ParseLine 手工解析参数
+     * （LogicalLineParser.cs:412-511），execVarDecl 的初值语义随之生效。
      */
     val useScopedVariableInstruction: Boolean = false,
 )

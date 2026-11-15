@@ -442,9 +442,10 @@ class StackOpcodeTest {
     @Test
     fun `运行期错误文案与 Expr 逐字一致`() {
         val c = ctx()
+        // 4.981 SafeArithmetic.cs:67-84 把**整数** DIV/MOD 的 b==0 改成钳制返回 0 + 警告，
+        // 不再是运行期错误，故从这张「错误文案对拍表」移出；两条通道的钳制一致性
+        // 由下面的 `整数零除在两条通道都钳制为零` 单独钉。
         val cases = listOf(
-            DiffCase(Binary(OperatorCode.DIV, IntLiteral(5), IntLiteral(0), OperandType.INT), "_STK_PUSH_IMM 5\n_STK_PUSH_IMM 0\n_STK_DIV"),
-            DiffCase(Binary(OperatorCode.MOD, IntLiteral(5), IntLiteral(0), OperandType.INT), "_STK_PUSH_IMM 5\n_STK_PUSH_IMM 0\n_STK_MOD"),
             DiffCase(
                 Binary(OperatorCode.DIV, IntLiteral(Long.MIN_VALUE), IntLiteral(-1), OperandType.INT),
                 "_STK_PUSH_IMM -9223372036854775808\n_STK_PUSH_IMM -1\n_STK_DIV",
@@ -463,6 +464,29 @@ class StackOpcodeTest {
             }.message
             assertEquals(expected, actual, "错误文案不一致: ${d.expr}")
         }
+    }
+
+    @Test
+    fun `整数零除在两条通道都钳制为零`() {
+        // 4.981 SafeArithmetic.cs:67-84：Expr 整型支与 VM 栈码支必须同一语义，
+        // 且钳制路径要弹掉两个操作数、只压回一个 0（栈平衡，见 Vm._STK_DIV 注释）。
+        val c = ctx()
+        assertEquals(0L, Binary(OperatorCode.DIV, IntLiteral(5), IntLiteral(0), OperandType.INT).getIntValue(c))
+        assertEquals(0L, Binary(OperatorCode.MOD, IntLiteral(5), IntLiteral(0), OperandType.INT).getIntValue(c))
+
+        val divHost = StringHost(c)
+        val divProg = Assembler.assemble(
+            "_STK_PUSH_IMM 5\n_STK_PUSH_IMM 0\n_STK_DIV\n_STK_POP_SLOT_I R0\n_RET R0",
+        )
+        assertEquals(0L, VirtualMachine(divProg, divHost).run(), "栈码 DIV 钳制且栈平衡")
+        assertEquals("零除: 5 / 0\n", divHost.output.toString())
+
+        val modHost = StringHost(c)
+        val modProg = Assembler.assemble(
+            "_STK_PUSH_IMM 5\n_STK_PUSH_IMM 0\n_STK_MOD\n_STK_POP_SLOT_I R0\n_RET R0",
+        )
+        assertEquals(0L, VirtualMachine(modProg, modHost).run(), "栈码 MOD 钳制且栈平衡")
+        assertEquals("零除: 5 \\ 0\n", modHost.output.toString())
     }
 
     // ------------------------------------------------------------------

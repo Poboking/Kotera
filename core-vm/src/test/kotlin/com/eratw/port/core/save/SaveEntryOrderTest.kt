@@ -161,18 +161,19 @@ class SaveEntryOrderTest {
     // ==================================================================
 
     /**
-     * 写侧的「整列一次取走」必须与逐元素读法**逐格等值**，否则存档直接写错值。
+     * 写侧的「整列视图」必须与逐元素读法**逐格等值**，否则存档直接写错值。
      *
-     * 存在理由：`SaveCapture.entryForDef` 原来是每格一次按名解析 + 一块新下标数组
-     * （TA/TB 出厂 100×100×100 ⇒ 一次存档 200 万轮，与 2026-11-02 玩家「玩久了存档失败」
-     * 的堆贴顶尖峰同形）。批量面只在能证明等值时才接管（遮蔽 / `isForbid` / 列长≠维度积
-     * 三种情况 return null 退回逐元素），本用例钉住接管路径的**展平公式**
-     * （`elem = elem * n + v`，与 `VariableStore.checkFlat` 同一条）与三条退路。
-     *
-     * 另钉「交出的是副本」：抓取后脚本还会继续写同一列，活数组绝不能流进 [SaveEntry]。
+     * 存在理由：`SaveCapture` 原来是每格一次按名解析 + 一块新下标数组（TA/TB 出厂
+     * 100×100×100 ⇒ 一次存档 200 万轮）。SAVE-STREAM 波把它换成
+     * `VariableStore.systemIntColumn` / `systemStrColumn` 的**零拷贝视图**，本用例钉住：
+     * ① 接管路径的**展平公式**（`elem = elem * n + v`，与 `VariableStore.checkFlat` 同一条）；
+     * ② 三条退路（形态不是整数列 / 不是 1D 字符串列 / 维度乘积与列长不符）仍返回 null，
+     *    调用方退回逐元素路径；
+     * ③ 视图读的是**活列**（这是新契约：写盘期间同线程、不缓存；旧实现交副本，
+     *    现在改用「不复制」换来「不改写也不观察偏差」——下面同时验「改活列即视图可见」）。
      */
     @Test
-    fun `批量列快照与逐元素读数逐格等值`() {
+    fun `批量列视图与逐元素读数逐格等值`() {
         val store = modifiedStore()
         store.writeInt("MONEY", longArrayOf(99), 14L)
         store.writeInt("DA", longArrayOf(7, 3), 13L)
@@ -180,58 +181,58 @@ class SaveEntryOrderTest {
         store.writeInt("TB", longArrayOf(99, 99, 99), 12L)
         store.writeStr("SAVESTR", longArrayOf(2), "第二格")
 
-        val money = store.captureSystemIntColumn(store.registry.mustDef("MONEY"))
-        assertNotNull(money, "MONEY 是默认注册表的 1D 整数列，批量面应当接管")
+        val money = store.systemIntColumn(store.registry.mustDef("MONEY"))
+        assertNotNull(money, "MONEY 是默认注册表的 1D 整数列，视图面应当接管")
         val moneyDims = store.registry.mustDef("MONEY").dims[0]
-        assertEquals(moneyDims, money.size, "列长 = 声明维度")
+        assertEquals(moneyDims, money.length, "列长 = 声明维度")
         for (k in 0 until moneyDims) {
-            assertEquals(store.readInt("MONEY", longArrayOf(k.toLong())), money[k], "MONEY[$k]")
+            assertEquals(store.readInt("MONEY", longArrayOf(k.toLong())), money.get(k), "MONEY[$k]")
         }
 
-        val da = store.captureSystemIntColumn(store.registry.mustDef("DA"))
+        val da = store.systemIntColumn(store.registry.mustDef("DA"))
         assertNotNull(da)
         val d0 = store.registry.mustDef("DA").dims[0]
         val d1 = store.registry.mustDef("DA").dims[1]
-        assertEquals(d0 * d1, da.size)
-        assertEquals(13L, da[7 * d1 + 3], "行主序展平：[7,3] → 7*d1+3")
-        for (k in listOf(0, 1, da.size / 2, da.size - 2, da.size - 1)) {
-            assertEquals(store.readInt("DA", longArrayOf((k / d1).toLong(), (k % d1).toLong())), da[k], "DA[$k]")
+        assertEquals(d0 * d1, da.length)
+        assertEquals(13L, da.get(7 * d1 + 3), "行主序展平：[7,3] → 7*d1+3")
+        for (k in listOf(0, 1, da.length / 2, da.length - 2, da.length - 1)) {
+            assertEquals(store.readInt("DA", longArrayOf((k / d1).toLong(), (k % d1).toLong())), da.get(k), "DA[$k]")
         }
 
-        val ta = store.captureSystemIntColumn(store.registry.mustDef("TA"))
+        val ta = store.systemIntColumn(store.registry.mustDef("TA"))
         assertNotNull(ta)
         val t = store.registry.mustDef("TA").dims
-        assertEquals(t[0] * t[1] * t[2], ta.size)
-        assertEquals(11L, ta[97 * t[1] * t[2] + 3 * t[2] + 5], "TA[97,3,5]")
-        val tb = store.captureSystemIntColumn(store.registry.mustDef("TB"))
+        assertEquals(t[0] * t[1] * t[2], ta.length)
+        assertEquals(11L, ta.get(97 * t[1] * t[2] + 3 * t[2] + 5), "TA[97,3,5]")
+        val tb = store.systemIntColumn(store.registry.mustDef("TB"))
         assertNotNull(tb)
-        assertEquals(12L, tb[tb.size - 1], "TB 末格（[99,99,99]）")
-        for (k in listOf(0, 1, ta.size / 3, ta.size - 2, ta.size - 1)) {
+        assertEquals(12L, tb.get(tb.length - 1), "TB 末格（[99,99,99]）")
+        for (k in listOf(0, 1, ta.length / 3, ta.length - 2, ta.length - 1)) {
             val idx = longArrayOf(
                 (k / (t[1] * t[2])).toLong(),
                 ((k / t[2]) % t[1]).toLong(),
                 (k % t[2]).toLong(),
             )
-            assertEquals(store.readInt("TA", idx), ta[k], "TA 展平 $k → ${idx.joinToString(",")}")
+            assertEquals(store.readInt("TA", idx), ta.get(k), "TA 展平 $k → ${idx.joinToString(",")}")
         }
 
-        val saveStr = store.captureSystemStrColumn(store.registry.mustDef("SAVESTR"))
+        val saveStr = store.systemStrColumn(store.registry.mustDef("SAVESTR"))
         assertNotNull(saveStr)
-        assertEquals("第二格", saveStr[2])
-        for (k in saveStr.indices) {
-            assertEquals(store.readStr("SAVESTR", longArrayOf(k.toLong())), saveStr[k], "SAVESTR[$k]")
+        assertEquals("第二格", saveStr.get(2))
+        for (k in 0 until saveStr.length) {
+            assertEquals(store.readStr("SAVESTR", longArrayOf(k.toLong())), saveStr.get(k), "SAVESTR[$k]")
         }
 
-        // 三条退路：形态不是整数列 / 不是 1D 字符串列 ⇒ null，调用方退回逐元素路径。
-        assertNull(store.captureSystemIntColumn(store.registry.mustDef("SAVESTR")), "字符串列不是整数批量面")
-        assertNull(store.captureSystemStrColumn(store.registry.mustDef("MONEY")), "整数列不是字符串批量面")
-        assertNull(store.captureSystemStrColumn(store.registry.mustDef("TA")), "3D 列没有 1D 批量形态")
+        // 三条退路：形态不是整数列 / 不是 1D 字符串列 / 维度不是 1D ⇒ null，调用方退回逐元素路径。
+        assertNull(store.systemIntColumn(store.registry.mustDef("SAVESTR")), "字符串列不是整数视图面")
+        assertNull(store.systemStrColumn(store.registry.mustDef("MONEY")), "整数列不是字符串视图面")
+        assertNull(store.systemStrColumn(store.registry.mustDef("TA")), "3D 列没有 1D 字符串视图")
 
-        // 交出的是副本：改快照不得回写活列，也不得影响随后的抓取。
-        ta[0] = -12345L
-        assertEquals(7L, store.readInt("TA", longArrayOf(0, 0, 0)), "批量面必须是 copyOf，改快照不许污染活列")
+        // 零拷贝：视图读的是活列（写盘期间同线程、不缓存 —— 见 VariableStore.IntColumnView 的 KDoc）。
+        store.writeInt("TA", longArrayOf(0, 0, 0), 7L)
+        assertEquals(7L, ta.get(0), "视图不复制：活列改了视图立即可见")
         val entry = SaveCapture.normal(store, "t").variables.first { it.key == "TA" } as SaveEntry.IntArray3
         assertEquals(11L, entry.values[97 * t[1] * t[2] + 3 * t[2] + 5], "抓取条目仍取真值")
-        assertEquals(7L, entry.values[0], "抓取条目不受上面那次快照改写的影响")
+        assertEquals(7L, entry.values[0], "抓取条目读到的是活列当前值")
     }
 }

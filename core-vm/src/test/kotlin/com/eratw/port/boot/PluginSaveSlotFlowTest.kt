@@ -26,6 +26,7 @@ import com.eratw.port.core.save.SaveConfig
 import com.eratw.port.core.save.SaveDataProbe
 import com.eratw.port.core.save.SaveWiring
 import com.eratw.port.core.sem.SemConfig
+import com.eratw.port.core.sql.RealSqlDriver
 import com.eratw.port.core.vars.VarConfig
 import com.eratw.port.core.vars.VariableRegistry
 import com.eratw.port.core.vars.VariableStore
@@ -72,6 +73,16 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
  * 缺文件按原版折成空串不抛（`fn/HostMethods.kt:285-289`）⇒ 分叉一直藏着）。
  * 修法是**按档案取列**：铺当前根自己的 `plugins/`
  * （见 [stageRootAssets]），不硬编文件名、不按版本分支、更不「4.981 下跳过」。
+ *
+ * **驱动轴同源**（2026-11-15 收口 SQLite 迁移后本族 3 条常红）：迁移把 `SQL_*` 从自研
+ * 内存表改走 `SqlDriver` 端口（`CONTRACT-SQLITE-MIGRATION` §1），宿主 `sqlDriver = null`
+ * 时 `SQL_CONNECT` 按契约抛 CodeEE「宿主未接线 SQLite 驱动」
+ * （`core/sql/SqlMethods.kt:371-375`）。本装置只补了 `plugins/` 文件镜像、没补驱动接线，
+ * 于是 261111 根下三条 `runGlobalInit = true` 的用例在 `@QOL_DB_INIT` 装配阶段就红，
+ * 与玩家报的存档现象无关（生产 `GameHost` 一直有注入，不是生产 bug）。修法是**照生产
+ * 装配接同一个真实驱动**（见 [assemble]），不跳过 `@QOL_DB_INIT`、不改 `runGlobalInit`、
+ * 不塞空驱动桩 —— 后两种都会把存档备注链 `createSaveInfo → NAME_TR → TR_DB` 的
+ * 端到端覆盖一并抹掉。
  *
  * 输入脚本按原版键位（`BOARD.md:2022` 的实测口径：`ASK_YN` 0=第一项=是）：
  * - 删档：`1003`（切「删  档」）→ `3`（点槽 3）→ `0`（确认删）→ `0`（确认不可逆）→ `10000`（EXIT）
@@ -223,7 +234,10 @@ class PluginSaveSlotFlowTest {
      *   并在 System.err 记一行依据 —— 保证 4.980 口径不回退（其存档链不碰 TR_DB），
      *   4.981 口径照常登记 TR_DB。
      *
-     *   缺省 true = 与生产同形：任何一次真会话在 TITLE 阶段都跑过它。
+     *   缺省 true = 与生产同形：任何一次真会话在 TITLE 阶段都跑过它。装置已在装配阶段
+     *   注入真实 SQLite 驱动（见下方 [RealSqlDriver] 接线），故这句 `SQL_CONNECT "TR_DB"`
+     *   开的是 `:memory:` 库、`SQL_IMPORT_MAP_XML` 两句把 `CSV_MAP` / `TASTE_MAP` 真灌进去，
+     *   存档备注链查 `TR_DB` 拿到的是真实 SQLite 读数，不是「跳过初始化」的空读数。
      *   `divergent` 反例置 false —— 它刻意让沙盒根不带 `emuera.config`，使宿主配置链落到
      *   严格出厂口径；该口径下 `@QOL_DB_INIT` 会在与本用例判据无关的 `QOL_ITEM_INIT` 段
      *   抛出 TOSTR 兼容性 CodeEE（`画蛇添足版` 子系统的参数转换告警），而它走的是删档链、
@@ -265,12 +279,29 @@ class PluginSaveSlotFlowTest {
             "[device] plugins 镜像：$stagedPlugins 个文件，源=$gameRoot/plugins" +
                 "（沙盒读根=$saveRoot/plugins；缺表时按语料原样报红，不兜底）",
         )
-        val saveRooted = RootedBuiltinHost(saveRoot)
+        // SQLite 迁移后的夹具接线（与生产 `GameSession` 同形）：`SQL_*` 已改走 `SqlDriver`
+        // 端口，宿主未接线时 `sqlSession()` 按契约 §1 抛 CodeEE
+        // （`core/sql/SqlMethods.kt:371-375`）。本装置把写根挪进 `build/` 沙盒后，
+        // 驱动的根也必须取**同一个沙盒根**：`SQL_CONNECT "TR_DB"` 无第二实参 ⇒ 开
+        // `:memory:`（`SqlSession.kt:78` / `:275`），`SQL_CONNECTION_OPEN` / 带
+        // `Data Source=` 的连接则落沙盒内，语料目录零写入（AGENTS §1）。
+        // 生产把**同一个实例**同时喂 `RootedBuiltinHost` 与 `ConsoleBuiltinHost`
+        // （`GameSession.kt:948-955` 的 `sqlDriver = sqlDriver`、`:1349-1376` 的
+        // `sqlDriver = sqlDriver`；真机入口 `GameHost.kt:1015-1020` 的
+        // `AndroidSqliteHost.create(seedRoot, writeRoot)`），这里照抄该形态：
+        // 两层共用 `saveRooted` 这一只委托、两处注入同一个驱动，不做第二套语义。
+        val sqlDriver = RealSqlDriver(saveRoot)
+        val saveRooted = RootedBuiltinHost(saveRoot, sqlDriver = sqlDriver)
 
         val console = LineBufferConsoleSink(clientWidth = 1800, printCWidth = 25, maxLines = 2000)
         val sink = QueueInputSink()
         val beginHost = ConsoleBeginHost(sink, console)
-        val host = ConsoleBuiltinHost(saveRoot, console)
+        val host = ConsoleBuiltinHost(saveRoot, console, saveRooted, sqlDriver = sqlDriver)
+        assertTrue(
+            host.sqlDriver === sqlDriver,
+            "装置没把真实 SQL 驱动接到 Console 宿主：`BuiltinHost by delegate` 会把接口成员转给" +
+                "委托对象，QOL_DB_INIT 的 SQL_CONNECT 会在宿主未接线口径下抛 CodeEE",
+        )
         val gameData = GameDataLoader.load(gameRoot.resolve("CSV"))
         val store = VariableStore(
             gameData?.registry ?: VariableRegistry(),

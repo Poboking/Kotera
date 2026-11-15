@@ -5,7 +5,6 @@ import com.eratw.port.core.code.VmConfig
 import com.eratw.port.core.compile.ErbProgramCompiler
 import com.eratw.port.core.compile.ExprCallTable
 import com.eratw.port.core.compile.FuncSig
-import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.fn.NativeParam
 import com.eratw.port.core.fn.nativeMethods
 import com.eratw.port.core.host.LineBufferConsoleSink
@@ -17,7 +16,6 @@ import com.eratw.port.core.stmt.SymbolTable
 import com.eratw.port.core.vars.VariableStore
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -26,13 +24,14 @@ import kotlin.test.assertTrue
  * 原版口径：联结期 `CALLSHARP_Instruction.SetJumpTo`（FunctionIdentifier.cs:1193-1210）对常量名
  * 查 `PluginManager.HasMethod`，未命中 `:1204 ParserMediator.Warn(isError: true)` 只把
  * `line.IsError/ErrMes` 记到行上（ParserMediator.cs:129-130），命中把 CallFunc 绑死（:1208），
- * **此后不再重查**；执行期走到该行 Process.cs:1017-1019 抛 `CodeEE(ErrMes)` —— 抛的是
- * **记录值**，不是当次的查询结果。
+ * **此后不再重查**；官方执行期走到该行由 Process.cs:1017-1019 抛 `CodeEE(ErrMes)` —— 抛的是
+ * **记录值**，不是当次的查询结果。本移植版按**通用策略**（2026-11-09）不抛：打一行同文案的
+ * 错误行后跳过该语句，脚本继续（有意偏离 ADR-005，登记见 `specs/verify-notes.md` §35）。
  *
  * 移植侧裁决点后移到「该行第一次执行」（注册表挂 store.aux、宿主装配晚于语料装载，
  * GameHost.kt:3476 ⇒ 装载期注册表恒空，照抄原版相位会误杀已接桩的 ModelSet/Chat）；
  * 机制与不重查口径见 `core/fn/PluginMethods.kt` 的 SharpLinkTable。
- * 本钉四例把「记行错 → 抛记录值 → 不复活 / 命中 → 绑死 → 不受 clear 影响」
+ * 本钉四例把「记行错 → 提示一次 → 不复活 / 命中 → 绑死 → 不受 clear 影响」
  * 在对象树通道（Android 生产默认）与扁平通道（归因/装置）各钉一遍。
  */
 class CallSharpLinkPhaseTest {
@@ -59,14 +58,25 @@ class CallSharpLinkPhaseTest {
         return c.build("SHARP_LINK_PROBE")
     }
 
-    private fun runtimeWith(program: Program, store: VariableStore): ProcessRuntime =
+    private fun runtimeWith(
+        program: Program,
+        store: VariableStore,
+        sink: LineBufferConsoleSink =
+            LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900),
+    ): ProcessRuntime =
         ProcessRuntime(
             program,
             store,
             FunctionTable(emptyList()),
             VmConfig(maxStepsPerRun = 100_000),
-            consoleSink = LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900),
+            consoleSink = sink,
         )
+
+    /** 控制台上屏的**错误行**文案（printError 通道；Kind.ERROR 段）。 */
+    private fun errorLines(sink: LineBufferConsoleSink): List<String> =
+        sink.snapshot().flatMap { it.segments }
+            .filter { it.kind == LineBufferConsoleSink.Kind.ERROR }
+            .map { it.text }
 
     /** 对象树通道（Android 生产默认形态）：关掉 flat 直读（Program 的 internal 开关，同模块测试可及）。 */
     private fun asTreeChannel(program: Program): Program {
@@ -79,26 +89,37 @@ class CallSharpLinkPhaseTest {
     // -----------------------------------------------------------------
 
     @Test
-    fun `flat 未命中首执行记行错 接线后重执行仍抛记录值`() {
+    fun `flat 未命中首执行记行错 接线后重执行仍跳过不复活`() {
         val store = VariableStore()
-        val rt = runtimeWith(compile("CALLSHARP Ghost(1)"), store)
-        val first = assertFailsWith<CodeEE> { rt.execute() }
-        assertEquals("No native method Ghost found", first.message, "首执行报官方原文（FunctionIdentifier.cs:1204）")
-        // 模拟「宿主此刻才把方法接上」：行级错误已记死，重执行照记录值重抛 ——
+        val sink = LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900)
+        val rt = runtimeWith(compile("CALLSHARP Ghost(1)"), store, sink)
+        rt.execute()
+        assertEquals(
+            listOf("No native method Ghost found"),
+            errorLines(sink),
+            "首执行打官方原文（FunctionIdentifier.cs:1204）后跳过，不抛",
+        )
+        // 模拟「宿主此刻才把方法接上」：行级错误已记死，重执行照记录值走 ——
         // 原版 CallFunc 在联结期已定（:1208），IsError 行不因后注册而复活。
-        nativeMethods(store.aux).register("Ghost") { }
-        val second = assertFailsWith<CodeEE> { rt.execute() }
-        assertEquals(first.message, second.message, "二次执行抛记录值，不重查注册表")
+        var hits = 0
+        nativeMethods(store.aux).register("Ghost") { hits++ }
+        rt.execute()
+        assertEquals(0, hits, "二次执行不重查注册表：后注册的方法不会被调到")
+        assertEquals(1, errorLines(sink).size, "提示也只在首执行出一次")
     }
 
     @Test
     fun `对象树通道未命中同口径`() {
         val store = VariableStore()
-        val rt = runtimeWith(asTreeChannel(compile("CALLSHARP Ghost(1)")), store)
-        val first = assertFailsWith<CodeEE> { rt.execute() }
-        assertEquals("No native method Ghost found", first.message)
-        nativeMethods(store.aux).register("Ghost") { }
-        assertEquals(first.message, assertFailsWith<CodeEE> { rt.execute() }.message)
+        val sink = LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900)
+        val rt = runtimeWith(asTreeChannel(compile("CALLSHARP Ghost(1)")), store, sink)
+        rt.execute()
+        assertEquals(listOf("No native method Ghost found"), errorLines(sink))
+        var hits = 0
+        nativeMethods(store.aux).register("Ghost") { hits++ }
+        rt.execute()
+        assertEquals(0, hits, "树通道同口径：不重查注册表")
+        assertEquals(1, errorLines(sink).size)
     }
 
     // -----------------------------------------------------------------
@@ -137,16 +158,20 @@ class CallSharpLinkPhaseTest {
     // -----------------------------------------------------------------
 
     @Test
-    fun `无桩抛点在该行 实参求值前不误伤前置语句`() {
-        // Process.cs:1017-1019 的 IsError 抛点在 DoInstruction 之前 ⇒ 该行自己的实参不求值，
-        // 前一行的 PRINT 正常生效（flat 链上 decoded 面也不受影响）。
+    fun `无桩提示落该行 实参不求值 前后语句都照常执行`() {
+        // 官方 IsError 检查点在 DoInstruction 之前（Process.cs:1017-1019）⇒ 该行自己的实参
+        // 不求值；本移植版只是把「抛」换成「提示 + 跳过」，前后语句都正常生效。
         val store = VariableStore()
-        val rt = runtimeWith(compile("PRINTL marker", "CALLSHARP Ghost(1)"), store)
-        val e = assertFailsWith<CodeEE> { rt.execute() }
-        assertEquals("No native method Ghost found", e.message)
-        assertTrue(
-            "marker" in rt.output.toString(),
-            "前置 PRINTL 已生效：错误只属于 CALLSHARP 那一行",
+        val sink = LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900)
+        val rt = runtimeWith(
+            compile("PRINTL marker", "CALLSHARP Ghost(1)", "PRINTL after"),
+            store,
+            sink,
         )
+        rt.execute()
+        assertEquals(listOf("No native method Ghost found"), errorLines(sink))
+        val out = rt.output.toString()
+        assertTrue("marker" in out, "前置 PRINTL 已生效：提示只属于 CALLSHARP 那一行")
+        assertTrue("after" in out, "后续语句照常执行：跳过不等于中断")
     }
 }

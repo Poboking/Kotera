@@ -21,7 +21,7 @@ object Disassembler {
                 Opcode._JUMP -> targets += pc + 1 + ins.a
                 Opcode._JUMP_IF_FALSE, Opcode._JUMP_IF_TRUE -> targets += pc + 1 + ins.b
                 // 条件位融合超指令（MODERN-T1）：跳转偏移在 c，与 `_JUMP_IF_FALSE` 同口径。
-                Opcode._EVAL_INT_JZ -> targets += pc + 1 + ins.c
+                Opcode._EVAL_INT_JZ, Opcode._LT_JZ, Opcode._GT_JZ -> targets += pc + 1 + ins.c
                 // 栈码组的三条跳转：a 与 _JUMP 同口径（相对下一条指令的偏移），
                 // 同样打标签，否则回编时 `L<pc>` 无处可查。
                 Opcode._STK_JZ_POP, Opcode._STK_JNZ_POP, Opcode._STK_JZ_KEEP ->
@@ -110,6 +110,11 @@ object Disassembler {
             // 条件位融合超指令（246，MODERN-T1）：表达式 + 目标槽 + 跳转标签，
             // 与 `Assembler.emitExtension` 的形态逐字对应。
             Opcode._EVAL_INT_JZ -> "${ins.name} \$$a, ${SlotAddr.format(b)}, L${pc + 1 + c}"
+
+            // 循环条件融合（247/248）：左槽、右槽、跳转标签，与 Assembler 的
+            // `_LT_JZ/_GT_JZ` 形态逐字对应。
+            Opcode._LT_JZ, Opcode._GT_JZ ->
+                "${ins.name} ${SlotAddr.format(a)}, ${SlotAddr.format(b)}, L${pc + 1 + c}"
 
             // 编译器扩展指令（198..201）：形态与 Assembler.emitExtension 逐字对应。
             Opcode._CALL_BY_NAME -> "${ins.name} ${SlotAddr.format(a)}, $b, ${SlotAddr.format(c)}"

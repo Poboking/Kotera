@@ -1358,6 +1358,29 @@ internal fun registerPure(r: BuiltinRegistry) {
             Value.IntV(d.toLong())
         }
     })
+    // spec: Creator.Method.cs:4544-4577 RoundMethod（蛇版 4.981 数学扩展；该树
+    // Statements/Function/Creator.cs:100 注册 ["ROUND"]；1.824 无此函数，语料 261111 起
+    // DLC/小游戏/锻税.ERB 四处实算使用）。声明面 ReturnType=Integer 但 CanReturnFloat=true、
+    // 单参 ArgType.Any（:4550-4557）；取值统一按 ToDouble，返回浮点还是整型由
+    // HasFloatArg（:4570-4576 GetReturnValue）分流：GetIntValue（:4558-4566）=
+    // Math.Round(d, MidpointRounding.AwayFromZero) 后查 Int64 越界抛 CodeEE
+    // （trerror.ResultIsOutOfTheRangeOfInt64）；GetFloatValue（:4568-4570）只回浮点。
+    // AwayFromZero 用 BigDecimal(d)（double 的精确十进制展开）+ HALF_UP 复刻：
+    // ±0.5/±2.5 这类可精确表示的 half 才会成 tie，BigDecimal 视角与 C# Math.Round 一致；
+    // NaN/±Inf 按原样透传（Math.Round(NaN)=NaN、Round(±Inf)=±Inf），整型路的越界闸
+    // 对 ±Inf 判抛、对 NaN 判不可达（ToDouble 出 NaN 的上游浮点路径在本引擎已先抛）。
+    r.register(BuiltinMethod("ROUND", I, 1, 1) { _, a ->
+        val d = dv(requiredValueArg(a, 0, "ROUND"))
+        val rounded = if (d.isNaN() || d.isInfinite()) d
+        else BigDecimal(d).setScale(0, RoundingMode.HALF_UP).toDouble()
+        if (a[0] is Value.FloatV) {
+            Value.FloatV(rounded)
+        } else {
+            if (rounded >= 9.223372036854776E18 || rounded <= -9.223372036854776E18)
+                throw codeEE("ROUND", "结果 $rounded 超出 Int64 范围")
+            Value.IntV(rounded.toLong())
+        }
+    })
     // spec: FunctionMethodCreator.cs:4193-4212 SqrtMethod
     int("SQRT", 1, 1) { a ->
         val v = requiredIntArg(a, 0, "SQRT")

@@ -102,9 +102,19 @@ const val PNG_PAYLOAD_SLOT: String = "pngPayload"
  * 无静态可变状态：序号与存活集都挂实例（AGENTS §2 铁律 4）；实例由宿主每会话一份，
  * 随 `store.aux` 同生命周期。
  */
-class MappedPngPayloadStore(private val dir: Path) : PngPayloadStore, AutoCloseable {
+class MappedPngPayloadStore(
+    private val dir: Path,
+    private val maxLiveMappings: Int = DEFAULT_MAX_LIVE_MAPPINGS,
+) : PngPayloadStore, AutoCloseable {
 
     private val seq = AtomicLong(0L)
+
+    /** 满额被拒的 spill 次数；满额不是错误，是「回落堆内闭包」的正常分支。 */
+    private val rejected = AtomicLong(0L)
+
+    /** 历史活跃峰值；只写于 [live] 监视器内。 */
+    @Volatile
+    private var peakLive = 0
 
     /** 存活载荷集（close 时逐个收尾）；只在缓冲监视器或本实例监视器内被摸。 */
     private val live = HashSet<MappedPayload>()
@@ -122,11 +132,16 @@ class MappedPngPayloadStore(private val dir: Path) : PngPayloadStore, AutoClosea
                 val mapped = ch.map(FileChannel.MapMode.READ_ONLY, 0L, png.size.toLong())
                 val payload = MappedPayload(path, mapped, png.size)
                 synchronized(live) {
-                    if (closed) {
+                    // 映射没有公开 unmap（ART 无 Cleaner 入口），丢弃引用后要活到 GC。
+                    // 因此活跃映射数必须**有界**：满额就回落堆内闭包（调用方按 png.size
+                    // 照旧记账），不许随游玩时长线性爬。close 会把刚写的文件删掉。
+                    if (closed || live.size >= maxLiveMappings) {
+                        rejected.incrementAndGet()
                         payload.close()
                         return null
                     }
                     live.add(payload)
+                    if (live.size > peakLive) peakLive = live.size
                 }
                 payload
             }
@@ -184,7 +199,7 @@ class MappedPngPayloadStore(private val dir: Path) : PngPayloadStore, AutoClosea
     ) : PngPayloadStore.Payload {
         // 映射引用只此一份；close 置 null 后 decode 走「已关闭」支，不读悬空内存。
         @Volatile
-        private var mapping: MappedByteBuffer? = mapping
+        private var mapping: ByteBuffer? = mapping
 
         override fun decode(): IntArray? {
             val m = mapping ?: return null
@@ -221,4 +236,33 @@ class MappedPngPayloadStore(private val dir: Path) : PngPayloadStore, AutoClosea
         }
     }
 
+    /**
+     * 堆外载荷的读数快照（进错误报告，真机 A/B 用）：活跃 / 峰值 / 上界 / 满额回落次数。
+     * 纯读，不碰文件系统、不改状态；[live] 只在监视器内取 size，与 spill 的满额判定同源。
+     */
+    fun stats(): Stats {
+        val current = synchronized(live) { live.size }
+        return Stats(current, peakLive, maxLiveMappings, rejected.get())
+    }
+
+    /** [stats] 的读数；字段全是标量，纯 JVM 单测可直接对拍。 */
+    data class Stats(
+        val live: Int,
+        val peak: Int,
+        val maxLiveMappings: Int,
+        val rejected: Long,
+    ) {
+        /** 报告正文的一行（取证面，不是玩家可见 UI 文案）。 */
+        fun line(): String =
+            "堆外载荷：活跃 $live / 峰值 $peak / 上界 $maxLiveMappings 张，满额回落 $rejected 次"
+    }
+
+    private companion object {
+        /**
+         * 活跃映射上界。单张降级 PNG 是几十至几百 KiB，256 张的映射与文件都在可控量级；
+         * 超过就回落堆内闭包 —— 堆内那一份至少还进池级账本、还能被预算闸看见，
+         * 而活到 GC 的无界映射谁也收不掉。取值可用构造参数覆写（测试用小数验证边界）。
+         */
+        const val DEFAULT_MAX_LIVE_MAPPINGS: Int = 256
+    }
 }

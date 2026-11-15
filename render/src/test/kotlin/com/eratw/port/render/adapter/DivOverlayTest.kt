@@ -269,4 +269,41 @@ class DivOverlayTest {
         assertEquals(125 + m24.lineHeight * 2, rows[2].yPx, "其后子行整体顺延一行")
         assertEquals(430, rows[0].subDivisionWidthPx, "24 号档 sourceFont=真机字号 ⇒ 折算恒等")
     }
+
+    @Test
+    fun `div 子行推进与面板高度同尺（字号与行高分档）`() {
+        // 根因层断言：① 度量源（div 竖向几何）。面板高/上下边走 scriptPixels（字号尺），
+        // 子行推进却吃 metrics.lineHeight（版面行高 = round(font × LINE/FONT)，多一次取整）。
+        // 原版两者是同一个脚本像素单位：ConsoleDivPart.cs:178 的 Height 与 :202 的
+        // `pointY += Config.LineHeight`；端口拆成两把尺后必须让两者走同一把。
+        //
+        // 档位：真机字号 23、版面行高 27（= round(23 × 21 / 18)），配置 18/21。
+        // 面板高 = 406 × 23 / 18 = 518；子行推进 = 21 × 23 / 18 = 26（向零截断），
+        // 不是版面行高 27 —— 旧实现每行偏 1px。
+        val m = CellMetrics(23, 27)
+        val plan = DivOverlayPlanner(m, 18, HtmlRunFlatten(m), scriptLineHeightPx = 21).plan(
+            blocks = listOf(
+                block(
+                    widthPx = 480,
+                    heightPx = 406,
+                    border = listOf(5, 5, 5, 5),
+                    padding = listOf(20, 20, 20, 20),
+                    subDiv = 430,
+                    children = listOf("切莫遗忘，病魔恒久；蛛网暗藏", "玉珠迟暮。"),
+                ),
+            ),
+            anchorTopPx = 100,
+            anchorPointXPx = 0,
+            canvasHeightPx = 2000,
+            visibleTopLine = 0,
+            visibleBottomLine = 100,
+            anchorLineNo = 0,
+        )
+        val b = plan.all.single()
+        assertEquals(m.scriptPixels(406, 18), b.borderRectPx.height, "面板高走字号尺（CDP :178）")
+        val pitch = b.children[1].yPx - b.children[0].yPx
+        assertEquals(m.scriptPixels(21, 18), pitch, "子行推进与面板高同一把尺（CDP :202）")
+        assertEquals(26, pitch, "21 × 23 / 18 = 26；旧实现吃版面行高 27")
+        assertEquals(m.lineHeight, 27, "版面行高仍是 ScreenLayout 的取整值，供正文行使用")
+    }
 }

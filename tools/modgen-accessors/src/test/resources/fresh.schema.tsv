@@ -1,0 +1,4 @@
+schema	com.eratw.port.modgen.accessors.generated	FreshAccessors	family
+field	AGE	INT	false
+field	display_name	STR	false
+field	father_ID	INT	true

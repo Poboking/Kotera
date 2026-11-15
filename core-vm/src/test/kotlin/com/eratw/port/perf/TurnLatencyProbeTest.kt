@@ -109,9 +109,10 @@ class TurnLatencyProbeTest {
             assumeTrue(false, "CHARA_MOVEMENT 整段在装置内未跑通（QOL_DB_INIT 截断）；改用 GMF 微基准")
             return
         }
-        if (distinctSteps.size > 1 || completed.isEmpty() || completed.first().steps < EXPECTED_MIN_STEPS) {
+        val minSteps = System.getenv("ERATW_PERF_MIN_STEPS")?.toLongOrNull() ?: EXPECTED_MIN_STEPS
+        if (distinctSteps.size > 1 || completed.isEmpty() || completed.first().steps < minSteps) {
             println(
-                "CHARA 复现门未通过（口径不一致或没跑满 12M）：distinctSteps=$distinctSteps " +
+                "CHARA 复现门未通过（口径不一致或没跑满 $minSteps）：distinctSteps=$distinctSteps " +
                     "steps=" + completed.joinToString { "${it.tag}=${it.steps}" },
             )
             assumeTrue(false, "CHARA_MOVEMENT 段形状不可比（见上一条诊断）")

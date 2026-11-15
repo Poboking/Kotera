@@ -60,9 +60,27 @@ fun interface NativeMethod {
  *
  * 重名：原版 `methods.Add(text, method)` 命中已有键直接抛 `ArgumentException`
  * （spec: `PluginManager.cs:557`）—— 装载期就崩，不是静默覆盖。此处同口径抛 [CodeEE]。
+ *
+ * ## 策略缺席位（PLUGIN-POLICY，2026-11-07，主人指令）
+ *
+ * 官方对「语料带 CALLSHARP 但进程内无此插件」的呈现是**缺插件报错**（装载警告 + 执行
+ * CodeEE，`FunctionIdentifier.cs:1201-1204`）；但移植版结构性装不了 .NET 插件 DLL，
+ * 4.981 的 AI对话补丁又默认随语料在场（指令列表常驻按钮，`OPTION_COM_FILTER.ERB:76-88`）
+ * ⇒ 官方形态变成全体玩家每次装载都吃两句英文警告、误触 AI 链就吃 CodeEE（上报簇
+ * 9bcc9efd）。主人裁定：**已知不内置的插件按目录显式禁用**——目录内名字装载不警告、
+ * 执行静默空转；目录外未知名字仍走官方形态（收窄而非废除 ADR-005）。
+ * 目录内容是宿主策略（app `PluginPolicyCatalog`），core 只认「打过缺席位的方法名」，
+ * 语义在三处消费：[prefillSharpLinks]（装载趟不警告不落裁决）、
+ * `StatementExecutor.resolveSharpMethod`（执行不抛、整句空转）。
+ *
+ * 与 [clear] 的关系：缺席位是**宿主策略**不是插件状态，[clear]（重载插件语义）不清它；
+ * 注册表每会话随 `store.aux` 新生，宿主装配段每会话重打标记（三段序不变）。
  */
 class NativeMethodRegistry {
     private val methods = HashMap<String, NativeMethod>()
+
+    /** 策略缺席名单（大写化键，与 [methods] 同口径）。 */
+    private val policyAbsent = HashSet<String>()
 
     /** 注册（宿主接线点）。重名报错，复刻原版 `Dictionary.Add` 的崩溃口径。 */
     fun register(name: String, method: NativeMethod) {
@@ -70,6 +88,21 @@ class NativeMethodRegistry {
         if (methods.containsKey(key)) throw CodeEE("本地方法 $name 重复注册")
         methods[key] = method
     }
+
+    /**
+     * 打策略缺席位（宿主接线点，装配段在装载趟预填**之前**调用）。键口径同 [register]。
+     * 打过位的名字：[find] 仍返回 null（没有方法本体），但装载/执行两侧按「已知缺席、
+     * 有意禁用」处理，不再走官方缺插件报错。
+     */
+    fun markPolicyAbsent(names: Collection<String>) {
+        names.forEach { policyAbsent.add(it.uppercase()) }
+    }
+
+    /** 该名字是否被策略禁用（目录内）。 */
+    fun isPolicyAbsent(name: String): Boolean = policyAbsent.contains(name.uppercase())
+
+    /** 已禁用名单（排序，便于测试与调试输出稳定）。 */
+    fun absentNames(): List<String> = policyAbsent.sorted()
 
     /** 查表；未注册返回 null（调用方决定报错口径，见 StatementExecutor 的 CALLSHARP 分支）。 */
     fun find(name: String): NativeMethod? = methods[name.uppercase()]
@@ -80,7 +113,7 @@ class NativeMethodRegistry {
     /** 已注册名单（排序，便于测试与调试输出稳定）。 */
     fun names(): List<String> = methods.keys.sorted()
 
-    /** 清空（RESTART / 重载插件后用；同原版 `ClearMethods`，spec: `PluginManager.cs:545-548`）。 */
+    /** 清空（RESTART / 重载插件后用；同原版 `ClearMethods`，spec: `PluginManager.cs:545-548`）。策略缺席位不清，见类 KDoc。 */
     fun clear() = methods.clear()
 }
 
@@ -98,8 +131,14 @@ fun nativeMethods(aux: RuntimeAux): NativeMethodRegistry =
  * `CALLSHARP_Instruction.SetJumpTo`（spec: FunctionIdentifier.cs:1193-1210）对常量名查
  * `PluginManager.HasMethod`（:1201-1202），未命中 `:1204 ParserMediator.Warn(..., isError: true)`
  * 只把 `line.IsError/ErrMes` 记到行上（ParserMediator.cs:127-131 的 :129-130），命中则把
- * `CallFunc` 绑死在实参对象上（:1208）—— **此后不再重查**；执行期走到该行由
+ * `CallFunc` 绑死在实参对象上（:1208）—— **此后不再重查**；官方执行期走到该行由
  * Process.cs:1017-1019（惰性建参后再查一遍是 :1030-1032）抛 `CodeEE(ErrMes)`。
+ *
+ * **移植侧执行期不抛**（通用策略，2026-11-09；ADR-005 有意偏离，登记见
+ * `specs/verify-notes.md` §35）：本版不加载 .NET 插件 DLL，「本机方法不提供」是常态而非
+ * 异常。未命中时把同一句官方文案经 `ConsoleSink.printError` 打一行错误行，然后**跳过该语句**
+ * （实参不求值、不回写 ⇒ 无副作用），脚本继续；每行键只提示一次。per-plugin 本机实现
+ * （曾给 `ModelSet`/`Chat` 写过一份 `ChatCallSharpHost`）已因此撤回 —— 与插件名无关。
  *
  * ## 为什么移植侧有两条裁决通道（装载趟预填 + 首执行兜底）
  *
@@ -180,6 +219,11 @@ fun sharpLinks(aux: RuntimeAux): SharpLinkTable = aux.slot(SHARP_LINK_SLOT) { Sh
  *   ParserMediator.cs:129-130）：把文案绑进 [SharpLinkTable.Link.errMes]，此后**不重查** ——
  *   注册表再长出同名也不复活；已裁决过的行（该语句池下标已有记录）直接跳过，
  *   绝不二次裁决（原版 CallFunc/IsError 在联结期绑死，`:1208`）。
+ * - **策略缺席**（PLUGIN-POLICY，2026-11-07）= 查表未命中但名字打过
+ *   [NativeMethodRegistry.markPolicyAbsent]：**不记警告、不落裁决**，行保持未裁决态，
+ *   执行期由 `StatementExecutor.resolveSharpMethod` 现查策略位整句空转。目录内已知
+ *   不内置的插件（宿主策略，app `PluginPolicyCatalog`）不再以官方缺插件形态打扰玩家；
+ *   目录外未注册名字仍走上一条的官方形态。
  * - 命中 = 方法本体绑死（[SharpLinkTable.Link.method]），`NativeMethodRegistry.clear` 不影响
  *   已绑定行（原版 `PluginManager.ClearMethods` 同口径，PluginManager.cs:545-548）。
  *
@@ -204,7 +248,8 @@ fun sharpLinks(aux: RuntimeAux): SharpLinkTable = aux.slot(SHARP_LINK_SLOT) { Sh
  * 物化与绑定的常驻都是个位数语句；标签字节扫 ≈ 一次顺序映射读（LazyStatementRecords 的
  * override KDoc 有成本账）。
  *
- * @return 未命中的警告文案（语句池序 = 原版装载序）；空表 = 全部命中或无 CALLSHARP。
+ * @return 未命中的警告文案（语句池序 = 原版装载序）；空表 = 全部命中、无 CALLSHARP、
+ *   或未命中者全在策略缺席名单内（PLUGIN-POLICY，目录内名字不产生警告）。
  *   已裁决过的行不重复上报（幂等：重复调用返回值只含新增未裁决行的未命中）。
  */
 fun prefillSharpLinks(
@@ -221,6 +266,8 @@ fun prefillSharpLinks(
         val literal = arg.funcNameTerm as? StrLiteral ?: continue // 非常量名 = useCallForm 通道
         val name = literal.value
         val found = registry.find(name)
+        // 策略缺席：不警告、不落裁决（行保持未裁决态，执行期现查策略位，见 resolveSharpMethod）。
+        if (found == null && registry.isPolicyAbsent(name)) continue
         val link = if (found != null) {
             SharpLinkTable.Link(found, null)
         } else {

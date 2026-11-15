@@ -80,10 +80,12 @@ class FontWidthRulerTest {
             assertEquals(Grid.cellWidth(cp.toChar()), expected, "与静态表同值 U+${cp.toString(16)}")
         }
         assertEquals(Grid.cells("ABC漢字"), ruler.widthRoundedCells("ABC漢字", ""))
-        // 框线 ━ 是已登记的平台字体差异：PC 黑体 18px（静态表 2 格），随包 Sarasa 9px。
-        // 本尺按字体真值给 1 格；DRAWLINE 的填充数量与绘制推进同尺，屏上仍填满一行。
+        // 框线 ━ 在 PC 原版是全角 2 格 —— 黄金基准 pc-golden-root.txt:61 的 99 个 ━ 填满
+        // 1797px 可绘制宽度（18px/个），地灵殿地图画布同口径。曾按「平台字体差异」登记为
+        // 随包 Sarasa 半角 1 格，2026-11-10 证伪：按 sidecar 推进会把地图字符画整幅压碎
+        // （替身正文族的 CP932 已知码位一律回静态网格，见 FontWidthRulerCp932SubstituteTest）。
         assertEquals(2, Grid.cellWidth('━'))
-        assertEquals(1, ruler.roundedCells(0x2501, ""))
+        assertEquals(2, ruler.roundedCells(0x2501, ""))
     }
 
     @Test

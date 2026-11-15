@@ -1,6 +1,9 @@
 package com.eratw.port.core.save
 
 import com.eratw.port.core.data.save.CharaFileIO
+import com.eratw.port.core.data.save.SaveData
+import com.eratw.port.core.data.save.SaveFormat
+import com.eratw.port.core.data.save.SaveUnclaimedPassthrough
 import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.fn.EraDataState
 import com.eratw.port.core.fn.EmDataPools
@@ -9,6 +12,9 @@ import com.eratw.port.core.host.SaveLoadHandoff
 import com.eratw.port.core.sem.SystemOps
 import com.eratw.port.core.update.UpdateCheckDecision
 import com.eratw.port.core.update.UpdateCheckHost
+import com.eratw.port.core.vars.ModCsvValueBag
+import com.eratw.port.core.vars.ModCsvValueBagSink
+import com.eratw.port.core.vars.ModCsvValueRestorer
 import com.eratw.port.core.vars.VariableStore
 
 /**
@@ -28,9 +34,13 @@ import com.eratw.port.core.vars.VariableStore
  *   SystemState = LoadData_DataLoaded`（Process.cs:1860-1861，交给 [SaveLoadHandoff]）。
  * - `SAVEGLOBAL`：任何 `SystemException` → `CodeEE(ErrorSavingGlobalData)`（:2506-2509）；
  *   C# 的 try 从建目录/开文件就开始了，抓取（`SaveGlobalToStream`）同样在 catch 范围内。
+ *   RT2 C-RES1：global 侧车接线在位时走 `global.sav` + `global.sav.rt2` 配对事务
+ *   （[saveGlobalPair]），事务与端口抓取同在 catch 收敛范围内，异常形状不变。
  * - `LOADGLOBAL`：文件不存在 / 类别不符 / 游戏码不符 / 版本不符 / 任何异常 → **false**，
  *   不抛（:2513-2589）；`RESULT` 由语句层写（FunctionIdentifier.cs:1825-1833，sem 已接）。
  *   读前 `RemoveEMGlobalData()`（:2523）。**不碰 LASTLOAD_***（全局装载没有那两行赋值）。
+ *   RT2 C-RES1：`global.sav` 完整落地后交还 `global.sav.rt2` 分片
+ *   （[restoreGlobalSidecarIfWired]，fail-closed 上警告不改返回值与异常形状）。
  * - `DELDATA`：文件不存在 → no-op；只读 → `CodeEE(DelReadOnlyFile)`（:2710-2721）。
  * - `SAVECHARA` / `LOADCHARA`：角色档**恒为二进制**（SaveChara 只有 `EraBinaryDataWriter` 分支，
  *   :2248-2283；LoadChara 走 `CreateReader`，文本档读到 null 直接返回，:2298-2303），
@@ -47,6 +57,13 @@ import com.eratw.port.core.vars.VariableStore
  * Map/Xml/DT 三支（:4095-4124）经 [EmDataPools.restore]，接受集 = `Save* ∪ Global*`。
  * 名字表来自 [EmSaveSets]（`VarExt*.csv`）；未装配 = 空表 = 不写不读
  * （`ConstantData.cs:1311-1316` 的六表清空形态）。
+ *
+ * **L28（ADR-005 例外第三波）**：接受集之外的容器名不再读完即丢 —— 读档时经
+ * [SaveCodec.read] 的 [SaveReadFilters.emKeepKey] 保留「类型字节 + 容器名 + 值」的原始编码切片
+ * （[SaveData.unclaimedEmData]），下一次同类存档在已知 EM 条目之后、EM 段 `EOF` 之前
+ * 原样回写（[SaveCapture.emitNormal] / `emitGlobal`）。触发面：4.980 引擎/名字表读 4.981
+ * 档时的 `QOL_FISH_INSTANCE`（`SAVE_DTS`，见 `SaveEmPoolTest` 的按根取列）。normal 域
+ * 与顶层变量共用 `lastLoadNo` 闸，global 域跨局。
  *
  * ## 构造期的一次性旧档迁移（SAVE-01）
  *
@@ -134,6 +151,20 @@ class FileSystemOps(
     var reclaimMemory: ((urgent: Boolean) -> Long)? = null
 
     /**
+     * 配对事务的世代计数器（会话内单调递增；`SaveTransaction.Request` 要求新旧世代严格递增）。
+     * 跨会话不持久：残留 journal 在每次存/读档入口先被 `SavePlanExecutor.recoverAndExecute`
+     * 结清，故世代基线重置不会与旧 journal 撞世代闸（事务身份闸认的是 transactionId）。
+     */
+    private var sidecarPairGeneration: Long = 0L
+
+    /**
+     * global 配对事务的世代计数器（RT2 C-RES1）。与槽档 [sidecarPairGeneration] 分开计：
+     * 两条链的 journal 是两份独立文件（`saveNN.sav.journal` 与 `global.sav.journal`），
+     * 各自入口各自结清，共用一个计数器只会让两边互相「用掉」世代读数，没有任何语义收益。
+     */
+    private var globalPairGeneration: Long = 0L
+
+    /**
      * 构造期旧档迁移的结局（SAVE-01）。口径与出口逐条见 [SaveFolderMigration]：
      * 只有 `io` 带目录面（生产 = [RootedSaveFileIo]）才可能真搬，其余假体回
      * [SaveMigrationOutcome.IoNotFolderCapable] 且不碰磁盘。
@@ -141,9 +172,27 @@ class FileSystemOps(
     val saveFolderMigration: SaveFolderMigrationResult
 
     init {
-        val result = SaveFolderMigration.migrate(io, config, saveMigrationPrompt)
+        val wiringAtInit = SidecarSaveWiring.of(store)
+        val result = SaveFolderMigration.migrate(
+            io,
+            config,
+            saveMigrationPrompt,
+            // RT2 M43R 裁定 3：孤儿侧车 GC 与 DELDATA 同一关态门 —— 侧车接线在位才允许
+            // 清旧目录的孤儿伴生件；现读（与 delData 的语句层现读同一条纪律）。
+            sidecarGcGate = { SidecarSaveWiring.of(store) != null },
+        )
         SaveFolderMigrationLog.install(store).add(result)
         saveFolderMigration = result
+        // RT2 MODGC 裁定 2 + MODGC2 裁定 3：生产装配序里本构造早于 ModRuntimeAssembly.attach 的
+        // install，上述关态门在此刻恒 false ⇒ 迁移期孤儿 GC 不可达。把「接线到位后再清」登记成
+        // 一次性待办，由 SidecarSaveWiring.install 成功后执行；关态（永不 install）不扫盘。
+        // 出口面与 migrate 的挂载面同一份判据（[SaveFolderMigration.runsOrphanGc]）：
+        // FolderAlreadyExists / NothingToMove 也是常态出口，历史遗留的孤儿侧车只有这两处可回收。
+        if (wiringAtInit == null && SaveFolderMigration.runsOrphanGc(result.outcome)) {
+            SidecarSaveWiring.deferOrphanGc(store) {
+                SaveFolderMigration.gcOrphanSidecarCompanions(io, config)
+            }
+        }
     }
 
     /**
@@ -157,6 +206,63 @@ class FileSystemOps(
      */
     private fun isKnownSaveKey(key: String): Boolean =
         store.registry.def(key) != null || store.userVar(key, null) != null
+
+    /**
+     * EM 段（Map / Xml / DataTable）的装载接受集（L28）：`Save* ∪ Global*` 三张表的并集。
+     *
+     * 构造期一次并成 `HashSet`（[EmLoadAccept]）：读档时每个 EM 条目都要判一次，而
+     * `VarExt*.csv` 可由第三方包注入、名字表大小不可控，`List.contains` 的 O(n) 会叠在
+     * 读档热路径上。判 false 的容器名保留原始编码切片、随下一次存档原样回写。
+     */
+    private val emAccept = EmLoadAccept(emSets)
+
+    /**
+     * L15 / L17 / L28（ADR-005 例外）：把一次成功装载的未认领切片存进 `store.aux`，供下一次
+     * `SAVEDATA` / `SAVEGLOBAL` 由 `emitUnclaimedSlices` / `charaSlicePlan` / `emitUnclaimedEm`
+     * 原样回写。
+     *
+     * 存槽放在**整档写回成功之后**（`recordUnclaimed` 只读 `SaveData` 的载体引用清单，
+     * 不碰变量池），存槽失败按原行为丢弃 + 留痕，**不翻转**本次装载的成功返回。
+     *
+     * 角色块身份不可判定（`NO` 缺失/重复/非数值、桶键撞车）而整块丢弃的切片在这里补一条
+     * `SaveDiagnostics.note` —— 载体里的 [SaveData.unclaimedCharacterDroppedKeys] 只是键名清单，
+     * 落痕需要**存档路径**，只有本层知道。
+     *
+     * @param global true = `LOADGLOBAL`（global 域）；false = `LOADDATA`（normal 域，带 `lastLoadNo` 闸）
+     */
+    private fun recordUnclaimed(path: String, data: SaveData, global: Boolean) {
+        val slices = data.unclaimedVariables
+        val charaBuckets = data.unclaimedCharacterVariables
+        val emSlices = data.unclaimedEmData
+        noteUnclaimedCharaDrops(path, data)
+        if (slices.isEmpty() && charaBuckets.isEmpty() && emSlices.isEmpty()) return
+        runCatching {
+            val slot = SaveUnclaimedPassthrough.install(store)
+            if (global) {
+                slot.captureGlobal(slices, emSlices)
+            } else {
+                slot.captureNormal(store.lastLoadNo, slices, charaBuckets, emSlices)
+            }
+        }.onFailure { e ->
+            if (e is OutOfMemoryError) throw e
+            SaveDiagnostics.note(
+                if (global) "LOADGLOBAL" else "LOADDATA",
+                path,
+                "未认领键切片未存槽（按原行为丢弃）：${e.javaClass.simpleName}: ${e.message}",
+            )
+        }
+    }
+
+    /** L17：角色块未认领切片因身份不可判定被整块丢弃的留痕（键名清单来自读侧载体）。 */
+    private fun noteUnclaimedCharaDrops(path: String, data: SaveData) {
+        val dropped = data.unclaimedCharacterDroppedKeys
+        if (dropped.isEmpty()) return
+        SaveDiagnostics.note(
+            "LOADDATA",
+            path,
+            "角色块未认领切片丢弃（NO 缺失/重复/非数值或桶键撞车）：键=${dropped.joinToString(",")}",
+        )
+    }
 
     // ------------------------------------------------------------------
     // SAVEDATA / LOADDATA / DELDATA
@@ -196,20 +302,273 @@ class FileSystemOps(
     }
 
     /**
-     * 抓变量池 → 序列化 → 落盘，三段逐个报给 [mark]（留痕用）。
+     * 抓变量池 + 序列化 + 落盘（留痕用的阶段由 [mark] 上报）。
      *
      * 抽成单独一段是为了让 OOM 重试**走同一份实现**：重试若另写一遍，两条路迟早分叉。
+     *
+     * ## 三条落盘路（SAVE-STREAM 波，2026-11-13）
+     *
+     * - **侧车配对**（mod 总闸开）：`captureAndWritePair`。配对事务要拿 `.sav` 全字节算
+     *   CRC32 当绑定第三位，必须物化，故这条路保持原样。
+     * - **二进制**（eratw 生产口径 `SaveConfig.ERATW`）：[writeBinaryStream] —— payload
+     *   逐条目直写，列走零拷贝视图，堆峰值与变量池大小**解耦**。
+     * - **文本**（`SystemSaveInBinary=false`，非 eratw 口径）：[writeTextMaterialized] ——
+     *   `SaveTextFormat` 是另一套逐行编码器，仍走物化（契约 §3 已登记为余量）。
      */
     private fun captureAndWrite(no: Int, text: String, path: String, mark: (String) -> Unit): Boolean {
+        // RT2 C 车：侧车接线在位（mod 总闸开）⇒ 走 .sav + .rt2 配对事务；未接线 ⇒
+        // 下面的原路径一行不进，与接线前逐字节相同（缺省路径零变化的机制保证）。
+        val sidecar = SidecarSaveWiring.of(store)
+        if (sidecar != null) return captureAndWritePair(no, text, path, sidecar, mark)
+        return if (config.systemSaveInBinary) {
+            writeBinaryStream(text, path, mark)
+        } else {
+            writeTextMaterialized(text, path, mark)
+        }
+    }
+
+    /**
+     * 二进制存档的**流式**写路（生产口径）：`SaveCapture.emitNormal` 直写
+     * [SaveFileIo.write] 的 producer 流，payload 与整个变量池副本都不在堆里成型。
+     *
+     * 为什么这是根修而不是优化：原版 `SaveTo` 就是把活变量逐条写进 `FileStream`
+     * （`VariableEvaluator.cs:2591-2606` + `:2653`），全程零副本；移植侧此前先
+     * `SaveCapture.normal` 把整个池复制成 `SaveData`（列 `copyOf()` / 未分配列造零 /
+     * 每角色逐列新建数组）**再**编码，单次 `SAVEDATA` 瞬时分配 50 MiB 量级 ——
+     * 玩家「一天玩 38 分钟、存档三次全失败、重启就好」正是这一笔在 88%~93% 水位上撞墙。
+     *
+     * 失败语义一字不变：producer 里的抓取/编码异常由 [SaveFileIo.write] 归成
+     * `PRODUCER_FAILED`（不截断旧档、不走原地退路），这里再补一条留痕后返回 false；
+     * `OutOfMemoryError` 照旧上抛给 [saveData] 的求援重试链（`Error` 不被吞）。
+     */
+    private fun writeBinaryStream(text: String, path: String, mark: (String) -> Unit): Boolean {
+        // 抓取与编码在流式路里是同一段（边读活列边写），故阶段名合并为 capture+encode。
+        mark("capture+encode")
+        var failure: Throwable? = null
+        val ok = io.write(path) { out ->
+            try {
+                SaveFormat.writeStreaming(compressed(), StageMarkingOutputStream(out) { mark("write") }) { w ->
+                    SaveCapture.emitNormal(store, text, w, emSets.save)
+                }
+            } catch (e: Throwable) {
+                // 留痕用：io.write 把 Exception 收成 false 时不带异常本体。
+                failure = e
+                throw e
+            }
+        }
+        // 失败留痕：io.write 把 Exception 收成 false 时不带异常本体，这里补回栈。
+        if (!ok && failure != null) {
+            SaveDiagnostics.report("SAVEDATA", path, "capture+encode", failure!!, saveDirContext())
+        }
+        return ok
+    }
+
+    /**
+     * 文本存档的物化写路（`SystemSaveInBinary=false`）：保持改动前的全量物化口径。
+     *
+     * 不在本笔范围内的理由见 CONTRACT-SAVE-STREAM §3：`SaveTextFormat` 是逐行文本编码器，
+     * 与二进制容器不同源；eratw 生产口径是 `SaveConfig.ERATW`（binary+zip）。
+     */
+    private fun writeTextMaterialized(text: String, path: String, mark: (String) -> Unit): Boolean {
         mark("capture")
         val data = SaveCapture.normal(store, text, compressed = compressed(), emData = emSets.save)
         mark("encode")
-        // 流式落盘（OOM-B，2026-11-08）：payload 物化后，16 字节头 + GZip 直接写进目标文件
-        // （生产 = 临时文件），不再生成「gzip 副本 + 容器 BAOS + 终拷贝」三份。
-        // 首个字节真正开写才切 write 段（见 [StageMarkingOutputStream]）：encodePayload 就
-        // 贴顶的 OOM 仍记在 encode，落盘侧贴顶才记 write。
         return io.write(path) { out ->
             SaveCodec.writeTo(data, store.registry, config, StageMarkingOutputStream(out) { mark("write") })
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // RT2 C 车：.sav + .rt2 配对事务（侧车接线在位时的写/读路）
+    // ------------------------------------------------------------------
+
+    /** 侧车与 journal 的伴生路径（与 .sav 同目录同名，后缀区分）。 */
+    private fun sidecarPathOf(path: String): String = "$path.rt2"
+
+    private fun sidecarJournalPathOf(path: String): String = "$path.journal"
+
+    /**
+     * 绑定三元组的第三位：.sav 容器字节的 CRC32（存/读两侧都从同一份文件字节算，不依赖文本回读）。
+     *
+     * **TODO(verify) 闭环（2026-11-13，主人指派本组长收口）**：C 车 `e6cdcc642` 登记
+     * 「第三位用 .sav 容器 CRC32 替代 era-arch §8:221 字面 `saveTextHash` 的语义等价性」。
+     * 裁定 = **严格加强，不是等价替换**：
+     * - 字面 `saveTextHash` 从未定义哈希对象（蓝图初版 `bfc12a425` 即如此，侧车本身无 C# 锚）；
+     *   语义权威只能取绑定三元组的**目的** = era-arch §8 兼容性矩阵
+     *   「PC 玩过后传回安卓 ⇒ 检测 .rt2 绑定失配/缺失 → 警告（扩展状态可能滞后或丢失）」，
+     *   即第三位必须能检出「.sav 内容已变而 .rt2 未随行」的配对漂移。
+     * - 字面文本哈希对「同文本不同内容」恒漏检（PC 重玩同槽、描述文本一字未动是最常见形态
+     *   ⇒ 旧侧车被静默应用，恰好命中矩阵要警告的失效态）；容器字节 CRC32 对任意字节漂移
+     *   敏感，覆盖该面且不改变前两位语义（gameCode/version 不随池面漂移）。
+     * - 威胁模型 = 意外漂移（PC 往返 / .bak 回退 / ZIP 混装），非对抗性伪造；CRC32 2^-32
+     *   漏检率在此模型下足够，且容器完整性校验位（ABI-6 CRC32 尾部）同算法。换 SHA-256
+     *   不改 wire 格式（i32）却令全部存量配对升级即失配误报，得不偿失，维持 CRC32。
+     * - 语义钉子：`SidecarPairSaveTest`「绑定第三位内容敏感」（同文本两存 ⇒ 位值必不同 +
+     *   旧侧车 × 新 .sav ⇒ 失配上警告）与「绑定第三位存读同源」（磁盘 .sav 重算 == .rt2 凭据）。
+     */
+    private fun savBytesHash(bytes: ByteArray): Int {
+        val crc = java.util.zip.CRC32()
+        crc.update(bytes)
+        return crc.value.toInt()
+    }
+
+    /**
+     * 配对事务写路（era-arch §8 :206-208；判据「复用既有 SaveTransaction/SaveRecovery/
+     * SavePlanExecutor 机器，生产 NIO 实现落位」）。
+     *
+     * 写序全部由 [SaveTransaction.execute] 固定：两个 .part → SHA 对账 → fsync → PREPARED →
+     * .bak 对（旧版本字节）→ fsync → BACKED_UP → 定序替换 → 新配对校验 → COMMITTED → 清理。
+     * .sav 的新字节与流式路用**同一个**编码器（[SaveCapture.normal] + [SaveCodec.writeTo]），
+     * 差异只在「进事务而不是直写」；缺省路（无接线）不走这里，字节与接线前逐位一致。
+     *
+     * .rt2 的新字节 = 宿主端口经 [SaveService.captureBundle]（mod 存储分片在容器载荷里随行）。
+     */
+    private fun captureAndWritePair(
+        no: Int,
+        text: String,
+        path: String,
+        sidecar: SidecarSaveWiring,
+        mark: (String) -> Unit,
+    ): Boolean {
+        // 0) 先结清上次崩溃残留（恢复动作的生产调用点之一；era-arch §8 :208）。
+        //    Halt = 介质损坏等不可判定态 → 按存档失败收口，不覆盖可恢复现场。
+        val txIo = NioSaveTransactionIo(sidecar.transactionRoot)
+        when (
+            val settled = SavePlanExecutor.recoverAndExecute(txIo, sidecarJournalPathOf(path))
+        ) {
+            is SavePlanExecutor.ExecutionResult.Halted -> {
+                sidecar.port.warn(
+                    "存档事务恢复判定 Halt，拒绝覆盖：slot=$no path=$path reason=${settled.reason}",
+                )
+                return false
+            }
+            else -> Unit
+        }
+        mark("capture")
+        // Mod 注入 CSV 值的抽离面（RT2 M1-4）：计划在位才采；角色块按 Base 容量截断，注入位
+        // 交给 `.rt2` 分片。计划缺席 ⇒ sink = null、plan = null，.sav 字节与改动前逐字节一致。
+        val sink = sidecar.csvPlan?.let { plan ->
+            ModCsvValueBagSink(plan) { message -> sidecar.port.warn(message) }
+        }
+        val data = SaveCapture.normal(
+            store, text,
+            compressed = compressed(),
+            emData = emSets.save,
+            sink = sink,
+        )
+        mark("encode")
+        // .sav 新字节物化：同一编码器同一入参，产物与流式写逐字节一致（OOM 重试路同用例）。
+        val savBytes = java.io.ByteArrayOutputStream().use { buf ->
+            SaveCodec.writeTo(data, store.registry, config, buf)
+            buf.toByteArray()
+        }
+        val rt2Path = sidecarPathOf(path)
+        val groups = sidecar.port.captureChunks(sink?.bag ?: ModCsvValueBag.EMPTY)
+        val rt2Bytes = sidecar.port.captureRt2Bytes(
+            SidecarBinding(
+                store.registry.gameBase.gameCode,
+                store.registry.gameBase.version,
+                savBytesHash(savBytes),
+            ),
+            groups.activeChunks,
+            groups.orphanChunks,
+        )
+        val request = SaveTransaction.Request(
+            transactionId = sha256Hex(savBytes).take(16),
+            oldPairGeneration = sidecarPairGeneration,
+            newPairGeneration = sidecarPairGeneration + 1,
+            members = listOf(
+                SaveTransaction.MemberSpec(
+                    target = path,
+                    part = "$path.part",
+                    bak = "$path.bak",
+                    // 旧字节：目标不存在（首存）时用空数组占位 —— .bak 落成空文件，
+                    // 恢复判定只对「目标已被替换」的成员从 .bak 回滚，首存无旧档可回滚。
+                    oldBytes = txIo.read(path) ?: ByteArray(0),
+                    newBytes = savBytes,
+                ),
+                SaveTransaction.MemberSpec(
+                    target = rt2Path,
+                    part = "$rt2Path.part",
+                    bak = "$rt2Path.bak",
+                    oldBytes = txIo.read(rt2Path) ?: ByteArray(0),
+                    newBytes = rt2Bytes,
+                ),
+            ),
+        )
+        sidecarPairGeneration++
+        return when (
+            val result = SaveTransaction(txIo, sidecarJournalPathOf(path)).execute(request)
+        ) {
+            SaveTransaction.ExecuteResult.Committed, SaveTransaction.ExecuteResult.AlreadyCommitted -> true
+            is SaveTransaction.ExecuteResult.Rejected -> {
+                SaveDiagnostics.report(
+                    "SAVEDATA", path, "transaction",
+                    IllegalStateException(result.reason), saveDirContext(),
+                )
+                false
+            }
+        }
+    }
+
+    /**
+     * 读档侧的 .rt2 恢复（fail-closed 警告，不改变 .sav 的原版语义与异常形状）。
+     *
+     * 判据（CONTRACT-RT2-C §5.2）：.sav 在而 .rt2 缺/坏 ⇒ 上警告不静默丢；绑定失配 ⇒
+     * [SaveService.RestoreOutcome.BindingMismatch] 不抛、宿主上警告（端口实现负责留痕）。
+     */
+    private fun restoreSidecarIfWired(no: Int, path: String, savBytes: ByteArray) {
+        val sidecar = SidecarSaveWiring.of(store) ?: return
+        val txIo = NioSaveTransactionIo(sidecar.transactionRoot)
+        when (
+            val settled = SavePlanExecutor.recoverAndExecute(txIo, sidecarJournalPathOf(path))
+        ) {
+            is SavePlanExecutor.ExecutionResult.Halted -> {
+                sidecar.port.warn("读档事务恢复判定 Halt：slot=$no path=$path reason=${settled.reason}")
+                return
+            }
+            else -> Unit
+        }
+        val rt2Path = sidecarPathOf(path)
+        val rt2 = txIo.read(rt2Path)
+        if (rt2 == null) {
+            // .sav 在而 .rt2 缺：fail-closed 上警告，扩展状态未恢复必须让宿主知道。
+            sidecar.port.warn("读档发现 .rt2 侧车缺失：slot=$no path=$rt2Path（mod 扩展状态未恢复）")
+            return
+        }
+        val binding = SidecarBinding(
+            store.registry.gameBase.gameCode,
+            store.registry.gameBase.version,
+            savBytesHash(savBytes),
+        )
+        try {
+            val restored = sidecar.port.restoreRt2(rt2, binding)
+            if (restored.applied) applyModCsvValues(sidecar, restored.csv)
+        } catch (t: Throwable) {
+            sidecar.port.warn(
+                "读档 .rt2 恢复失败：slot=$no path=$rt2Path ${t.javaClass.simpleName}: ${t.message}",
+            )
+        }
+    }
+
+    /**
+     * `.rt2` 里的 Mod CSV 注入值写回变量池（RT2 M1-4，发生在 `.sav` 原版语义完整落地之后）。
+     *
+     * 三条 fail-closed 出口，全部只上警告、不改读档成败：
+     * - 值袋非空但本会话没有注入位计划（Mod 组合变了）⇒ 全部丢弃；
+     * - 有计划但没有关键字查询面（装配缺失）⇒ 全部丢弃；
+     * - 单条键查不到角色/关键字/下标越界 ⇒ 由 [ModCsvValueRestorer] 逐条警告丢弃。
+     */
+    private fun applyModCsvValues(sidecar: SidecarSaveWiring, csv: ModCsvValueBag) {
+        val plan = sidecar.csvPlan
+        val keywordIndex = sidecar.csvKeywordIndex
+        when {
+            csv.isEmpty -> Unit
+            plan == null ->
+                sidecar.port.warn("读档 .rt2 带 Mod CSV 注入值 ${csv.size} 条，但本会话未装注入位计划，全部丢弃")
+            keywordIndex == null ->
+                sidecar.port.warn("读档 .rt2 带 Mod CSV 注入值 ${csv.size} 条，但未接线关键字查询面，全部丢弃")
+            else -> ModCsvValueRestorer.apply(store, plan, keywordIndex, csv) { sidecar.port.warn(it) }
         }
     }
 
@@ -361,21 +720,50 @@ class FileSystemOps(
         // （2026-10-26 fixcore 审查 save-B1）。SaveCodec.read 只查 registry、不写池，前移安全。
         store.resetValues()
         store.resetLocalValues()
+        // L15（ADR-005 例外）：本次装载会把普通域的未认领切片整体换成这份档的。
+        // 先清上一局的：读到一半失败时变量池已是默认值，旧档的未知键不能再带进下一次存档
+        // （清零口径 = 原行为「丢弃」，见 CONTRACT-RT2-UNCLAIMED-B1 §1-5）。
+        SaveUnclaimedPassthrough.of(store)?.clearNormal()
+        // @Suppress 理由：解析面刻意接住 Exception 逐类包装进官方文案（口径与改前一致），
+        // 改的只是把根因经 initCause 挂进因果链（可诊断性补账）。
+        @Suppress("TooGenericExceptionCaught")
         val data = try {
-            SaveCodec.read(bytes, store.registry, SaveFileKind.NORMAL, ::isKnownSaveKey, config)
-        } catch (_: Exception) {
-            throw CodeEE(MES_LOAD_CORRUPTED)
+            SaveCodec.read(
+                bytes, store.registry, SaveFileKind.NORMAL,
+                SaveReadFilters(::isKnownSaveKey, emAccept::contains), config,
+            )
+        } catch (e: Exception) {
+            // 官方文案逐字不变（ADR-005）；根因经 initCause 挂进 JVM 因果链——
+            // 「坏在哪一步」从此可见（2026-11-15 可诊断性补账，此前根因整条被吞）。
+            // 不给 CodeEE 构造器加 cause 形参：那会让基线里内嵌签名的 LongParameterList
+            // ID 失配，连锁 churn 不值一个 initCause。
+            throw CodeEE(MES_LOAD_CORRUPTED).apply { initCause(e) }
         }
+        // @Suppress 理由：这里**刻意**接住 Throwable（含 OOM）——包装口径与改前一致，
+        // 行为不变；改的只是把根因经 initCause 挂进因果链（可诊断性补账：此前根因整条
+        // 被吞，2026-11-14 OOM 波的「种子还原拒收」实为同一根因的症状——无上界堆贴顶后
+        // applyTo 分配撞墙被这里包装成文案，挂因后一眼可辨）。
+        @Suppress("TooGenericExceptionCaught")
         try {
-            data.applyTo(store, restoreCharacters = true, setLastLoad = true, floatSink = store::writeFloat)
+            data.applyTo(
+                store,
+                restoreCharacters = true,
+                setLastLoad = true,
+                floatSink = store::writeFloat,
+            )
             // LoadVariableBinary 的第二段（EM 条目，:4095-4124）；接受集 = Save* ∪ Global*。
             EmDataPools.restore(store, data.emData, emSets.loadAccept)
-        } catch (_: Throwable) {
-            throw CodeEE(MES_LOAD_UNEXPECTED)
+        } catch (e: Throwable) {
+            throw CodeEE(MES_LOAD_UNEXPECTED).apply { initCause(e) }
         }
         store.lastLoadNo = no.toLong() // :2706
+        // L15：装载成功后把顶层未认领切片存槽；下一次 SAVEDATA 由 SaveCapture 尾段切片回写。
+        // 失败面：存槽失败按原行为丢弃（不留半截、不影响本次 LOADDATA 的成功返回）+ 留痕。
+        recordUnclaimed(path, data, global = false)
         // Process.cs:1860-1861 —— 先清函数栈、后置 LoadData_DataLoaded（顺序照原版）
         SaveLoadHandoff.requestDataLoaded(store)
+        // RT2 C 车：.sav 原版语义已完整落地之后，才做 .rt2 侧车恢复（只警告不改变异常形状）。
+        restoreSidecarIfWired(no, path, bytes)
     }
 
     /** [SystemOps.delData]。spec: VariableEvaluator.cs:2710-2721 */
@@ -385,30 +773,281 @@ class FileSystemOps(
         if (io.isReadOnly(path)) throw CodeEE(MES_DEL_READONLY.replace("{0}", path))
         // 原版对 File.Delete 的 IO 异常不 catch（会冒泡）；这里只能收敛到同一句 Lang 文案。
         if (!io.delete(path)) throw CodeEE(MES_DEL_READONLY.replace("{0}", path))
+        // RT2 M4-3：本体已删，逻辑存档单元的其余成员必须在同一个删除相位里一起清掉。
+        // 接线不在位（总闸关 / 纯单测）⇒ 一行不进，行为与改动前逐字节相同。
+        val sidecar = SidecarSaveWiring.of(store)
+        if (sidecar != null) clearSidecarCompanions(path, sidecar)
+    }
+
+    /**
+     * DELDATA 的配对收尾（RT2 M4-3；era-arch §8 :204 / :222）。
+     *
+     * `saveNN.sav` + `saveNN.sav.rt2` 是一个逻辑存档单元；删除相位只删本体有两个后果：
+     * - 孤儿 `.sav.rt2` 会被 `SaveExport` 的槽侧车正则收走，在另一台设备变成幽灵 mod 数据；
+     * - 残留 journal + `.part` 会在下次存/读档入口被 `SavePlanExecutor.recoverAndExecute`
+     *   当成未完成事务续做，把刚删掉的档「复活」。
+     *
+     * 清序：journal 先删（让事务先失效），再删两成员的 `.part` / `.bak`，最后删 `.rt2`。
+     * [SaveFileIo.delete] 的生产实现用 `Files.deleteIfExists`（不存在也返回 true），
+     * 故不逐项先判存在；路径口径与 [captureAndWritePair] 的 `MemberSpec` 完全一致。
+     *
+     * 附属文件删除失败只经 [SidecarStoragePort.warn] 留痕，**不新增异常形状**：
+     * DELDATA 的成败仍只由本体删除结果决定（原版 VariableEvaluator.cs:2710-2721）。
+     */
+    private fun clearSidecarCompanions(path: String, sidecar: SidecarSaveWiring) {
+        // 伴生件清单 = [sidecarCompanionPaths]（RT2 M43R 提取的共用原语：删除相位与
+        // 迁移随迁/孤儿 GC 同一份，era-arch-v61u.md:204/:222）；清序与清单序一致。
+        for (companion in sidecarCompanionPaths(path)) {
+            val removed = runCatching { io.delete(companion) }.getOrDefault(false)
+            if (!removed) {
+                sidecar.port.warn(
+                    "DELDATA 逻辑存档单元伴生文件清理失败：slot=$path companion=$companion",
+                )
+            }
+        }
     }
 
     // ------------------------------------------------------------------
     // SAVEGLOBAL / LOADGLOBAL
     // ------------------------------------------------------------------
 
+    // ------------------------------------------------------------------
+    // RT2 C-RES1：global.sav + global.sav.rt2 配对事务（global 侧车接线在位时的写/读路）
+    // ------------------------------------------------------------------
+
+    /**
+     * global 配对事务写路（era-arch §8 持久化域矩阵 GLOBAL 行；槽档 `captureAndWritePair`
+     * 的同款形状照抄，不发明第二套写序）。
+     *
+     * 写序全部由 [SaveTransaction.execute] 固定：两个 .part → SHA 对账 → fsync → PREPARED →
+     * .bak 对（旧版本字节）→ fsync → BACKED_UP → 定序替换 → 新配对校验 → COMMITTED → 清理，
+     * journal = `global.sav.journal`，成员 = global.sav + global.sav.rt2。
+     * global.sav 的新字节与缺省路用**同一个**编码器（[SaveCapture.global] + [SaveCodec.write]），
+     * 差异只在「进事务而不是直写」；global.rt2 的新字节 = 宿主端口经
+     * [SaveService.captureGlobalBundle]（mod GLOBAL 分片在容器分片里随行）。
+     *
+     * `.sav` 纯净纪律（本车已核，机制锚）：mod GLOBAL 值**进不了** global.sav——
+     * [SaveCapture.global] 的抓取面只有 VariableStore（系统 GLOBAL/GLOBALS 列 + 用户
+     * `#DIM GLOBAL` 声明），而 mod 侧 GLOBAL 状态的物理位是 ModStorageStore
+     * （mod 代码经 `context.storage` 写），SaveCapture 从不读它；mod manifest 声明的
+     * `#DIM GLOBAL` 只落在 DeclarationRegistry（ModDeclarationAdapter → ModuleDescriptor
+     * → DeclarationRegistry.globalDims），今天**没有任何生产消费者**把它 declare 进
+     * VariableStore（`DeclarationRegistry.globalDim` 访问器 0 生产调用点），故无值可漏。
+     * mod 注入的另一个面 CSV 关键字补丁在装配期就被拒（ModRuntimeAssembly.attach 的
+     * csvTableCapacities = 空表 ⇒ 带 csv-patch 的 manifest 整包拒绝），且其目标表按
+     * PersistenceDomains.routeOf 恒归 CHARACTER 域（RT2_CHARA），与 GLOBAL 域无关。
+     */
+    private fun saveGlobalPair(sidecar: GlobalSidecarSaveWiring) {
+        // 原版 SAVEGLOBAL 的 catch 从建目录/开文件就开始、抓取也在其中，任何 SystemException
+        // → CodeEE(ErrorSavingGlobalData)（VariableEvaluator.cs:2476-2509）。配对事务与
+        // 端口抓取都是本车新增的「抓取/落盘」段，故整段包进同一句收敛：
+        // 异常形状与缺省路一字不差（接线只改「写成什么」，不改「失败时报什么」）。
+        try {
+            saveGlobalPairUnderTransaction(sidecar)
+        } catch (e: CodeEE) {
+            throw e
+        } catch (_: Throwable) {
+            throw CodeEE(MES_SAVE_GLOBAL)
+        }
+    }
+
+    /** [saveGlobalPair] 的实体：去掉异常收敛壳后按槽档同款步骤推进（结清 → 抓取 → 提交）。 */
+    private fun saveGlobalPairUnderTransaction(sidecar: GlobalSidecarSaveWiring) {
+        val path = config.globalPath()
+        val txIo = NioSaveTransactionIo(sidecar.transactionRoot)
+        // 0) 先结清上次崩溃残留（恢复动作的生产调用点之一；与槽档同款）。
+        //    Halt = 介质损坏等不可判定态 → 按 SAVEGLOBAL 失败收口，不覆盖可恢复现场。
+        when (
+            val settled = SavePlanExecutor.recoverAndExecute(txIo, sidecarJournalPathOf(path))
+        ) {
+            is SavePlanExecutor.ExecutionResult.Halted -> {
+                sidecar.port.warn(
+                    "全局档事务恢复判定 Halt，拒绝覆盖：path=$path reason=${settled.reason}",
+                )
+                throw CodeEE(MES_SAVE_GLOBAL)
+            }
+            else -> Unit
+        }
+        // 1)+2) global.sav 新字节 + mod GLOBAL 分片/global.rt2 容器字节，同一段抓取：
+        //    global.sav 与缺省路同一编码器同一入参（产物逐字节一致，判据 c 的机制保证）；
+        //    端口抓取在原版 catch 范围内的同款口径（VariableEvaluator.cs:2476-2509 抓取也在其中）；
+        //    绑定第三位 = global.sav 容器字节的 CRC32（槽档先例构法：存/读两侧都从同一份
+        //    文件字节算，不依赖文本回读）。
+        val (bytes, rt2Bytes) = try {
+            val data = SaveCapture.global(store, compressed = compressed(), emData = emSets.global)
+            val savBytes = SaveCodec.write(data, store.registry, config)
+            val groups = sidecar.port.captureGlobalChunks()
+            val rt2 = sidecar.port.captureGlobalRt2Bytes(
+                SidecarBinding(
+                    store.registry.gameBase.gameCode,
+                    store.registry.gameBase.version,
+                    savBytesHash(savBytes),
+                ),
+                groups.activeChunks,
+                groups.orphanChunks,
+            )
+            savBytes to rt2
+        } catch (_: Throwable) {
+            throw CodeEE(MES_SAVE_GLOBAL)
+        }
+        commitGlobalPairTransaction(txIo, path, bytes, rt2Bytes)
+    }
+
+    /**
+     * 把「global.sav 新字节 + global.rt2 新字节」交给 [SaveTransaction] 配对定序
+     * （成员 = global.sav + global.sav.rt2，journal = `global.sav.journal`；写序零自研）。
+     * 抽成独立段只为让 [saveGlobalPairUnderTransaction] 保持在 detekt 的方法长度闸内；
+     * 两段合起来才是完整的「抓取 → 提交」事务（与槽档 captureAndWritePair 同一形状）。
+     */
+    private fun commitGlobalPairTransaction(
+        txIo: NioSaveTransactionIo,
+        path: String,
+        savBytes: ByteArray,
+        rt2Bytes: ByteArray,
+    ) {
+        val journalPath = sidecarJournalPathOf(path)
+        val rt2Path = sidecarPathOf(path)
+        val request = SaveTransaction.Request(
+            transactionId = sha256Hex(savBytes).take(16),
+            oldPairGeneration = globalPairGeneration,
+            newPairGeneration = globalPairGeneration + 1,
+            members = listOf(
+                SaveTransaction.MemberSpec(
+                    target = path,
+                    part = "$path.part",
+                    bak = "$path.bak",
+                    // 旧字节：目标不存在（首存）时用空数组占位 —— .bak 落成空文件，
+                    // 恢复判定只对「目标已被替换」的成员从 .bak 回滚，首存无旧档可回滚。
+                    oldBytes = txIo.read(path) ?: ByteArray(0),
+                    newBytes = savBytes,
+                ),
+                SaveTransaction.MemberSpec(
+                    target = rt2Path,
+                    part = "$rt2Path.part",
+                    bak = "$rt2Path.bak",
+                    oldBytes = txIo.read(rt2Path) ?: ByteArray(0),
+                    newBytes = rt2Bytes,
+                ),
+            ),
+        )
+        globalPairGeneration++
+        when (
+            val result = SaveTransaction(txIo, journalPath).execute(request)
+        ) {
+            SaveTransaction.ExecuteResult.Committed, SaveTransaction.ExecuteResult.AlreadyCommitted -> Unit
+            is SaveTransaction.ExecuteResult.Rejected -> {
+                SaveDiagnostics.report(
+                    "SAVEGLOBAL", path, "transaction",
+                    IllegalStateException(result.reason), saveDirContext(),
+                )
+                throw CodeEE(MES_SAVE_GLOBAL)
+            }
+        }
+    }
+
+    /**
+     * 读全局档侧的 global.rt2 交还（fail-closed 警告，不改变 LOADGLOBAL 的返回值与异常形状）。
+     *
+     * 判据（CONTRACT-RT2-C-RES1 §3-b）：global.sav 完整落地后才交还；global.rt2 缺失 /
+     * 损坏 / 绑定失配一律 `port.warn` 上警告，LOADGLOBAL 照原版口径照常返回 true——
+     * 原版 LOADGLOBAL 对任何异常的收口是 false、成功是 true、**从不抛**
+     * （VariableEvaluator.cs:2513-2589 的 catch 是空 catch 返回 false），侧车恢复是
+     * 本车附加段，绝不允许把「Base 全局数据已恢复」的成功翻转成失败。因此本函数
+     * **整体吞掉自身的一切异常**并折成警告（比槽档 restoreSidecarIfWired 的
+     * 「恢复段局部 catch」更强：那条路的宿主 loadData 允许抛，LOADGLOBAL 不允许）。
+     */
+    private fun restoreGlobalSidecarIfWired(savBytes: ByteArray) {
+        val sidecar = GlobalSidecarSaveWiring.of(store) ?: return
+        try {
+            val rt2 = settledGlobalSidecarBytes(sidecar)
+            if (rt2 != null) {
+                val binding = SidecarBinding(
+                    store.registry.gameBase.gameCode,
+                    store.registry.gameBase.version,
+                    savBytesHash(savBytes),
+                )
+                sidecar.port.restoreGlobalRt2(rt2, binding)
+            }
+        } catch (t: Throwable) {
+            sidecar.port.warn(
+                "读全局档 .rt2 交还失败：path=${sidecarPathOf(config.globalPath())} " +
+                    "${t.javaClass.simpleName}: ${t.message}",
+            )
+        }
+    }
+
+    /**
+     * 结清残留后读 global.rt2 侧车字节；缺失或恢复判定 Halt 时上警告并返回 null
+     * （fail-closed 出口 = [GlobalSidecarStoragePort.warn]，不静默）。
+     */
+    private fun settledGlobalSidecarBytes(sidecar: GlobalSidecarSaveWiring): ByteArray? {
+        val path = config.globalPath()
+        val txIo = NioSaveTransactionIo(sidecar.transactionRoot)
+        when (
+            val settled = SavePlanExecutor.recoverAndExecute(txIo, sidecarJournalPathOf(path))
+        ) {
+            is SavePlanExecutor.ExecutionResult.Halted -> {
+                sidecar.port.warn("全局档读事务恢复判定 Halt：path=$path reason=${settled.reason}")
+                return null
+            }
+            else -> Unit
+        }
+        val rt2Path = sidecarPathOf(path)
+        val rt2 = txIo.read(rt2Path)
+        if (rt2 == null) {
+            // global.sav 在而 global.rt2 缺：fail-closed 上警告，扩展状态未恢复必须让宿主知道。
+            sidecar.port.warn(
+                "读全局档发现 global.rt2 侧车缺失：path=$rt2Path（mod 全局扩展状态未恢复）",
+            )
+        }
+        return rt2
+    }
+
     /** [SystemOps.saveGlobal]。spec: VariableEvaluator.cs:2474-2511 */
     override fun saveGlobal() {
+        // RT2 C-RES1：global 侧车接线在位（mod 总闸开）⇒ 走 global.sav + global.sav.rt2
+        // 配对事务；未接线 ⇒ 下面的原路径一行不进，与接线前逐字节相同
+        // （缺省路径零变化的机制保证，同槽档 captureAndWrite 的先例口径）。
+        val globalSidecar = GlobalSidecarSaveWiring.of(store)
+        if (globalSidecar != null) {
+            saveGlobalPair(globalSidecar)
+            return
+        }
+        val path = config.globalPath()
+        // 生产口径（二进制）走**流式**写：与 SAVEDATA 同一条根修（见 [captureAndWrite] 的 KDoc）。
+        // C# 的 try 从 `CreateSavDir` / `FileStream` 就开始，`SaveGlobalToStream`（抓取）也在其中，
+        // 统一由 `catch (SystemException)` 收敛到 ErrorSavingGlobalData
+        // （VariableEvaluator.cs:2476-2509）⇒ 抓取异常同样必须落成同一句文案。
+        if (config.systemSaveInBinary) {
+            val ok = try {
+                io.write(path) { out ->
+                    SaveFormat.writeStreaming(compressed(), out) { w ->
+                        SaveCapture.emitGlobal(store, w, emSets.global)
+                    }
+                }
+            } catch (_: Throwable) {
+                throw CodeEE(MES_SAVE_GLOBAL)
+            }
+            if (!ok) throw CodeEE(MES_SAVE_GLOBAL)
+            return
+        }
+        // 文本格式（非 eratw 口径）：保持物化口径，理由同 [writeTextMaterialized]。
         val bytes = try {
-            // C# 的 try 从 `CreateSavDir` / `FileStream` 就开始，`SaveGlobalToStream`（抓取）
-            // 也在其中，统一由 `catch (SystemException)` 收敛到 ErrorSavingGlobalData
-            // （VariableEvaluator.cs:2476-2509）⇒ 采集异常同样必须落成同一句文案。
             val data = SaveCapture.global(store, compressed = compressed(), emData = emSets.global)
             SaveCodec.write(data, store.registry, config)
         } catch (_: Throwable) {
             throw CodeEE(MES_SAVE_GLOBAL)
         }
-        if (!writeTreatOomAsFailure(config.globalPath(), bytes)) throw CodeEE(MES_SAVE_GLOBAL)
+        if (!writeTreatOomAsFailure(path, bytes)) throw CodeEE(MES_SAVE_GLOBAL)
     }
 
     /** [SystemOps.loadGlobal]：true = RESULT 1。spec: VariableEvaluator.cs:2513-2589 */
     override fun loadGlobal(): Boolean {
         val path = config.globalPath()
         if (!io.exists(path)) return false
+        // L15（ADR-005 例外）：确认要重读 global.sav 才清上一份的未认领切片（文件不存在时
+        // LOADGLOBAL 原版不改任何状态，这里也不动槽）。global 域跨局存活，无 lastLoadNo 闸。
+        SaveUnclaimedPassthrough.of(store)?.clearGlobal()
         // RemoveEMGlobalData()（:2523）：原版在打开文件**之前**清（文件不存在时不清）
         EmDataPools.clear(store, emSets.global)
         val bytes = io.read(path) ?: return false
@@ -417,7 +1056,10 @@ class FileSystemOps(
         )
         if (probe.state != EraDataState.OK) return false
         val data = try {
-            SaveCodec.read(bytes, store.registry, SaveFileKind.GLOBAL, ::isKnownSaveKey, config)
+            SaveCodec.read(
+                bytes, store.registry, SaveFileKind.GLOBAL,
+                SaveReadFilters(::isKnownSaveKey, emAccept::contains), config,
+            )
         } catch (_: Throwable) {
             return false
         }
@@ -431,6 +1073,11 @@ class FileSystemOps(
             )
             // LoadFromStreamBinary 的第二段（EM 条目，:2547 → :4095-4124）
             EmDataPools.restore(store, data.emData, emSets.loadAccept)
+            // L15：顶层全局未认领切片存槽；下一次 SAVEGLOBAL 由 SaveCapture 尾段切片回写。
+            recordUnclaimed(path, data, global = true)
+            // RT2 C-RES1：global.sav 原版语义完整落地之后，才交还 global.rt2 分片
+            // （只警告不改返回值与异常形状，见 [restoreGlobalSidecarIfWired]）。
+            restoreGlobalSidecarIfWired(bytes)
             true
         } catch (_: Throwable) {
             false
@@ -641,4 +1288,40 @@ class FileSystemOps(
             ops: com.eratw.port.core.host.FileOps? = null,
         ): FileSystemOps = FileSystemOps(store, RootedSaveFileIo(root, ops), config)
     }
+}
+
+/**
+ * 逻辑存档单元（本体 [path] + 其 .rt2 侧车）的**伴生件清单** —— 生命周期各相位共用的
+ * 唯一清单（era-arch-v61u.md:204「saveNN.sav 与 saveNN.sav.rt2 是一个逻辑存档」/
+ * :222「删除、复制、列表、CHKDATA 全配对」）：
+ *
+ * - M4-3 删除相位：[FileSystemOps.clearSidecarCompanions] 按此清单成对清理；
+ * - RT2 M43R 迁移面：[SaveFolderMigration] 的配对随迁按同一份清单搬运、孤儿 GC 按其后缀
+ *   反推本体（后缀表从本清单派生，不复制第二份后缀知识）。
+ *
+ * 顺序 = M4-3 删除相位的清序（journal 先失效让事务先死，两成员残件随后，.rt2 收尾）；
+ * 调用方若对顺序不敏感（随迁 / GC）沿用同一顺序也无害。
+ */
+internal fun sidecarCompanionPaths(path: String): List<String> = SidecarSaveInventory.companionPaths(path)
+
+/**
+ * EM 段（Map / Xml / DataTable）的**装载接受集**（L28）：`SAVE_* ∪ GLOBAL_*` 三张名字表的并集
+ * （`VariableData.cs:4099/4109/4119`；`STATIC_*` 不在其中，见 [EmSaveSets.loadAccept]）。
+ *
+ * 三张表在构造期各并成 `HashSet`，读档时只查：每个 EM 条目都要判一次，而 `VarExt*.csv`
+ * 可由第三方包注入、名字表大小不可控，`List.contains` 的 O(n) 会叠在读档热路径上。
+ *
+ * 放在 [FileSystemOps] 之外：那个类已贴着 detekt `LargeClass` 阈值，而这里只是一份纯查表口径
+ * （无 `store` / 无 IO 依赖），拓扑上不该占宿主类的代码行。
+ *
+ * @property sets 名字表来源；每次读档现查三张预计算集合
+ */
+private class EmLoadAccept(sets: EmSaveSets) {
+
+    private val maps: Set<String> = sets.loadAccept.maps.toHashSet()
+    private val xmls: Set<String> = sets.loadAccept.xmls.toHashSet()
+    private val dts: Set<String> = sets.loadAccept.dts.toHashSet()
+
+    /** 容器名是否在当前装载接受集里（区分大小写，与 `HashSet<string>` 的默认序数比较同口径）。 */
+    fun contains(name: String): Boolean = name in maps || name in xmls || name in dts
 }

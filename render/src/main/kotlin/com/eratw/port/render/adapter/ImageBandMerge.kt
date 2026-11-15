@@ -33,6 +33,8 @@ import com.eratw.port.render.displaylist.InlineGraphic
  * - 连续 ≥ [minBands] 行；
  * - 每行**只有一段** run，`kind = IMAGE`、`graphic` 非空（图形段的 `text` 是占宽用的空格
  *   负载，所以不能拿「文本为空」当判据）；
+ * - 行**不带 div 覆盖块**（覆盖块按脚本像素锚定所在行；折行合并会挪走锚行，与下面的
+ *   单图塌缩同一口径，见 [oversizedImageOf] 的 div 条目）；
  * - 各段 `widthPx / heightPx / yOffsetPx` 完全一致；
  * - 每段必须是**扁横条**（`widthPx >= heightPx * [MIN_BAND_ASPECT]`）：标题图的带是
  *   1041×16（约 65:1）。立绘/头像那样的近方形块即使连续 8 行也不合并 —— 它们不是
@@ -63,6 +65,9 @@ object ImageBandMerge {
     )
 
     private fun bandOf(line: RenderLine): Band? {
+        // 带 div 覆盖块的行不进合并段：合并把 N 行折成一行并删掉多余行，覆盖块的锚行序
+        // 随之漂移（判据全文见 [oversizedImageOf] 的 div 条目，两趟同一口径）。
+        if (line.divBlocks.isNotEmpty()) return null
         if (line.runs.size != 1) return null
         val run = line.runs[0]
         if (run.kind != RunKind.IMAGE) return null
@@ -219,12 +224,21 @@ object ImageBandMerge {
      *
      * ## 判据（只做脚本自己已经留了位置的那一支）
      *
-     * - 行内**只有一个**图形段（混排「图 + 文字」不动，缩了会把同行文字一起推走）；
-     * - 不是第一趟的产物（`rowSpan > 0` 或 `bandResources != null` 一律放行，幂等）；
+ * - 行内**只有一个**图形段（混排「图 + 文字」不动，缩了会把同行文字一起推走）；
+ * - 行**不带 div 覆盖块**（2026-11-10 玩家报「幻存神签仍然错位」的根修）：覆盖块按脚本
+ *   像素锚定所在行、定值几何（`ConsoleDivPart.cs:130` 的 `Height = ToPixel(height)`、
+ *   `:178` 定值矩形，移植侧 `DivOverlayPlanner.blockRect` 同式），本趟只缩 img、只塌
+ *   预留行，覆盖块不会跟着缩 —— 语料 DLC 神签目录的 神签.ERB:64/:80 让 img 与 div
+ *   同高（都是 `IMG_H_PX = CLIENTHEIGHT - 8 行`）并按同值预留空行，三者是脚本排版的
+ *   一件套；此前 img 被缩到块高预算、预留行被塌缩上移，div 盒仍按全尺寸画，盒底悬进
+ *   底部文字区。带块的行宁可漏合，一行不动；
+ * - 不是第一趟的产物（`rowSpan > 0` 或 `bandResources != null` 一律放行，幂等）；
      * - `heightPx > maxBlockHeightPx`：高过块高预算的图在手机上必然看不见；
-     * - **其后紧跟至少一行空白**：那是脚本为这张图腾的位置，本趟只在这块位置里动手。
-     *   没有预留空行就一行不动 —— 原版让图溢出压到后面内容上（`ConsoleImagePart.cs:82` 的
-     *   `destRect` + `EmueraConsole.cs:1855` 的恒定行距），端口不替它发明版面。
+ * - **其后紧跟至少一行空白**：那是脚本为这张图腾的位置，本趟只在这块位置里动手。
+ *   没有预留空行就一行不动 —— 原版让图溢出压到后面内容上（`ConsoleImagePart.cs:82` 的
+ *   `destRect` + `EmueraConsole.cs:1855` 的恒定行距），端口不替它发明版面。预留区里
+ *   混进带 div 覆盖块的行也一行不动（见主循环内 `reservedHasDiv` 的注释：块随行消失
+ *   与锚行漂移，与本条目同一根因的另一入口）；
      *
      * 语料实测（4.981 全库 `<img>` 的 height 只有 200 / 900 / 1000 / 3500 四档）：1000% 那族
      * 折成 410px、900% 折成 369px，都低于真机 648px 的块高预算 ⇒ 一行都不动；只有标题图过线。
@@ -249,9 +263,23 @@ object ImageBandMerge {
                 continue
             }
             var j = i + 1
-            while (j < lines.size && isBlankLine(lines[j])) j++
-            if (j == i + 1) {
-                // 没有预留空行：这张图不是「脚本给它留了位置的一块」，原样放行。
+            var reservedHasDiv = false
+            while (j < lines.size) {
+                if (lines[j].divBlocks.isNotEmpty()) {
+                    // 预留区里混着带 div 覆盖块的行：塌缩会把空白行删掉/换成不带块的
+                    // [SPACER]，块随行消失 —— 与 [oversizedImageOf] 的 div 守卫同一根因
+                    // 的另一条入口（只印 div 不印文字的行 runs 为空，看起来「空白」）。
+                    // 覆盖块按脚本像素锚定所在行，与图、与预留行都是脚本排版的连体件；
+                    // 这里宁可整张图不缩，一行不动（2026-11-10 深审补）。
+                    reservedHasDiv = true
+                    break
+                }
+                if (!isBlankLine(lines[j])) break
+                j++
+            }
+            if (reservedHasDiv || j == i + 1) {
+                // 没有预留空行，或预留区带 div 覆盖块：这张图不是（或不只是）
+                // 「脚本给它留了位置的一块」，原样放行。
                 out?.add(lines[i])
                 i++
                 continue
@@ -298,6 +326,8 @@ object ImageBandMerge {
 
     /** 本趟要处理的那一行：单段纯图片、不是第一趟产物、且高过块高预算；否则 null。 */
     private fun oversizedImageOf(line: RenderLine, maxBlockHeightPx: Int): InlineGraphic.Image? {
+        // 带 div 覆盖块的行不塌缩（判据全文见本趟 KDoc 的 div 条目）。
+        if (line.divBlocks.isNotEmpty()) return null
         if (line.runs.size != 1) return null
         val run = line.runs[0]
         if (run.kind != RunKind.IMAGE) return null

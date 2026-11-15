@@ -254,11 +254,13 @@ private fun callUserFunctionStr(c: BuiltinContext, name: String, args: List<Valu
  *   + 全局用户变量名（store.allUserVars，对应 AddUseDefinedVariable）。
  * - MACRO：原版 MacroKeys（:286）。宿主 [BuiltinHost.macroNames]；null = 无宏。
  * - FUNCTION：原版 LabelDictionary.NoneventKeys（:280）。宿主
- *   [BuiltinHost.userFunctions]；null 回落到**内建函数名**（Builtins.registry.names()），
- *   这是契约认可的"内建优先"近似：枚举内建函数名而非用户标签名。
+ *   [BuiltinHost.userFunctions]；null 回落到 [BuiltinContext.builtinNames]（无目标档 =
+ *   `Builtins.registry.names()`；显式目标档 = 该档可见名），这是契约认可的"内建优先"
+ *   近似：枚举内建函数名而非用户标签名。
  */
 private fun enumKeyList(c: BuiltinContext, kind: EnumKind): Collection<String> = when (kind) {
-    EnumKind.FUNCTION -> c.host.userFunctions?.keys ?: Builtins.registry.names()
+    // ENGC-3：宿主用户函数表优先；否则用 `builtinNames`（有目标档时按档过滤，无档全量）。
+    EnumKind.FUNCTION -> c.host.userFunctions?.keys ?: c.builtinNames
     EnumKind.MACRO -> c.host.macroNames ?: emptyList()
     EnumKind.VARIABLE -> c.host.variableNames ?: buildStoreVariableNames(c)
 }

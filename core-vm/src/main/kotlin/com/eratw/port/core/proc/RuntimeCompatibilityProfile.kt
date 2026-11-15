@@ -1,6 +1,26 @@
 package com.eratw.port.core.proc
 
 import com.eratw.port.core.code.ResolverPolicy
+import com.eratw.port.core.compat.EngineDialect
+import com.eratw.port.core.compat.EngineFamily
+import com.eratw.port.core.compat.EngineProfileData
+import com.eratw.port.core.compat.NicknameKeywordPolicy
+import com.eratw.port.core.compat.RelationMasternamePolicy
+import com.eratw.port.core.compat.StringCompareDialect
+
+/**
+ * 缺省家族的方言三元组（生成物 `DIALECT` 的单点）。
+ *
+ * 本文件三个方言 facet 的**构造默认值**与两个 `LEGACY_*` 档都从这里取，不再手抄
+ * `FIXED` / `NAME_CALLNAME_ONLY` / `EXCLUDED` 字面量（CONTRACT-ENGCPL §3.1 E3）：
+ * 换引擎 = 改 input yaml + 重生成，不回来改这里。
+ *
+ * 取值家族 = [EngineProfiles.DEFAULT_TARGET].family（input yaml `targets.<id>.default: true`）。
+ * 初始化方向单向：本文件 → [EngineProfiles] → [EngineProfileData] → compat 枚举，
+ * 三条路都不会回指本类，无初始化环。
+ */
+private val defaultDialect: EngineDialect =
+    EngineProfileData.DIALECT.getValue(EngineProfiles.DEFAULT_TARGET.family)
 
 /**
  * 目标语料版本（本仓双线维护 4.980 / 4.981）。
@@ -70,7 +90,7 @@ enum class SaveLoadPolicy { RESET_THEN_PARSE }
 /**
  * 运行期兼容档案（§9）：**一个参数对象、一条管线**，不是第二套代码路径。
  *
- * ## 六个 facet + 版本声明
+ * ## 十个 facet + 版本声明
  *
  * | facet | 声明什么 | 真源 |
  * |---|---|---|
@@ -81,10 +101,45 @@ enum class SaveLoadPolicy { RESET_THEN_PARSE }
  * | [lazyLoading] | 装载能力标识 | [LazyLoadingPolicy] |
  * | [reload] | 重载语义 | [ReloadPolicy] |
  * | [saveLoad] | 存档装载顺序 | [SaveLoadPolicy] |
+ * | [engineFamily] | 目标引擎家族（三档之一） | `EngineProfileData` / [EngineProfiles] |
+ * | [stringCompare] | 字符串关系比较的 bug 方言 | 生成物 `EngineProfileData.DIALECT` |
+ * | [nicknameKeywords] | `GETNUM` 昵称关键字面 | 生成物 `EngineProfileData.DIALECT` |
+ * | [relationMastername] | `RELATION` 逆引表是否收 `MASTERNAME` | 生成物 `EngineProfileData.DIALECT` |
+ *
+ * 后四项（ENGC-2/ENGC-4）只声明「跑的是哪家引擎的哪套已取证方言」：值来自
+ * `specs/engine-profiles.input.yaml` 的 `dialect:` 段生成出的 `EngineProfileData.DIALECT`，
+ * 运行期由
+ * [EngineProfiles.profileFor] 装进本档案；消费点（字符串 `>=`/`<=`、`GETNUM` 关键字、
+ * `RELATION` 字符串下标）在 B5 接线。
  *
  * 逐函数覆盖政策 [com.eratw.port.core.patch.OverridePolicy] 不在这里：它是 **Module 侧
  * 逐函数声明**（MODERN 下生效），profile 只决定「是否承认覆盖」这一档
  * （[functionResolution] = MODERN 才看它）。
+ *
+ * ## bug 方言速查（哪个引擎的哪个 bug ⇒ 哪个 facet）
+ *
+ * 末尾三个 facet 各自钉死一个**已实跑取证**的引擎分歧（取证读数在 specs 下
+ * engine-profiles.yaml 的 probe 节，PLAN-ENGCOMPAT §7 记「已实跑清零」）。要改「某档跑哪套
+ * 语义」，只在这张表动 facet 的取值来源（生成器 / `EngineProfileData.DIALECT`），**绝不在消费点
+ * 写 `if (engineFamily == …)`** —— 那会变成第二套代码路径（本文件顶部纪律）。
+ *
+ * | facet | v24_1824 | em_ee_1824_v22 | snake_4981（缺省） | C# 出处（= 分叉点本身，非补丁锚） |
+ * |---|---|---|---|---|
+ * | [stringCompare] | LEGACY_BOTH_LT | FIXED | FIXED | `>=`/`<=` 都退化成 `string.Compare(..) < 0`：v24 `GameData/Expression/OperatorMethod.cs:487`（GreaterEqualStrStr）与 `:518`（LessEqualStrStr）；snake 已修为 `c >= 0` / `c <= 0`：`Runtime/Script/Statements/Expression/OperatorMethod.cs:547` / `:578`；em 同 snake：`.../OperatorMethod.cs:478` / `:509` |
+ * | [nicknameKeywords] | WITH_NICKNAME_MASTERNAME | NAME_CALLNAME_ONLY | NAME_CALLNAME_ONLY | `GetKeywordDictionary` 是否给 `VariableCode.NICKNAME`/`MASTERNAME` 开 case：v24 四键同投 relationDic（`GameData/ConstantData.cs:874-878`）；snake 只投 NAME/CALLNAME（`Runtime/Script/Data/ConstantData.cs:1454-1459`）、em 同（`.../ConstantData.cs:1075-1080`）⇒ 其余档 `GETNUM(NICKNAME, …)` / `GETNUM(MASTERNAME, …)` 得 -1 |
+ * | [relationMastername] | INCLUDED | INCLUDED | EXCLUDED | `relationDic` 建表循环是否收 `Mastername`：v24 `GameData/ConstantData.cs:634-641`、em `Runtime/Script/Data/ConstantData.cs:705-712` 收；snake 只到 `Nickname`、无 `Mastername`（`Runtime/Script/Data/ConstantData.cs:858-863`）⇒ `RELATION:1:"主人称呼"` 仅 em/v24 可解析 |
+ *
+ * **为什么是枚举而不是布尔/字符串**（D4）：每个 facet 的取值集合恰好是「已取证存在的方言」，
+ * 布尔只能二选一、字符串会退化成自由旋钮。加一个新值 ⇒ 所有 exhaustive `when` 的消费点
+ * 编译期变红、强制逐个决策；缺省取值恒等于 4.981 实跑口径（I1 缺省逐位不变）。三 facet 的
+ * 取值都由生成物 `EngineProfileData.DIALECT` 单点提供，本文件不写死名单（I2）。
+ *
+ * [nicknameKeywords] 与 [relationMastername] **互不冗余**，各钉一条独立取证事实：em 把
+ * `MASTERNAME` 写进 `relationDic`（故 `RELATION` 下标可查主名，[relationMastername] = INCLUDED），
+ * 但它的 `GetKeywordDictionary` 没有 `NICKNAME`/`MASTERNAME` case，`GETNUM(MASTERNAME, …)`
+ * 仍落到 -1（故 [nicknameKeywords] = NAME_CALLNAME_ONLY）；v24 两处都有、snake 两处都无。
+ * 合成一个布尔会丢掉这一层区别，另见
+ * [com.eratw.port.core.compat.RelationMasternamePolicy] 的 KDoc。
  *
  * ## 三条纪律
  *
@@ -94,14 +149,32 @@ enum class SaveLoadPolicy { RESET_THEN_PARSE }
  * 3. **用户可配置项不进 profile**（例：`CompatiCallEvent` 留在
  *    [com.eratw.port.core.config.ConfigKey]）：一个事实只有一个出处。
  *
- * ## 接线状态（M1-0）
+ * ## 接线状态（ENGC-2 / ENGC-3）
  *
- * 本波只落**类型**：生产路径尚未读取本档案，[com.eratw.port.core.patch.ModuleLinker.link]
- * 的 `policy` 参数仍由调用方显式传 [ResolverPolicy]。装配（GameSession / GameHost 选档 →
- * 链接器 / ProcessRuntime）是 M1/M2-2 的接线面，不在这里假装已完成。
+ * 装配链已落地：构建期印章（`assets/engine-profile.json`）→ [EngineStamp] → [EngineProfiles]
+ * → `GameHost` → `GameSession.compatProfile`。**函数面门控（ENGC-3）已接**：`GameHost`
+ * 在**显式目标档**（印章 Present 或显式覆盖）时才构造
+ * [com.eratw.port.core.fn.EngineSurface] 并下传 `GameSession.engineSurface` → [ProcessRuntime]
+ * → `BuiltinEvalContext`；无印章 = null = 全量注册表（eraTW 零干扰）。**本档案自身仍不按
+ * 字段分叉**，门控以独立形参表达，与「profile ≠ 开关」的纪律一致。
+ * 三个方言 facet（ENGC-4）已接线：[stringCompare] 经 `EvalContext.stringCompareDialect`
+ * 到 `strCompare` 的 `>=`/`<=`；[nicknameKeywords] 与 [relationMastername] 经
+ * `VarConfig` 到 `GETNUM` 关键字解析与 `RELATION` 逆引表建表。
+ * 仍待接线：[com.eratw.port.core.patch.ModuleLinker.link] 的 `policy` 由调用方显式传
+ * [ResolverPolicy]（Mod 波）。缺省档案逐字段等于改动前的 `LEGACY_ERATW_4981`
+ * （四个新 facet 的缺省值就是它的方言）。
  *
  * @param corpusVersion 目标语料版本（v1 仅声明，见 [CorpusVersion]）
  * @param functionResolution 符号解析政策（LEGACY_LAST_WINS / MODERN）
+ * @param engineFamily 目标引擎家族；缺省 = 缺省档的家族
+ *   （[EngineProfiles.DEFAULT_TARGET]，当前 = [EngineFamily.SNAKE_4981] = eraTW 4.981，零干扰）
+ * @param stringCompare 字符串关系比较方言；缺省 = 生成物 `DIALECT[缺省家族]`
+ *   （当前 = [StringCompareDialect.FIXED]，4.981 实跑口径）
+ * @param nicknameKeywords `GETNUM` 昵称关键字面；缺省 = 生成物 `DIALECT[缺省家族]`
+ *   （当前 = [NicknameKeywordPolicy.NAME_CALLNAME_ONLY]，无 `MASTERNAME` 桶）
+ * @param relationMastername `RELATION` 逆引表是否收 `MASTERNAME`；缺省 = 生成物
+ *   `DIALECT[缺省家族]`（当前 = [RelationMasternamePolicy.EXCLUDED]，relationDic 只有
+ *   Name/Callname/Nickname）
  */
 data class RuntimeCompatibilityProfile(
     val corpusVersion: CorpusVersion,
@@ -111,6 +184,10 @@ data class RuntimeCompatibilityProfile(
     val lazyLoading: LazyLoadingPolicy = LazyLoadingPolicy.EAGER_ONLY,
     val reload: ReloadPolicy = ReloadPolicy.RE_REGISTER,
     val saveLoad: SaveLoadPolicy = SaveLoadPolicy.RESET_THEN_PARSE,
+    val engineFamily: EngineFamily = EngineProfiles.DEFAULT_TARGET.family,
+    val stringCompare: StringCompareDialect = defaultDialect.stringCompare,
+    val nicknameKeywords: NicknameKeywordPolicy = defaultDialect.nicknameKeywords,
+    val relationMastername: RelationMasternamePolicy = defaultDialect.relationMastername,
 ) {
 
     companion object {
@@ -124,11 +201,25 @@ data class RuntimeCompatibilityProfile(
          * 不许靠「读版本号在消费点分叉」偷偷产生。
          */
         val LEGACY_ERATW_4980: RuntimeCompatibilityProfile =
-            RuntimeCompatibilityProfile(CorpusVersion.V4_980, ResolverPolicy.LEGACY_LAST_WINS)
+            RuntimeCompatibilityProfile(
+                corpusVersion = CorpusVersion.V4_980,
+                functionResolution = ResolverPolicy.LEGACY_LAST_WINS,
+                engineFamily = EngineProfiles.DEFAULT_TARGET.family,
+                stringCompare = defaultDialect.stringCompare,
+                nicknameKeywords = defaultDialect.nicknameKeywords,
+                relationMastername = defaultDialect.relationMastername,
+            )
 
         /** Legacy-ERATW 档（4.981 语料）；与 4.980 档只差版本声明。 */
         val LEGACY_ERATW_4981: RuntimeCompatibilityProfile =
-            RuntimeCompatibilityProfile(CorpusVersion.V4_981, ResolverPolicy.LEGACY_LAST_WINS)
+            RuntimeCompatibilityProfile(
+                corpusVersion = CorpusVersion.V4_981,
+                functionResolution = ResolverPolicy.LEGACY_LAST_WINS,
+                engineFamily = EngineProfiles.DEFAULT_TARGET.family,
+                stringCompare = defaultDialect.stringCompare,
+                nicknameKeywords = defaultDialect.nicknameKeywords,
+                relationMastername = defaultDialect.relationMastername,
+            )
 
         /**
          * Modern 档：默认唯一符号（同名未声明覆盖 = 链接期拒绝），覆盖须显式声明并过

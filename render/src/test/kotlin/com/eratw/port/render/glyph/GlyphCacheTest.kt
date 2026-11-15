@@ -3,6 +3,7 @@ package com.eratw.port.render.glyph
 import com.eratw.port.core.font.FontAdvanceTable
 import com.eratw.port.core.font.FontSidecarCatalog
 import com.eratw.port.render.GlyphKey
+import com.eratw.port.render.font.BundledFontFamilies
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -210,6 +211,10 @@ class GlyphCacheTest {
 
     @Test
     fun `回退链第二跳由默认字体代画`() {
+        // 跳序（CONTRACT-MODERN-R11-T4B S1）：请求族 → 随包兜底族链（GlyphFallback.chainFor）→
+        // 后端默认族。「第二跳」是旧口径的叫法：本用例钉的是「请求族缺字、最后由**后端默认族**
+        // 补上 ⇒ GlyphSource.DEFAULT，servedFont = 默认族」这一档；中间那两跳（Sarasa / Unifont）
+        // 在本夹具的字体表里都没登记，所以只留下调用流水，不改变 servedBy 与度量。
         val raster = StaticGlyphRaster(
             defaultFontName = font,
             fonts = listOf(
@@ -224,9 +229,18 @@ class GlyphCacheTest {
         assertTrue(entry.isFallback)
         assertEquals(2, entry.advanceCells)
         assertEquals(1L, cache.defaultFallbackCount)
+        assertEquals(0L, cache.fallbackFamilyCount)
         assertEquals(0L, cache.notdefCount)
-        // 跳序：请求字体先试、默认字体补上，恰两跳（两跳带同一个字号）
-        assertEquals(listOf("$FONT_OTHER|0|${'漢'.code}|$DEFAULT_SIZE", "$font|0|${'漢'.code}|$DEFAULT_SIZE"), raster.calls)
+        // 跳序：请求字体 → 链上兜底族（Sarasa / Unifont）→ 后端默认族，四跳且带同一个字号
+        assertEquals(
+            listOf(
+                "$FONT_OTHER|0|${'漢'.code}|$DEFAULT_SIZE",
+                "$CHAIN_HEAD|0|${'漢'.code}|$DEFAULT_SIZE",
+                "$CHAIN_TAIL|0|${'漢'.code}|$DEFAULT_SIZE",
+                "$font|0|${'漢'.code}|$DEFAULT_SIZE",
+            ),
+            raster.calls,
+        )
     }
 
     @Test
@@ -245,7 +259,16 @@ class GlyphCacheTest {
         assertTrue(entry.isNotdef)
         assertSame(request, entry.key)
         assertEquals(1L, cache.notdefCount)
-        assertEquals(listOf("$FONT_OTHER|0|${'あ'.code}|$DEFAULT_SIZE", "$font|0|${'あ'.code}|$DEFAULT_SIZE"), raster.calls)
+        // 跳序同 S1：请求族 → 链上兜底族（Sarasa / Unifont）→ 后端默认族，四跳全空才落方框
+        assertEquals(
+            listOf(
+                "$FONT_OTHER|0|${'あ'.code}|$DEFAULT_SIZE",
+                "$CHAIN_HEAD|0|${'あ'.code}|$DEFAULT_SIZE",
+                "$CHAIN_TAIL|0|${'あ'.code}|$DEFAULT_SIZE",
+                "$font|0|${'あ'.code}|$DEFAULT_SIZE",
+            ),
+            raster.calls,
+        )
         // 方框仍占全角 2 格：缺字不许让折行少进
         assertEquals(2, entry.advanceCells)
         assertEquals(18, entry.advancePixels)
@@ -254,9 +277,9 @@ class GlyphCacheTest {
         assertEquals(GlyphCache.NOTDEF_FRAME_COLOR, entry.bitmap[0])
         assertEquals(0, entry.bitmap[9 * 18 + 9])
         assertEquals(GlyphCache.NOTDEF_FRAME_COLOR, entry.bitmap[entry.bitmap.size - 1])
-        // 缺字结果按请求键常驻：第二次取不再光栅化
+        // 缺字结果按请求键常驻：第二次取不再光栅化（流水仍是首轮那四跳）
         assertSame(entry, cache.get(request))
-        assertEquals(2, raster.callCount)
+        assertEquals(4, raster.callCount)
         assertTrue(cache.containsCached(request))
     }
 
@@ -266,7 +289,8 @@ class GlyphCacheTest {
         val raster = ThrowingRaster(font)
         val cache = GlyphCache(16, raster)
         val entry = cache.get(key('A'.code, fontName = FONT_OTHER))
-        assertEquals(2, raster.calls)
+        // 四跳 = 请求族 + 链上兜底两族 + 后端默认族；每一跳都抛，但都被折成「这一跳没有字形」
+        assertEquals(4, raster.calls)
         assertEquals(GlyphSource.NOTDEF, entry.servedBy)
         assertEquals(1, entry.advanceCells)
         assertEquals(1L, cache.notdefCount)
@@ -391,6 +415,8 @@ class GlyphCacheTest {
 
     @Test
     fun `缺字回退链在指定字号下仍是两跳且两跳同字号`() {
+        // 跳序同 S1（请求族 → 链上兜底族 → 后端默认族）：本用例钉的是「四跳共用同一个字号」，
+        // 命中档仍是后端默认族那一跳（DEFAULT）。名字里的「两跳」是旧口径。
         val raster = StaticGlyphRaster(
             defaultFontName = font,
             fonts = listOf(
@@ -402,7 +428,15 @@ class GlyphCacheTest {
         val entry = cache.get(key('漢'.code, fontName = FONT_OTHER, size = 30))
         assertEquals(GlyphSource.DEFAULT, entry.servedBy)
         assertEquals(30, entry.sizePx)
-        assertEquals(listOf("$FONT_OTHER|0|${'漢'.code}|30", "$font|0|${'漢'.code}|30"), raster.calls)
+        assertEquals(
+            listOf(
+                "$FONT_OTHER|0|${'漢'.code}|30",
+                "$CHAIN_HEAD|0|${'漢'.code}|30",
+                "$CHAIN_TAIL|0|${'漢'.code}|30",
+                "$font|0|${'漢'.code}|30",
+            ),
+            raster.calls,
+        )
         // 字号 30 的全角：每格 15.6px → advance = trunc(2*15.6) = 31
         assertEquals(31, entry.advancePixels)
         assertEquals(2, entry.advanceCells)
@@ -486,10 +520,15 @@ class GlyphCacheTest {
         assertEquals(GlyphSource.NOTDEF, miss.servedBy)
         assertEquals(2, miss.advanceCells)
         assertEquals(16, miss.advancePixels)
-        // 两跳都试过了：请求族一次、默认族一次
+        // 四跳都试过了：请求族、链上兜底两族（Sarasa / Unifont）、后端默认族
         assertEquals(
-            listOf("$FONT_OTHER|0|${'い'.code}|16", "$font|0|${'い'.code}|16"),
-            raster.calls.subList(raster.calls.size - 2, raster.calls.size),
+            listOf(
+                "$FONT_OTHER|0|${'い'.code}|16",
+                "$CHAIN_HEAD|0|${'い'.code}|16",
+                "$CHAIN_TAIL|0|${'い'.code}|16",
+                "$font|0|${'い'.code}|16",
+            ),
+            raster.calls.subList(raster.calls.size - 4, raster.calls.size),
         )
     }
 
@@ -522,6 +561,115 @@ class GlyphCacheTest {
         assertEquals(8, cache.get(key('A'.code, size = 16)).advancePixels)
     }
 
+    // ===== S1：族跳改走 GlyphFallback.chainFor，兜底族命中记 FALLBACK =====
+
+    @Test
+    fun `兜底族命中记 FALLBACK 且 servedFont 是命中族`() {
+        // 请求族（默认族 "黑体"）缺字 → 链上兜底段首族 Unifont 命中（Sarasa 未登记在夹具里）
+        // ⇒ GlyphSource.FALLBACK，servedFont = 命中族；后端默认族就是请求族，没有独立末跳。
+        val raster = StaticGlyphRaster(
+            defaultFontName = font,
+            fonts = listOf(
+                FontCoverage(font, codePoints = setOf('A'.code)),
+                FontCoverage(BundledFontFamilies.UNIFONT.family, coversAllCodePoints = true),
+            ),
+        )
+        val cache = GlyphCache(16, raster)
+        val entry = cache.get(key('漢'.code))
+        assertEquals(GlyphSource.FALLBACK, entry.servedBy)
+        assertEquals(BundledFontFamilies.UNIFONT.family, entry.servedFont)
+        assertTrue(entry.isFallback)
+        assertFalse(entry.isNotdef)
+        assertEquals(1L, cache.fallbackFamilyCount)
+        assertEquals(0L, cache.defaultFallbackCount)
+        assertEquals(0L, cache.notdefCount)
+        // 兜底族的度量照样进条目：全角 2 格 / 18px（字号 18 的网格退化值）
+        assertEquals(2, entry.advanceCells)
+        assertEquals(18, entry.advancePixels)
+        assertEquals(
+            listOf(
+                "$font|0|${'漢'.code}|$DEFAULT_SIZE",
+                "$CHAIN_HEAD|0|${'漢'.code}|$DEFAULT_SIZE",
+                "$CHAIN_TAIL|0|${'漢'.code}|$DEFAULT_SIZE",
+            ),
+            raster.calls,
+        )
+    }
+
+    @Test
+    fun `兜底段顺序取自 GlyphFallback 并首命中即短路`() {
+        // 链序（登记表当前口径）：非 Sarasa 族 → Sarasa → Unifont。夹具同时登记 Sarasa 与 Unifont，
+        // 请求族缺席 ⇒ 先落 Sarasa（链上首族），**不会**先试 Unifont；命中后不再问 Unifont。
+        val raster = StaticGlyphRaster(
+            defaultFontName = font,
+            fonts = listOf(
+                FontCoverage(BundledFontFamilies.SARASA.family, coversAllCodePoints = true),
+                FontCoverage(BundledFontFamilies.UNIFONT.family, coversAllCodePoints = true),
+            ),
+        )
+        val cache = GlyphCache(16, raster)
+        val entry = cache.get(key('漢'.code, fontName = FONT_OTHER))
+        assertEquals(GlyphSource.FALLBACK, entry.servedBy)
+        assertEquals(BundledFontFamilies.SARASA.family, entry.servedFont)
+        assertEquals(
+            listOf(
+                "$FONT_OTHER|0|${'漢'.code}|$DEFAULT_SIZE",
+                "$CHAIN_HEAD|0|${'漢'.code}|$DEFAULT_SIZE",
+            ),
+            raster.calls,
+            "兜底段必须按 chainFor 的顺序问，且首命中即短路",
+        )
+    }
+
+    @Test
+    fun `兜底段随请求族变化而与链同源`() {
+        // chainFor(Unifont) = [Unifont, Sarasa]：请求 Unifont 缺字时下一个该问 Sarasa（不是反过来）。
+        val raster = StaticGlyphRaster(
+            defaultFontName = font,
+            fonts = listOf(FontCoverage(BundledFontFamilies.SARASA.family, coversAllCodePoints = true)),
+        )
+        val cache = GlyphCache(16, raster)
+        val entry = cache.get(key('漢'.code, fontName = BundledFontFamilies.UNIFONT.family))
+        assertEquals(GlyphSource.FALLBACK, entry.servedBy)
+        assertEquals(BundledFontFamilies.SARASA.family, entry.servedFont)
+        assertEquals(
+            listOf(
+                "${BundledFontFamilies.UNIFONT.family}|0|${'漢'.code}|$DEFAULT_SIZE",
+                "$CHAIN_HEAD|0|${'漢'.code}|$DEFAULT_SIZE",
+            ),
+            raster.calls,
+        )
+    }
+
+    @Test
+    fun `后端默认族在链里时不出现 DEFAULT 跳`() {
+        // 真机后端的默认族 = BundledFontFamilies.DEFAULT_FAMILY（Sarasa）：链首就是它，
+        // 于是「默认族」不另立一跳，缺字一律落 FALLBACK 或方框。
+        val defaultFamily = BundledFontFamilies.DEFAULT_FAMILY
+        val raster = StaticGlyphRaster(
+            defaultFontName = defaultFamily,
+            fonts = listOf(FontCoverage(BundledFontFamilies.SARASA.family, codePoints = setOf('A'.code))),
+        )
+        val cache = GlyphCache(16, raster)
+        // 请求族缺字 → 链上 Unifont 也没登记 → 方框（默认族已在链首问过，不追问第二次）
+        val box = cache.get(key('漢'.code, fontName = defaultFamily))
+        assertEquals(GlyphSource.NOTDEF, box.servedBy)
+        assertEquals(
+            listOf(
+                "$CHAIN_HEAD|0|${'漢'.code}|$DEFAULT_SIZE",
+                "$CHAIN_TAIL|0|${'漢'.code}|$DEFAULT_SIZE",
+            ),
+            raster.calls,
+            "默认族在链首时只许问一次（不许再补一跳 DEFAULT）",
+        )
+        val callsForBox = raster.calls.size
+        // 请求默认族且它覆盖该字：REQUESTED（链首 = 请求族，不升级成 FALLBACK）
+        val hit = cache.get(key('A'.code, fontName = defaultFamily))
+        assertEquals(GlyphSource.REQUESTED, hit.servedBy)
+        assertEquals(callsForBox + 1, raster.calls.size)
+        assertEquals(0L, cache.defaultFallbackCount)
+    }
+
     private class SequenceRun(
         val cache: GlyphCache,
         val evictedRoles: List<Int>,
@@ -547,6 +695,13 @@ class GlyphCacheTest {
     companion object {
         /** 配置里的默认字体名（spec: `ConfigData.cs:65`），用来当"请求字体"。 */
         private const val FONT_OTHER: String = "ＭＳ ゴシック"
+
+        /**
+         * 族链兜底段的两个字面族名（S1：链的成员与顺序由 `GlyphFallback.chainFor` 定义；
+         * 这里故意写字面值 —— 登记表或链序一变，本文件的跳序断言当场报红）。
+         */
+        private const val CHAIN_HEAD: String = "Sarasa Mono SC"
+        private const val CHAIN_TAIL: String = "Unifont"
 
         /** `GlyphKey.size = 0`（未给字号）归一后的字号：配置默认 18（spec: `ConfigData.cs:66`）。 */
         private const val DEFAULT_SIZE: Int = 18

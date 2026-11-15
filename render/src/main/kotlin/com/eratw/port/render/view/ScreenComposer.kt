@@ -289,7 +289,7 @@ class ScreenComposer(
         if (overlay.isEmpty && scene.sprites.isEmpty() && scene.cbgLayers.isEmpty()) {
             var i = 0
             while (i < commands.size) {
-                drawRun(target, commands[i], rowCount, focusedButton)
+                drawRun(target, commands[i], rowCount, focusedButton, sprites)
                 i++
             }
             return target
@@ -324,7 +324,7 @@ class ScreenComposer(
                 is CbgDrawOrder.Step.Text -> {
                     var i = 0
                     while (i < commands.size) {
-                        drawRun(target, commands[i], rowCount, focusedButton)
+                        drawRun(target, commands[i], rowCount, focusedButton, sprites)
                         i++
                     }
                 }
@@ -629,10 +629,12 @@ class ScreenComposer(
      *   headless 的 sprite 表不带 `pos`/子矩形，`spriteDestRect` 因此恒等返框（与真机同一函数）；
      * - 1:1 用 [Raster.blit]、尺寸不等最近邻采样（真机 `drawBitmap` 的 `isFilterBitmap` 是
      *   双线性，headless 无滤镜 —— 差异登记 TODO(verify)）；
-     * - **资源缺失静默跳过**：原版绘制前查 `aSprite != null && aSprite.IsCreated`
-     *   （`:168`；立绘层同一条 `EmueraConsole.cs:1844`），未创建什么都不画 ——
-     *   差异：原版在 `cImage == null` 时把重建的 img 标签当文本画（`:175-182`），
-     *   headless 侧按本波契约静默跳过（`SpriteTable.Entry.isCreated` 的死条目同样跳过）。
+     * - **资源缺失退 AltText**：原版绘制前查 `aSprite != null && aSprite.IsCreated`
+     *   （`:168`；立绘层同一条 `EmueraConsole.cs:1844`），守卫不成立时把重建的 img 标签
+     *   当文本画（`:175-182` 的 `DrawString(AltText, …, new Point(PointX, pointY))`）。
+     *   headless 侧同判：[SpriteTable.find] 查不到、`Entry.isCreated` 为假、落位框不可用
+     *   三支都落到 [drawChildImageAltText]（裸列游标 + 裸行顶 + `Config.ForeColor`，
+     *   裁内容盒）；`altText == null`（生产侧没给）保持接入前的静默。
      * - 焦点/按下换图：`(isSelecting || isFocus) && cImageB != null`（`:163-167`）⇒
      *   [InlineGraphic.Image.drawResource] 取 `srcb`；按下图查不到时退主图（`:164` 的
      *   `cImageB == null` 判式 + `AppContents.cs:46-48` 的未注册名返回 null）。
@@ -658,7 +660,20 @@ class ScreenComposer(
         val originLeft = childXPx + metrics.cellsToPixels(cmd.colStart) + divShapeShift
         when (graphic) {
             is InlineGraphic.Space -> Unit
-            is InlineGraphic.Image -> drawChildImage(canvas, graphic, originLeft, childYPx, box, focus, pressed, sprites)
+            is InlineGraphic.Image -> drawChildImage(
+                canvas = canvas,
+                cmd = cmd,
+                image = graphic,
+                originLeft = originLeft,
+                // 缺帧回落的落点是**裸 PointX**（`ConsoleImagePart.cs:177,181`）：上面那条
+                // 带 `divShapeShift` 的 originLeft 只给命中支的图用（`:171`）。
+                altOriginLeft = childXPx + metrics.cellsToPixels(cmd.colStart),
+                childYPx = childYPx,
+                box = box,
+                focus = focus,
+                pressed = pressed,
+                sprites = sprites,
+            )
             is InlineGraphic.Rect -> {
                 val left = originLeft + graphic.xOffsetPx
                 val top = childYPx + graphic.yOffsetPx
@@ -678,8 +693,10 @@ class ScreenComposer(
     /** `<img>` 分支（几何与出处见 [drawChildGraphic] 的 KDoc）。 */
     private fun drawChildImage(
         canvas: Raster,
+        cmd: DrawCmd,
         image: InlineGraphic.Image,
         originLeft: Int,
+        altOriginLeft: Int,
         childYPx: Int,
         box: DivOverlayPlanner.Rect,
         focus: Boolean,
@@ -693,10 +710,19 @@ class ScreenComposer(
             // 按下图缺失退主图（ConsoleImagePart.cs:164 的 cImageB == null 判式）。
             entry = sprites.find(image.resource)
         }
-        if (entry == null) return
-        // 未创建（已 Dispose / 回滚复活的死条目）不画：原版 `aSprite.IsCreated` 守卫
-        // （ConsoleImagePart.cs:168；立绘层 EmueraConsole.cs:1844）。
-        if (!entry.isCreated) return
+        if (entry == null) {
+            // 原版同一条 AltText 回落（`ConsoleImagePart.cs:168` 的守卫不成立 ⇒ `:177,181`
+            // 画 `AltText`）：sprite 名查不到 = `cImage == null`。
+            drawChildImageAltText(canvas, image, altOriginLeft, childYPx, cmd, box)
+            return
+        }
+        // 未创建（已 Dispose / 回滚复活的死条目）不画图：原版 `aSprite.IsCreated` 守卫
+        // （ConsoleImagePart.cs:168；立绘层 EmueraConsole.cs:1844），但守卫**不成立的那一支**
+        // 画的是 AltText（`:175-182`），不是什么都不画。
+        if (!entry.isCreated) {
+            drawChildImageAltText(canvas, image, altOriginLeft, childYPx, cmd, box)
+            return
+        }
         val raster = entry.raster
         val inline = GraphicGeometry.inlineBox(
             givenWidthPx = image.widthPx,
@@ -720,7 +746,11 @@ class ScreenComposer(
             srcH = 0,
             anime = false,
         )
-        if (place[2] <= 0 || place[3] <= 0) return
+        if (place[2] <= 0 || place[3] <= 0) {
+            // 落位框不可用 = 这一帧拿不到可画的像素，与原版取不到帧同档 ⇒ 退 AltText。
+            drawChildImageAltText(canvas, image, altOriginLeft, childYPx, cmd, box)
+            return
+        }
         blitChildImage(
             canvas = canvas,
             src = raster,
@@ -730,6 +760,58 @@ class ScreenComposer(
             destH = place[3],
             box = box,
         )
+    }
+
+    /**
+     * `<img>` 缺帧回落：把 [InlineGraphic.Image.altText] 当**普通文本**画在段起点
+     * （spec: `ConsoleImagePart.cs:168` 守卫不成立 ⇒ `:177,181`）。
+     *
+     * 三条几何/配色逐条照官方那句 `DrawString(AltText, …, new Point(PointX, pointY))`：
+     * - x = 子行左沿 + **裸**列游标（[altOriginLeft]，**不加** `divShapeShift` —— 原版
+     *   那句用的是裸 `PointX`，shift 只在命中支 `:171` 加）；
+     * - y = 子行行顶（[childYPx]，**不加** `ypos`：原版 `pointY` 是行顶，`destRect.Y` 不参与）；
+     * - 色 = `Config.ForeColor`（该段 [DrawCmd.fore] 的快照；焦点/按下**不**换色 ——
+     *   原版这一支在 `isSelecting`/`isFocus` 判式之外）；
+     * - 裁到内容盒（与文字子行同一裁剪，`ConsoleDivPart.cs:183,196`）。
+     *
+     * headless 的「文本」是逐字形铺块（与 [drawChildRun] 同一占位画法、同一
+     * `GLYPH_INSET_PX`/`GLYPH_GAP_PX` 口径）：整串按码位逐格推进，超出内容盒的块由
+     * [Raster.fillRect] 边界裁掉。`altText == null`（生产侧没给，例如未接尺寸源的
+     * 展平结果）保持接入前的静默。
+     */
+    private fun drawChildImageAltText(
+        canvas: Raster,
+        image: InlineGraphic.Image,
+        altOriginLeft: Int,
+        childYPx: Int,
+        cmd: DrawCmd,
+        box: DivOverlayPlanner.Rect,
+    ) {
+        val alt = image.altText ?: return
+        if (alt.isEmpty()) return
+        val rowHeight = minOf(metrics.lineHeight, box.y + box.height - childYPx)
+        if (rowHeight <= 0) return
+        val boxTop = childYPx + GLYPH_INSET_PX
+        val boxHeight = rowHeight - 2 * GLYPH_INSET_PX
+        if (boxHeight <= 0) return
+        val clipLeft = box.x
+        val clipRight = box.x + box.width
+        val fore = opaque(cmd.fore)
+        var col = 0
+        var i = 0
+        while (i < alt.length) {
+            val cp = alt.codePointAt(i)
+            i += Character.charCount(cp)
+            val cells = metrics.cellsOf(cp)
+            val x0 = altOriginLeft + metrics.cellsToPixels(col)
+            val x1 = altOriginLeft + metrics.cellsToPixels(col + cells)
+            val left = maxOf(x0, clipLeft)
+            val right = minOf(x1 - GLYPH_GAP_PX, clipRight)
+            if (right > left) {
+                canvas.fillRect(left, boxTop, right - left, boxHeight, fore)
+            }
+            col += cells
+        }
     }
 
     /** 位图落像素：尺寸与源相等走 1:1 [Raster.blit]，否则最近邻；两边都裁到内容盒。 */
@@ -841,7 +923,14 @@ class ScreenComposer(
      * 同理 [focusedDiv]/[pressedDiv] 只收不用（签名对齐 [composeInto]，免得调用方在两处
      * 写不同的实参表）：div 子行的像素只在整屏路径画。
      *
+     * 正文行内图形段（[DrawCmd.graphic]，M10-GFX）在本路径同样落像素（MODERN-R10-A）：
+     * `<img>` 按 [sprites] 取帧、缺帧回落 AltText，色块/渐变/空白与整屏路径同一套助手；
+     * 行段列裁剪口径照旧 —— 含图形行的「按行 = 整屏」不变式由
+     * `ScreenComposerInlineGraphicTest` 对拍钉住。
+     *
      * @param strips 行段，按 `rowStart` 升序、行区间互不相交且都在 `[0, rowCount)` 内
+     * @param sprites 立绘注册表，透传给正文行内图形段（`<img>` 按名取像素）。本函数不画
+     *   立绘摆位 —— 场景里有立绘时调用方退整屏（前提 3）
      * @return 实际重绘的行数（= 各段行数之和）
      */
     fun repaintRows(
@@ -853,6 +942,7 @@ class ScreenComposer(
         focusedButton: HitTarget? = null,
         focusedDiv: ButtonLayer.DivFocus? = null,
         pressedDiv: ButtonLayer.DivFocus? = null,
+        sprites: SpriteTable = SpriteTable(),
     ): Int {
         requireCanvas(target)
         require(backgroundArgb ushr 24 == 255) {
@@ -881,7 +971,7 @@ class ScreenComposer(
                     row++
                 }
                 while (cursor < commands.size && commands[cursor].row < strip.rowEnd) {
-                    drawRun(target, commands[cursor], rowCount, focusedButton, x0, x1)
+                    drawRun(target, commands[cursor], rowCount, focusedButton, sprites, x0, x1)
                     cursor++
                 }
             } else {
@@ -945,15 +1035,26 @@ class ScreenComposer(
      *
      * [clipX0]/[clipX1] 是像素列裁剪（默认整幅画布宽）：按行重绘时只许在行段内作画，
      * 与 [Raster.fillRect] 逐像素合成等价 —— 每个像素仍只被覆盖一次，颜色与整屏重绘相同。
+     *
+     * 图形段（[DrawCmd.graphic] 非空，M10-GFX）在函数开头分流到 [drawInlineGraphic]
+     * （MODERN-R10-A）：Image / Rect / Space 的落像素口径见该函数 KDoc（C# 锚
+     * `ConsoleImagePart.cs:159-184`、`ConsoleRectangleShapePart.cs:38-48`、
+     * `ConsoleSpacePart.cs:14-16`）。文本路径逐字节不变。
      */
     private fun drawRun(
         canvas: Raster,
         cmd: DrawCmd,
         rowCount: Int,
         focusedButton: HitTarget?,
+        sprites: SpriteTable,
         clipX0: Int = 0,
         clipX1: Int = canvas.width,
     ) {
+        val graphic = cmd.graphic
+        if (graphic != null) {
+            drawInlineGraphic(canvas, cmd, graphic, rowCount, focusedButton, sprites, clipX0, clipX1)
+            return
+        }
         val top = rowTopPx(cmd.row, rowCount)
         val boxTop = top + GLYPH_INSET_PX
         val boxHeight = metrics.lineHeight - 2 * GLYPH_INSET_PX
@@ -980,6 +1081,229 @@ class ScreenComposer(
             i++
         }
     }
+
+    /**
+     * 正文行内图形段落像素（MODERN-R10-A）：[drawRun] 的图形分流。
+     *
+     * 三种负载与 div 子行图形同一套口径（[drawChildGraphic] 是 div 侧的同形实现）：
+     * - Image 命中支：x = 列游标 + `ShapePositionShift`（`ConsoleImagePart.cs:171`），
+     *   y = 行顶 + `ypos`（`:172`，**不加** `GLYPH_INSET_PX`）；
+     * - Rect：x 同样带 shift（`ConsoleRectangleShapePart.cs:43,57`），纯色必须补
+     *   alpha=0xFF（[InlineGraphic.Rect.colorArgb]）；**不换焦点/按下色**（官方 `:45`
+     *   只看 isSelecting，headless 无此通道；canvas 正文 Rect 同口径）；
+     * - Space：什么都不画（`ConsoleSpacePart.cs:14-16` 的空 DrawTo）。
+     *
+     * 竖向**不**裁到行带 —— 超高图照官方画到行外（`GraphicGeometry.kt:117-123`：
+     * 官方从不按行高缩图），只裁画布边界。
+     */
+    private fun drawInlineGraphic(
+        canvas: Raster,
+        cmd: DrawCmd,
+        graphic: InlineGraphic,
+        rowCount: Int,
+        focusedButton: HitTarget?,
+        sprites: SpriteTable,
+        clipX0: Int,
+        clipX1: Int,
+    ) {
+        val top = rowTopPx(cmd.row, rowCount)
+        val originLeft = metrics.cellsToPixels(cmd.colStart) + divShapeShift
+        when (graphic) {
+            is InlineGraphic.Space -> Unit
+            is InlineGraphic.Image -> drawInlineImage(
+                canvas = canvas,
+                cmd = cmd,
+                image = graphic,
+                originLeft = originLeft,
+                top = top,
+                focusedButton = focusedButton,
+                sprites = sprites,
+                clipX0 = clipX0,
+                clipX1 = clipX1,
+            )
+            is InlineGraphic.Rect -> {
+                if (graphic.widthPx <= 0 || graphic.heightPx <= 0) return
+                val left = originLeft + graphic.xOffsetPx
+                val rectTop = top + graphic.yOffsetPx
+                val box = inlineClipBox(canvas, clipX0, clipX1)
+                val stops = graphic.gradientArgb
+                if (stops != null && stops.size >= 2) {
+                    fillChildGradient(canvas, left, rectTop, graphic.widthPx, graphic.heightPx, stops, box)
+                } else {
+                    fillChildRect(canvas, left, rectTop, graphic.widthPx, graphic.heightPx, box, opaque(graphic.colorArgb))
+                }
+            }
+        }
+    }
+
+    /**
+     * 正文 `<img>` 命中支（MODERN-R10-A，与 [drawChildImage] 同口径）：
+     * 查表 → 按下/焦点图查不到退主图（`ConsoleImagePart.cs:164`）→ `entry == null` /
+     * `!isCreated` / 落位框非正 ⇒ [drawInlineImageAltText]（`:168` 守卫不成立 ⇒ `:175-182`）。
+     * 竖带块（[InlineGraphic.Image.bandResources] 非 null）优先走 [drawInlineBandStack]。
+     *
+     * emphasized 判式 = 行相等 + 列区间半开相交、**kind 无关**
+     * （[InlineGraphic.graphicPressed]，`DrawCmd.kt:209-210`；headless 无正文 pressed
+     * 通道，[focusedButton] 是唯一的强调来源，契约 MODERN-R10-A §2 焦点通道条）。
+     */
+    private fun drawInlineImage(
+        canvas: Raster,
+        cmd: DrawCmd,
+        image: InlineGraphic.Image,
+        originLeft: Int,
+        top: Int,
+        focusedButton: HitTarget?,
+        sprites: SpriteTable,
+        clipX0: Int,
+        clipX1: Int,
+    ) {
+        if (image.bandResources != null) {
+            drawInlineBandStack(canvas, image, originLeft, top, sprites, clipX0, clipX1)
+            return
+        }
+        val emphasized = focusedButton != null &&
+            InlineGraphic.graphicPressed(cmd, focusedButton.row, focusedButton.colStart, focusedButton.colEnd)
+        val requested = image.drawResource(emphasized)
+        var entry = sprites.find(requested)
+        if (entry == null && requested != image.resource) {
+            // 按下/焦点图缺失退主图（ConsoleImagePart.cs:164 的 cImageB == null 判式）。
+            entry = sprites.find(image.resource)
+        }
+        if (entry == null || !entry.isCreated) {
+            drawInlineImageAltText(canvas, cmd, image, top, clipX0, clipX1)
+            return
+        }
+        val raster = entry.raster
+        val inline = GraphicGeometry.inlineBox(
+            givenWidthPx = image.widthPx,
+            givenHeightPx = image.heightPx,
+            baseW = raster.width,
+            baseH = raster.height,
+            fontSizePx = metrics.fontPixelSize,
+        )
+        // headless sprite 无 pos/子矩形/动画帧 ⇒ 恒等返框（ASpriteSingle.cs:79-85 的
+        // IsEmpty 门；与 div 子行同一函数）。
+        val place = GraphicGeometry.spriteDestRect(
+            boxW = inline[0],
+            boxH = inline[1],
+            baseW = raster.width,
+            baseH = raster.height,
+            basePosX = 0,
+            basePosY = 0,
+            offsetX = 0,
+            offsetY = 0,
+            srcW = 0,
+            srcH = 0,
+            anime = false,
+        )
+        if (place[2] <= 0 || place[3] <= 0) {
+            drawInlineImageAltText(canvas, cmd, image, top, clipX0, clipX1)
+            return
+        }
+        blitChildImage(
+            canvas = canvas,
+            src = raster,
+            destX = originLeft + place[0],
+            destY = top + image.yOffsetPx + place[1],
+            destW = place[2],
+            destH = place[3],
+            box = inlineClipBox(canvas, clipX0, clipX1),
+        )
+    }
+
+    /**
+     * 正文 `<img>` 缺帧回落（MODERN-R10-A）：把 [InlineGraphic.Image.altText] 当普通文本
+     * 画在段起点，与 [drawChildImageAltText] 逐像素同形（`ConsoleImagePart.cs:175-182`）：
+     * x = **裸**列游标（**不加** `divShapeShift` —— shift 只在命中支 `:171` 加）、
+     * y = 行顶（**不加** `ypos`：官方那句的 `pointY` 是行顶）、色 = `opaque(cmd.fore)`
+     * （焦点/按下**不**换色 —— 这一支在换图判式 `:163-167` 之外）、裁 `[clipX0, clipX1]`。
+     * `altText == null` 保持静默（R9-B 既有口径）。
+     */
+    private fun drawInlineImageAltText(
+        canvas: Raster,
+        cmd: DrawCmd,
+        image: InlineGraphic.Image,
+        top: Int,
+        clipX0: Int,
+        clipX1: Int,
+    ) {
+        val alt = image.altText ?: return
+        if (alt.isEmpty()) return
+        val boxTop = top + GLYPH_INSET_PX
+        val boxHeight = metrics.lineHeight - 2 * GLYPH_INSET_PX
+        if (boxHeight <= 0) return
+        val originLeft = metrics.cellsToPixels(cmd.colStart)
+        val fore = opaque(cmd.fore)
+        var col = 0
+        var i = 0
+        while (i < alt.length) {
+            val cp = alt.codePointAt(i)
+            i += Character.charCount(cp)
+            val cells = metrics.cellsOf(cp)
+            val x0 = originLeft + metrics.cellsToPixels(col)
+            val x1 = originLeft + metrics.cellsToPixels(col + cells)
+            val left = maxOf(x0, clipX0)
+            val right = minOf(x1 - GLYPH_GAP_PX, clipX1)
+            if (right > left) {
+                canvas.fillRect(left, boxTop, right - left, boxHeight, fore)
+            }
+            col += cells
+        }
+    }
+
+    /**
+     * 正文竖带块（MODERN-R10-A S3，`ImageBandMerge` 端口自产物、官方无此形态）：
+     * 逐片堆叠到 `widthPx × heightPx` 目标块，片高按该片 `raster.height` 占总高占比分配
+     * （同 canvas `drawBandStack` 的 srcH 占比式，`CanvasConsoleView.kt:4414-4445`）；
+     * 缺片/未创建**跳过不推进 y**；整块**不**回落 altText（canvas 同口径）。
+     */
+    private fun drawInlineBandStack(
+        canvas: Raster,
+        image: InlineGraphic.Image,
+        originLeft: Int,
+        top: Int,
+        sprites: SpriteTable,
+        clipX0: Int,
+        clipX1: Int,
+    ) {
+        val bands = image.bandResources ?: return
+        if (bands.isEmpty()) return
+        val destW = image.widthPx
+        val destH = image.heightPx
+        if (destW <= 0 || destH <= 0) return
+        var totalSrcH = 0
+        val entries = ArrayList<SpriteTable.Entry?>(bands.size)
+        for (name in bands) {
+            val entry = sprites.find(name)
+            if (entry != null && entry.isCreated) {
+                entries.add(entry)
+                totalSrcH += entry.raster.height
+            } else {
+                entries.add(null)
+            }
+        }
+        if (totalSrcH <= 0) return
+        val box = inlineClipBox(canvas, clipX0, clipX1)
+        var y = top + image.yOffsetPx
+        var i = 0
+        while (i < bands.size) {
+            val entry = entries[i]
+            if (entry != null) {
+                val dh = destH * entry.raster.height / totalSrcH
+                blitChildImage(canvas, entry.raster, originLeft, y, destW, dh, box)
+                y += dh
+            }
+            i++
+        }
+    }
+
+    /**
+     * 正文行内图形的裁剪盒：横向 `[clipX0, clipX1]`（repaintRows 行段口径），纵向取
+     * 整幅画布高 —— 超高图画到行带外（S2/S3 同口径，官方从不按行高压缩），只裁画布边界。
+     * 复用 div 助手的 [DivOverlayPlanner.Rect] 参数形状，采样/裁剪算式只有一份。
+     */
+    private fun inlineClipBox(canvas: Raster, clipX0: Int, clipX1: Int): DivOverlayPlanner.Rect =
+        DivOverlayPlanner.Rect(clipX0, 0, clipX1 - clipX0, canvas.height)
 
     /**
      * 取字色：`isFocus` 的按钮段用 [DrawCmd.focusFore]（原文 `ButtonColor`，

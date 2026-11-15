@@ -51,11 +51,20 @@ class FlowControlGuardTest {
     }
 
     private fun compileOne(vararg lines: String) {
-        // 本类钉「融合前」指令形状：显式关掉 MODERN-T1 条件位融合（上游 171e7d1b 后缺省开）。
-        val c = ErbProgramCompiler(fuseEvalJump = false)
+        val c = ErbProgramCompiler()
         c.compileFunction(FuncSig("TEST"), parse(*lines))
         c.build()
     }
+
+    /**
+     * 与 [ErbProgramCompiler] 构造期同源的档位镜像（`ErbProgramCompiler.kt:253` 读同一个
+     * 系统属性）：缺省 = MODERN-T1 融合开，IF/SIF/ELSEIF/WHILE 的 INT 非字面量条件位发
+     * `_EVAL_INT_JZ`(246) 超指令。关态旧形状由下面的 `SIF 元数据行透明 关态旧形状照旧`
+     * 用构造参数 `fuseEvalJump = false` 显式钉住（T1 契约：关态 = `-Deratw.perf.noEvalJumpFuse=true`
+     * 或测试显式传 false）——gradle 命令行的 `-D` 不进 test worker（test 任务只透传点名属性），
+     * 故关态档以构造参数为测试面的权威开关。
+     */
+    private val evalJumpFused: Boolean = !java.lang.Boolean.getBoolean("eratw.perf.noEvalJumpFuse")
 
     // ------------------------------------------------------------------
     // F1：SIF 修饰边界（FunctionIdentifier.cs:3038-3070）
@@ -106,21 +115,68 @@ class FlowControlGuardTest {
         // # 行在原版不进逻辑行链（ErbLoader.cs:413-422 解析后直接 continue，不 addLine），
         // 故 SIF 的目标仍是其后第一条可执行语句：`SIF A / #DIM … / PRINTL Y / PRINTL Z`
         // 的补跳必须落在 PRINTL Z 上，而不是把 #DIM 当目标消费掉。
+        // 缺省档（T1 融合开，BOARD 171e7d1b5）：条件位压成一条 _EVAL_INT_JZ
+        // （a=表达式、b=目标槽、c=相对偏移，OpcodeTable.kt:757-771），不再有独立
+        // _JUMP_IF_FALSE；跳转语义不变 —— 目标 = pc+1+c，与旧 b（相对偏移）口径等价。
+        // 关态档见下一条用例（构造参数 fuseEvalJump = false 钉旧形状）。
+        val c = ErbProgramCompiler()
+        val fb = c.compileFunction(
+            FuncSig("TEST"),
+            parse("SIF A", "#DIM TMPVAL", "PRINTL \"Y\"", "PRINTL \"Z\""),
+        )
+        val p = c.build()
+        val insns = (fb.entryPc until fb.endPc)
+            .map { it to p.instructionAt(it) }
+        if (evalJumpFused) {
+            val jz = insns.filter { it.second.op == Opcode._EVAL_INT_JZ }
+            assertEquals(1, jz.size, "融合档 SIF 只发射一条 _EVAL_INT_JZ，实际 ${jz.size}")
+            assertEquals(
+                0, insns.count { it.second.op == Opcode._JUMP_IF_FALSE },
+                "融合档不得再发独立 _JUMP_IF_FALSE（求值 + 跳假已压成一条）",
+            )
+            val (pc, ins) = jz.single()
+            assertSifJumpTarget(p, pc, ins.c)
+        } else {
+            val jif = insns.filter { it.second.op == Opcode._JUMP_IF_FALSE }
+            assertEquals(1, jif.size, "关态 SIF 只发射一条 _JUMP_IF_FALSE，实际 ${jif.size}")
+            assertEquals(
+                0, insns.count { it.second.op == Opcode._EVAL_INT_JZ },
+                "关态不得发融合超指令 _EVAL_INT_JZ",
+            )
+            val (pc, ins) = jif.single()
+            assertSifJumpTarget(p, pc, ins.b)
+        }
+    }
+
+    /** 两档共用的被测属性：补跳目标 = # 行之后那条可执行语句（PRINTL Z 的语句 marker）。 */
+    private fun assertSifJumpTarget(p: com.eratw.port.core.code.Program, pc: Int, offset: Int) {
+        val target = pc + 1 + offset
+        val t = p.instructionAt(target)
+        assertEquals(Opcode.PRINT, t.op, "补跳目标应是语句 marker（PRINTL 归一为 PRINT，OpcodeTable.kt:710）")
+        assertEquals("PRINTL \"Z\"", p.statement(t.a).raw, "SIF 的目标是 # 行之后那条可执行语句")
+    }
+
+    @Test
+    fun `SIF 元数据行透明 关态旧形状照旧`() {
+        // 关态档（T1 契约的关态第二形态：构造参数显式传 false，与
+        // `-Deratw.perf.noEvalJumpFuse=true` 走同一条编译路径）：恰一条 _JUMP_IF_FALSE、
+        // 0 条融合超指令；「# 元数据行透明」的被测属性两档一致。
         val c = ErbProgramCompiler(fuseEvalJump = false)
         val fb = c.compileFunction(
             FuncSig("TEST"),
             parse("SIF A", "#DIM TMPVAL", "PRINTL \"Y\"", "PRINTL \"Z\""),
         )
         val p = c.build()
-        val jumps = (fb.entryPc until fb.endPc)
+        val insns = (fb.entryPc until fb.endPc)
             .map { it to p.instructionAt(it) }
-            .filter { it.second.op == Opcode._JUMP_IF_FALSE }
-        assertEquals(1, jumps.size, "SIF 只发射一条 _JUMP_IF_FALSE，实际 ${jumps.size}")
-        val (pc, ins) = jumps.single()
-        val target = pc + 1 + ins.b
-        val t = p.instructionAt(target)
-        assertEquals(Opcode.PRINT, t.op, "补跳目标应是语句 marker（PRINTL 归一为 PRINT，OpcodeTable.kt:710）")
-        assertEquals("PRINTL \"Z\"", p.statement(t.a).raw, "SIF 的目标是 # 行之后那条可执行语句")
+        val jif = insns.filter { it.second.op == Opcode._JUMP_IF_FALSE }
+        assertEquals(1, jif.size, "关态 SIF 只发射一条 _JUMP_IF_FALSE，实际 ${jif.size}")
+        assertEquals(
+            0, insns.count { it.second.op == Opcode._EVAL_INT_JZ },
+            "关态不得发融合超指令 _EVAL_INT_JZ",
+        )
+        val (pc, ins) = jif.single()
+        assertSifJumpTarget(p, pc, ins.b)
     }
 
     @Test
@@ -167,7 +223,7 @@ class FlowControlGuardTest {
     fun `TRYCALLLIST 体内普通语句报错`() {
         val known = setOf("GOLDEN_LISTCALLED")
         val e = assertFailsWith<CompileException> {
-            val c = ErbProgramCompiler(fuseEvalJump = false)
+            val c = ErbProgramCompiler()
             c.compileFunction(
                 FuncSig("TEST"),
                 parse(
@@ -187,7 +243,7 @@ class FlowControlGuardTest {
     fun `TRYGOTOLIST 体内 IF 块报错`() {
         // 块结构语句同样命中 :1090-1096（原版 nestCheck 对指令行一律检查）。
         val e = assertFailsWith<CompileException> {
-            val c = ErbProgramCompiler(fuseEvalJump = false)
+            val c = ErbProgramCompiler()
             c.compileFunction(
                 FuncSig("TEST"),
                 parse(

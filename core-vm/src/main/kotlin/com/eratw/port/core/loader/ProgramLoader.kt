@@ -202,6 +202,10 @@ object ProgramLoader {
         } catch (e: StackOverflowError) {
             throw ErbcLoadException("${prefix(source)}嵌套过深（表达式/参数记录递归超过栈容量）", e)
         }
+        // 装载收尾武装：给惰性池的三件运行期缓存（节点表 / 规范化代表表 / 内建串池）接上界。
+        // 装载趟本身无界（去重读数与改造前逐字相同）；从这一刻起运行期物化走有界重置，
+        // 见 ErbcStream.kt 的 RUNTIME_NODE_ENTRY_BUDGET 注记（2026-11-14 OOM 根因）。
+        program.armRuntimeCodeCacheBudgets()
         return program
     }
 
@@ -736,6 +740,8 @@ object ProgramLoader {
         // 段名带 `program.` 前缀：[LoadStageMark] 的契约是「[LoadStages] 常量 + program. 前缀」，
         // 成功屏的分段读数与 `LazyStatementDecodeTest` 的「峰值归属必须是解码内部阶段」都以它判。
         if (!internedInline) mark?.onStage("program.${LoadStages.INTERN}")
+        // 装载收尾武装（与 [load] 同口径）：惰性池三件运行期缓存接上界，运行期物化走有界重置。
+        program.armRuntimeCodeCacheBudgets()
         return program
     }
 

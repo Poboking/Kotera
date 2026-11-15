@@ -1,5 +1,7 @@
 package com.eratw.port.render.adapter
 
+import com.eratw.port.core.host.CellWidth
+import com.eratw.port.render.Grid
 import com.eratw.port.render.RunKind
 import com.eratw.port.render.TextRun
 import com.eratw.port.render.displaylist.InlineGraphic
@@ -109,5 +111,98 @@ class HtmlShapeBandTest {
             .single().graphic as InlineGraphic.Rect
         assertEquals(1, g.heightPx, "h = 18 * 1 / 100 = 0.18 ⇒ 0，但原版抬到 1")
         assertEquals(10, g.widthPx)
+    }
+
+    /**
+     * 0.2.46「战斗能力不显示升级进度条」的**两把尺**同值闸：
+     * [HtmlRunFlatten.flushRectBands] 把连续 `1px` 色块合成一个矩形（占格 = 总像素宽 ÷ 半角格宽），
+     * core 折行预算 [CellWidth.visibleHtmlCells] 必须给同一个数。分叉时真机 136 列下
+     * `Lv2 [条] Lv3` 会被 core 折成三行，条与等级标签分家。
+     */
+    @Test
+    fun `连续色块的折行预算等于展平后的占格`() {
+        val html = gradientBar(180, 1, yUnits = 37, hUnits = 63)
+        val rect = HtmlRunFlatten(metrics, scriptFontPixelSize = 18)
+            .flatten(
+                TextRun(
+                    html, fore = 0xC0C0C0, back = 0, styleMask = 0,
+                    fontName = "msgothic", kind = RunKind.HTML,
+                ),
+            )
+            .mapNotNull { it.graphic as? InlineGraphic.Rect }
+            .single()
+        val budget = CellWidth.visibleHtmlCells(html, 18L)
+        println("PARITY render=${rect.widthCells} budget=$budget htmlLen=${html.length}")
+        assertEquals(20, rect.widthCells, "180 × 1px = 180px ⇒ ceil(180 / 9.36) = 20 格")
+        assertEquals(rect.widthCells, budget, "折行预算与渲染展平必须同一把尺")
+    }
+
+    /**
+     * 0.2.46 根修的**全形态同值闸**：同一条 HTML 在 core 折行预算
+     * [CellWidth.visibleHtmlCells] 与 render 展平后的实际占格上必须给出同一个数。
+     *
+     * 分叉过的四类形态逐条钉在这里：连续条带（逐块各计 1 格）、条带中夹文本 / `<br>`
+     * （渲染跨内容合并、core 分段）、y/h 同值异写（core 按原始参数文本、render 按折算
+     * 像素判同）、以及普通单块 / img / space / 横向偏移（防修复波及其他形态）。
+     *
+     * 唯一**不纳入**本闸的是错误形态 `<shape>` 的 AltText 文本回落：core 按标签原文
+     * 近似计宽、render 画的是规范化重建文案，两者差 1 格。这是登记过的文本近似偏差
+     * （`CellWidthHeadlessShapeRulerTest` 钉的就是「标签原文」读数），不是图形占宽的两把尺，
+     * 且只影响本就超宽的裸标签行；按 ADR-005 保留原版重建文案语义，不改 core 的近似。
+     */
+    @Test
+    fun `全形态 折行预算等于渲染展平占格`() {
+        val cases = linkedMapOf(
+            "连续180x1px条" to gradientBar(180, 1, 37, 63),
+            "连续60x3px条" to gradientBar(60, 3, 37, 63),
+            "条+尾随文本" to gradientBar(9, 2, 30, 64) + "[3％]少女祈祷中…",
+            "Lv2条Lv3混排" to "Lv2 " + gradientBar(180, 1, 37, 63) + " Lv3",
+            "单块四参rect" to "<shape type='rect' param='0,1px,440px,2px' color='#FF8800'>",
+            "两块不同y" to "<shape type='rect' param='0, 10, 100px, 20px' color='#110000'>" +
+                "<shape type='rect' param='0, 40, 100px, 20px' color='#220000'>",
+            "带横向偏移两块" to "<shape type='rect' param='5px,37,10px,63' color='#110000'>" +
+                "<shape type='rect' param='5px,37,10px,63' color='#220000'>",
+            "单参rect" to "<shape type='rect' param='216px' color='red'>",
+            "shapeSpace" to "<shape type='space' param='40px'>文字",
+            "条中夹文本" to gradientBar(3, 10, 30, 64) + "X" + gradientBar(3, 10, 30, 64),
+            "条中夹br" to gradientBar(3, 10, 30, 64) + "<br>" + gradientBar(3, 10, 30, 64),
+            "y同值异写" to "<shape type='rect' param='0,100,3px,63' color='#110000'>" +
+                "<shape type='rect' param='0,18px,3px,63' color='#220000'>",
+            "w混合px与百分比" to "<shape type='rect' param='0,37,3px,63' color='#110000'>" +
+                "<shape type='rect' param='0,37,300,63' color='#220000'>",
+            "img显式width" to "<img src='pic' width='180px'>AB",
+            "文本+条混排" to " " + gradientBar(180, 1, 37, 63),
+            "条+space+条" to gradientBar(3, 10, 30, 64) +
+                "<shape type='space' param='2px'>" + gradientBar(3, 10, 30, 64),
+        )
+        for ((name, html) in cases) {
+            val runs = HtmlRunFlatten(metrics, scriptFontPixelSize = 18).flatten(
+                TextRun(html, fore = 0xC0C0C0, back = 0, styleMask = 0, fontName = "msgothic", kind = RunKind.HTML),
+            )
+            val rendered = runs.sumOf { it.graphic?.widthCells ?: Grid.cells(it.text) }
+            val budget = CellWidth.visibleHtmlCells(html, 18L)
+            assertEquals(
+                budget, rendered,
+                "[$name] 折行预算与渲染展平必须同一把尺（段宽 ${runs.map { it.graphic?.widthCells ?: Grid.cells(it.text) }}）",
+            )
+        }
+    }
+
+    /**
+     * 条带前后文本的**段序**：`HTML_PRINT " " + HTML_RECT_BAR(…)` 这类语料
+     * （`UI_Components_&_Tables.ERB:1303` 等 5 处）里空格在条之前，展平后不许被挪到条后。
+     */
+    @Test
+    fun `文本在条带之前时 段序不颠倒`() {
+        val runs = HtmlRunFlatten(metrics, scriptFontPixelSize = 18).flatten(
+            TextRun(
+                "名 " + gradientBar(9, 2, 30, 64) + " 値",
+                fore = 0xC0C0C0, back = 0, styleMask = 0, fontName = "msgothic", kind = RunKind.HTML,
+            ),
+        )
+        assertEquals(3, runs.size, "文本 / 条 / 文本 三段")
+        assertEquals("名 ", runs[0].text, "前缀文本先落段")
+        assertTrue(runs[1].graphic is InlineGraphic.Rect, "条带居中")
+        assertEquals(" 値", runs[2].text, "后缀文本最后落段")
     }
 }

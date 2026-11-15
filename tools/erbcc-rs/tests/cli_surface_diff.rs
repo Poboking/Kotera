@@ -31,8 +31,10 @@
 //     本格从「钉分歧」翻成全文 parity（仍保留行位置与其余行逐字节全等两格）。
 //   ④ `c2_scan_use_index_not_file_separator_full_parity` —— `use-index 不是文件:` 与 F1 同形缺陷，
 //     已用单源 `types::kotlin_path_text` 收进 parity，并带「正斜杠变体不等于基准」的反证。
-// ①（USAGE 写明 `--allow` 坏字节 ⇒ 退 2）钉在 `tests/cli_contract.rs`（USAGE 逐字节 + 措辞两格），
+// ①（USAGE 写明 `--allow` 坏字节 ⇒ 退 2）钉在 `tests/cli_contract.rs`（USAGE 措辞两格），
 // 入库基准 `tests/data/rust-scan/kotlin-usage.txt` 由真 Kotlin 工具链 `--help` 重出。
+// MODERN-R9-A 起 Rust help 是 Kotlin help 的**声明式子集**：对拍口径从「逐字节相等」翻成
+// 「基准逐行应用 `usage-subset.tsv` 后相等」，本表不参与该对拍（只在 `--allow` 两格上间接依赖）。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -87,6 +89,29 @@ struct Run {
 
 fn decode_nl(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace("\r\n", "\n")
+}
+
+/// 把 stderr 里 `[erbcc-parallel] 切片段耗时 Nms` 那一格的毫秒数掩成 `N`，其余字节原样保留。
+///
+/// 这一行出自 kernel 编译期的留痕（`CorpusCompile.kt:825`），两腿各自拉起一条 JVM、各自实测
+/// ⇒ 同一格两腿的毫秒数永不互等，全文比对在这里是假红；行首到 `ms ` 之外的部分
+/// （`→ 切片数 / 解析失败 / 二进制跳过`）与产出机的路径无关、是确定读数，仍参与逐字节比对。
+/// 除这一格毫秒数外不做任何其它归一 —— 空格、路径、其余耗时数字照旧不抹。
+fn mask_slice_timing(stderr: &str) -> String {
+    const PREFIX: &str = "[erbcc-parallel] 切片段耗时 ";
+    let mut out = String::with_capacity(stderr.len());
+    let mut rest = stderr;
+    while let Some(i) = rest.find(PREFIX) {
+        out.push_str(&rest[..i + PREFIX.len()]);
+        rest = &rest[i + PREFIX.len()..];
+        let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits > 0 && rest[digits..].starts_with("ms") {
+            out.push('N');
+            rest = &rest[digits..];
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn run_case(args: &[&str]) -> (Run, Run) {
@@ -358,8 +383,10 @@ fn c4_audit_allow_missing_or_malformed_rc_parity() {
     assert_eq!(k.rc, r.rc, "[c4/allow-missing] 退出码不等");
     assert_eq!(k.rc, 1, "[c4/allow-missing] rc 来自 --strict 下的硬差异，不是缺档本身（②）");
     assert_eq!(
-        k.stderr, r.stderr,
-        "[c4/allow-missing] 绝对路径档的 stderr 两腿必须逐字节相同（折行尾后）"
+        mask_slice_timing(&k.stderr),
+        mask_slice_timing(&r.stderr),
+        "[c4/allow-missing] 绝对路径档的 stderr 两腿必须逐字节相同（折行尾后；\
+         唯一例外是 kernel 各自实测的「切片段耗时 Nms」一格，掩数不掩行）"
     );
     assert_allow_missing_line_count(&k, 1, "Kotlin 腿");
     assert_allow_missing_line_count(&r, 1, "Rust 腿");
@@ -467,9 +494,9 @@ fn c4_audit_allow_缺档相对路径_路径形态两腿全文parity() {
             .join("\n")
     };
     assert_eq!(
-        strip(&k.stderr),
-        strip(&r.stderr),
-        "[③] 除缺档行以外两腿 stderr 必须逐字节相同"
+        mask_slice_timing(&strip(&k.stderr)),
+        mask_slice_timing(&strip(&r.stderr)),
+        "[③] 除缺档行以外两腿 stderr 必须逐字节相同（切片段耗时 Nms 一格掩数不掩行）"
     );
     assert!(
         Path::new(&out_k).is_file() && Path::new(&out_r).is_file(),

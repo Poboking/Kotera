@@ -11,7 +11,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * trace 命令（CONTRACT-DBG1 路2）：环形缓冲装探针 → 跑完输出 `行号 语句摘要 耗时`。
+ * trace 命令（CONTRACT-DBG1 路2）：环形缓冲装探针 → 跑完输出 `函数 行号 语句摘要 耗时`。
  * **本文件与 Trace.kt 一样依赖路1 语句探针（ProcessRuntime.statementProbe），
  * 本 worktree 未合流前编译阻塞，属预期状态**；其余命令的单测已在写本文件之前跑绿。
  */

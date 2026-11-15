@@ -270,8 +270,9 @@ class VariablePoolTest {
     fun `RAND 语义与 CompatiRAND`() {
         val s = VariableStore(randProvider = RandProvider { bound -> bound - 1 })
         assertEquals(9L, s.readInt("RAND", idx(10)))
-        assertFailsWith<CodeEE> { s.readInt("RAND", idx(0)) }
-        assertFailsWith<CodeEE> { s.readInt("RAND", idx(-5)) }
+        // 4.981 `VariableToken.cs:1425-1434` RandToken：i <= 0 首次 PrintError 后返回 0。
+        assertEquals(0L, s.readInt("RAND", idx(0)))
+        assertEquals(0L, s.readInt("RAND", idx(-5)))
 
         // CompatiRAND：GetNextRand(32768) % n，n=0 返回 0，n<0 取绝对值
         val c = VariableStore(

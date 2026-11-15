@@ -219,6 +219,28 @@ class EntityKernelTest {
     }
 
     @Test
+    fun `显式声明的反向类型与master先后顺序无关`() {
+        // 声明事务只闸「autoInverse 的反向边类型必须也声明」，不保证谁先谁后
+        // （DeclarationRegistry 的 relationship-schemas 域按 manifest 顺序进表，
+        // 判据见 DeclarationRegistryTest.relationshipAutoInverseRequiresDeclaredInverseType）。
+        // 内核若在收显式声明的同一趟循环里边插 master 的派生反向 schema，
+        // 「master 在前 + 显式反向在后」这份合法 manifest 就会被误判成重复类型而拒建。
+        val master = RelationshipSchema("MIRROR", autoInverse = true, inverseName = "MIRRORED_BY")
+        val explicit = RelationshipSchema("MIRRORED_BY", directed = false)
+        for (relations in listOf(listOf(master, explicit), listOf(explicit, master))) {
+            val k = kernel(relations = relations)
+            val a = k.create(1, "PERSON")
+            val b = k.create(1, "PERSON")
+            assertTrue(
+                k.addRelation(b, "MIRRORED_BY", a),
+                "两种顺序都得收下这份 manifest，且用户显式版优先于派生版",
+            )
+            // 用户版是无向的；派生版恒有向。反向问询判真才是用户版赢了。
+            assertTrue(k.hasRelation(a, "MIRRORED_BY", b), "无向形状来自显式声明，不是内核派生的有向缺省")
+        }
+    }
+
+    @Test
     fun `destroy无条件摘除直接相连的边`() {
         val k = kernel()
         val a = k.create(1, "PERSON")
@@ -326,5 +348,37 @@ class EntityKernelTest {
         assertEquals(0L, k.getRelationValue(a, "PARENT", b2))
         assertTrue(k.addRelation(a, "PARENT", b2))
         assertEquals(0L, k.getRelationValue(a, "PARENT", b2))
+    }
+
+    @Test
+    fun `全位域身份 - 同槽同世代错包段判不存在`() {
+        val k = kernel()
+        val real = k.create(2, "PERSON")
+        val forged = EntityIdCodec.encode(
+            1,
+            EntityIdCodec.generationOf(real),
+            EntityIdCodec.handleSlotOf(real),
+        )
+        assertNotEquals(real, forged)
+        assertTrue(k.exists(real))
+        assertFalse(k.exists(forged), "同槽同世代但 pkg 段不同 = 另一实体身份，必须判不存在")
+        assertEquals(0, k.stateOf(forged))
+        assertFalse(k.setState(forged, EntityLifecycle.RETIRED))
+        assertFalse(k.destroy(forged), "错包段 id 不得销毁同槽真实体")
+        assertEquals(EntityLifecycle.ACTIVE, k.stateOf(real))
+        assertEquals(1, k.liveCount)
+    }
+
+    @Test
+    fun `高位置槽位按不存在处理不越界`() {
+        val k = kernel()
+        // pkg/generation 合法，但 handleSlot 最高位置 1（按无符号 = 2_308_? 级）：
+        // 实际容量到不了，必须在数组寻址前拒绝，不能抛 AIOOBE。
+        val malformed = EntityIdCodec.encode(1, 0, 0x89AB_CDEF.toInt())
+        assertTrue(EntityIdCodec.isWellFormed(malformed))
+        assertFalse(k.exists(malformed))
+        assertEquals(0, k.stateOf(malformed))
+        assertFalse(k.destroy(malformed))
+        assertFalse(k.setInt(malformed, "level", 1L))
     }
 }

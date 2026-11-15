@@ -16,12 +16,12 @@ import kotlin.test.assertTrue
  * **装载期实参签名校验**（CORE-05，[ArgSignatureCheck]）的合成用例。
  *
  * 现场：此前没有任何装载期实参校验，`CALL F(1)` 打到 `@F(A, B)` 上被省略的位静默按
- * `0` / `""` 执行；原版在装载期即红（spec: `CalledFunction.cs:138-199`
- * `ConvertArg` 的 TooManyFuncArgs / CanNotOmitArgWithMessage / CanNotConvert*，
+ * `0` / `""` 执行；原版在装载期即红（spec: `CalledFunction.cs:167-199`
+ * `ConvertArg` 的 CanNotOmitArgWithMessage / CanNotConvert*，
  * 表达式位内建走 `IdentifierDictionary.cs:576-585` → `FunctionMethod.cs:302-330`）。
  *
- * 本文件锁四件事（对应任务的四条合成用例）：
- * 1. 实参**过多**（个数 > 形参）；
+ * 本文件锁四件事：
+ * 1. 实参**过多**= **不告警**（4.981 口径：多余的实参静默丢弃，见下条用例的 C# 锚）；
  * 2. 实参**过少**（形参位无实参、无默认值；`CompatiFuncArgOptional=NO` 口径）；
  * 3. **类型不符**（整型实参进 `$` 后缀字符串形参）；
  * 4. **正确**调用零告警；
@@ -111,19 +111,19 @@ class ArgSignatureCheckTest {
     // 四条合成用例
     // ------------------------------------------------------------------
 
+    /**
+     * 实参多于形参**不告警**：4.981 的 `ConvertArg` 静默丢弃多余实参
+     * （`reference/emuera-skia-4.981/Emuera/Runtime/Script/Process.CalledFunction.cs:212-357`；
+     * 1.824 的 TooManyFuncArgs 硬判已删）。现场形态：
+     * `fromEN/Addition/lib/DATEPICKER.ERB:56` `GET_MONTH(ACTIVE_MONTH, 1)` 打在 `@GET_MONTH(ARG)`。
+     */
     @Test
-    fun `实参过多 - 个数大于形参`() {
+    fun `实参过多 - 4_981 口径不告警`() {
         val program = compile(*callCase("CALL F(1, 2)", "@F(A)"))
-        val ws = ArgSignatureCheck.checkProgram(program)
-        assertEquals(1, ws.size, "只报一处")
-        val w = ws.single()
-        assertEquals(ArgSignatureWarningKind.TOO_MANY, w.kind)
-        assertEquals("F", w.callee)
-        assertEquals("CALLER", w.caller)
-        assertEquals(2, w.argc)
-        assertEquals(1, w.arity)
-        assertTrue(w.message.contains("参数过多"), "文案：${w.message}")
-        assertTrue(w.message.contains("形参 1 个，实参 2 个"), "文案带个数上下文：${w.message}")
+        assertTrue(
+            ArgSignatureCheck.checkProgram(program).isEmpty(),
+            "多余实参在 4.981 是合法写法，装载期诊断不得报参数过多",
+        )
     }
 
     @Test
@@ -174,8 +174,8 @@ class ArgSignatureCheckTest {
     @Test
     fun `严格模式 - 聚合逐条文案并抛`() {
         val fns = arrayOf(
-            Fn("CALLER", listOf("@CALLER", "CALL F(1, 2)", "CALL G(1)", "RETURN")),
-            Fn("F", listOf("@F(A)", "RETURN")),
+            Fn("CALLER", listOf("@CALLER", "CALL F(1)", "CALL G(1)", "RETURN")),
+            Fn("F", listOf("@F(A, B)", "RETURN")),
             Fn("G", listOf("@G(A, B)", "RETURN")),
         )
         val program = compile(*fns)
@@ -188,17 +188,16 @@ class ArgSignatureCheckTest {
         } catch (e: CompileException) {
             e
         }
-        // 逐条文案：过多 + 过少各一句
-        assertTrue(ex.message!!.contains("参数过多"), "过多文案：${ex.message}")
-        assertTrue(ex.message!!.contains("不能省略"), "过少文案：${ex.message}")
+        // 逐条文案：两个省略位各一句
+        assertTrue(ex.message!!.contains("不能省略"), "省略文案：${ex.message}")
         assertTrue(ex.message!!.contains("失败 2 处"), "聚合计数：${ex.message}")
     }
 
     @Test
     fun `宽松模式 - 只收集不抛`() {
         val fns = arrayOf(
-            Fn("CALLER", listOf("@CALLER", "CALL F(1, 2)", "CALL G(1)", "RETURN")),
-            Fn("F", listOf("@F(A)", "RETURN")),
+            Fn("CALLER", listOf("@CALLER", "CALL F(1)", "CALL G(1)", "RETURN")),
+            Fn("F", listOf("@F(A, B)", "RETURN")),
             Fn("G", listOf("@G(A, B)", "RETURN")),
         )
         // strict 缺省 false：同样错的脚本，编译照常返回 Program
@@ -326,9 +325,10 @@ class ArgSignatureCheckTest {
 
     @Test
     fun `校验不碰产物 - 重复 build 幂等`() {
+        // 用「省略位」作读数源：多余实参在 4.981 口径下不产告警，空读数证明不了幂等。
         val fns = arrayOf(
-            Fn("CALLER", listOf("@CALLER", "CALL F(1, 2)", "RETURN")),
-            Fn("F", listOf("@F(A)", "RETURN")),
+            Fn("CALLER", listOf("@CALLER", "CALL F(1)", "RETURN")),
+            Fn("F", listOf("@F(A, B)", "RETURN")),
         )
         val parsed = fns.map { parse(*it.lines.toTypedArray()) }
         val labels = parsed.map { it.filterIsInstance<FuncLabelStmt>().first() }

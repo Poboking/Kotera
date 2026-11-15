@@ -5,7 +5,6 @@ import com.eratw.port.core.code.VmConfig
 import com.eratw.port.core.compile.ErbProgramCompiler
 import com.eratw.port.core.compile.ExprCallTable
 import com.eratw.port.core.compile.FuncSig
-import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.host.LineBufferConsoleSink
 import com.eratw.port.core.lexer.LineKind
@@ -19,7 +18,6 @@ import com.eratw.port.core.vars.DimSpec
 import com.eratw.port.core.vars.VariableStore
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -32,12 +30,15 @@ import kotlin.test.assertTrue
  *   （ParserMediator.cs:125-136），装载完 `FlushWarningList` 统一上屏（:143-158）——
  *   **该行不执行也见警告**；
  * - 装载趟只对被标错的行 continue，同文件其余行照常挂载（ErbLoader.cs:1598-1600）；
- * - 真执行到该行才由 `throw new CodeEE(currentLine.ErrMes)` 抛出记录值（Process.cs:1017-1019）。
+ * - 官方真执行到该行时 `throw new CodeEE(currentLine.ErrMes)`（Process.cs:1017-1019）。
+ *   本移植版按**通用策略**（2026-11-09）**不抛**：打一行同文案的错误行后跳过该语句、
+ *   脚本继续（有意偏离 ADR-005，登记见 specs/verify-notes.md §35）。
  *
  * 一个 program 里放三种东西：一条**未注册** CALLSHARP（`ModelSet`）、一条**已注册** CALLSHARP
  * （`Chat`，本用例只在本地注册表登记，与 app 生产装配无关）、一个普通可执行函数。四条断言：
  * (a) 装载趟只报未注册那条；(b) 再预填一次不重复报（幂等）；(c) 普通函数照常执行、
- * 已注册那条照常执行到方法体；(d) 未注册那条执行期抛与装载期警告逐字同一句。
+ * 已注册那条照常执行到方法体；(d) 未注册那条执行期打出与装载期警告逐字同一句，
+ * **且脚本继续跑到它后面的语句**。
  */
 class SharpLoadRejectTest {
 
@@ -78,7 +79,8 @@ class SharpLoadRejectTest {
      * - `@SHARP_REJECT_PROBE`：未注册名 `ModelSet`（4.981 语料 `对话调用.erb:35` 的原形）；
      * - `@SHARP_HIT_PROBE`：已注册名 `Chat`（`对话调用.erb:36` 的原形）；
      * - `@PLAIN_PROBE`：普通可执行函数（写一个全局量，掉尾 RESULT 清零不碰它）；
-     * - `@SHARP_MIX_DRIVER`（入口）：按「普通 → 已注册 → 未注册」的顺序 CALL。
+     * - `@SHARP_MIX_DRIVER`（入口）：按「普通 → 已注册 → 未注册」的顺序 CALL，
+     *   末尾再补一句普通赋值 —— 用来证「未注册行只被跳过、没把脚本打断」。
      */
     private fun compileMix(): Program {
         val c = ErbProgramCompiler()
@@ -108,6 +110,7 @@ class SharpLoadRejectTest {
                 "CALL PLAIN_PROBE()",
                 "CALL SHARP_HIT_PROBE()",
                 "CALL SHARP_REJECT_PROBE()",
+                "PLAIN_BOX = PLAIN_BOX + 1",
             ),
             known,
             ExprCallTable(),
@@ -122,14 +125,25 @@ class SharpLoadRejectTest {
         store.declareUserVar(DimSpec("PLAIN_BOX", isStr = false, dims = IntArray(0), isGlobal = true))
     }
 
-    private fun runtimeWith(program: Program, store: VariableStore): ProcessRuntime =
+    private fun runtimeWith(
+        program: Program,
+        store: VariableStore,
+        sink: LineBufferConsoleSink =
+            LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900),
+    ): ProcessRuntime =
         ProcessRuntime(
             program,
             store,
             FunctionTable(emptyList()),
             VmConfig(maxStepsPerRun = 100_000),
-            consoleSink = LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900),
+            consoleSink = sink,
         )
+
+    /** 控制台上屏的**错误行**文案（printError 通道；Kind.ERROR 段）。 */
+    private fun errorLines(sink: LineBufferConsoleSink): List<String> =
+        sink.snapshot().flatMap { it.segments }
+            .filter { it.kind == LineBufferConsoleSink.Kind.ERROR }
+            .map { it.text }
 
     @Test
     fun `无桩负控 装载趟只拒未注册那条 普通函数与已注册行照常执行`() {
@@ -155,15 +169,21 @@ class SharpLoadRejectTest {
             "第二次预填不重复报（SharpLinkTable 已落笔的行跳过）",
         )
 
-        // (c) + (d)：普通函数先跑完，已注册行跑进方法体，未注册行才抛记录值。
-        val rt = runtimeWith(program, store)
-        val e = assertFailsWith<CodeEE> { rt.execute() }
-        assertEquals(REJECT_MESSAGE, e.message, "执行期抛装载趟记录值（Process.cs:1017-1019）")
+        // (c) + (d)：普通函数跑完、已注册行跑进方法体；未注册行只打提示不中断，
+        // 脚本继续跑到驱动末尾那句（PLAIN_BOX 7 → 8）。
+        val sink = LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900)
+        val rt = runtimeWith(program, store, sink)
+        rt.execute()
         assertEquals(
-            7L,
+            8L,
             store.readInt("PLAIN_BOX", longArrayOf()),
-            "普通函数照常执行（ErbLoader.cs:1598-1600 只对被标错的行 continue）",
+            "跳过错行后脚本继续；普通函数照常执行（ErbLoader.cs:1598-1600 只对被标错的行 continue）",
         )
         assertEquals(1, chatHits.size, "已注册的 Chat 照常执行到方法体")
+        assertEquals(
+            listOf(REJECT_MESSAGE),
+            errorLines(sink),
+            "未注册行打出装载趟记录值（官方文案原样），且每行只一次",
+        )
     }
 }

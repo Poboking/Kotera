@@ -415,6 +415,23 @@ class RootedSaveFileIo(
     }.getOrDefault(emptyList())
 
     /**
+     * RT2 M43R：根目录顶层**全部**普通文件名（[SaveFolderIo.rootFileNames] 的生产实现）。
+     *
+     * 与 [rootSaveFileNames] 同一枚举面、不做形状过滤 —— 形状判定（本体/伴生件）在
+     * [SaveFolderMigration]（从 `sidecarCompanionPaths` 反推），枚举层不复制第二份形状知识。
+     * 枚举失败（根不可读）给空表 ⇒ GC 一步都不走，不抛。
+     */
+    override fun rootFileNames(): List<String> = runCatching {
+        Files.list(base).use { stream ->
+            stream
+                .filter { p -> Files.isRegularFile(p) }
+                .map { p -> p.fileName.toString() }
+                .sorted()
+                .collect(java.util.stream.Collectors.toList())
+        }
+    }.getOrDefault(emptyList())
+
+    /**
      * 原版 `File.Move(src, dst)`（Config.cs:577 / :583）：两端都必须落在 [base] 内（越界 = false），
      * 目标已存在时**不覆盖**（.NET 的 `File.Move` 抛 `IOException` ⇒ false ⇒ 整批迁移中止）。
      */

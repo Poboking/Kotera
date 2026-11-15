@@ -127,8 +127,9 @@ class LockWatchMountPinTest {
      * 无条件取时钟 / 无条件进监视器 / 顺手分配：
      * 1. 守卫口 `LockWatch.handleOrNull()` 在被钉文件里出现（上面第一条用例已含）；
      * 2. 每个挂载点恰好三发 `System.nanoTime()`：守卫式 enter、块内 `acquiredNs`、记录点。
-     *    **全文件 nanoTime 总数 = 守卫 + 获锁 + 记录**，多出来的那一发就是无条件取时钟
-     *    （关时也要付）⇒ 零开销形状破了；
+     *    **全文件 nanoTime 总数 = 守卫 + 获锁 + 记录 + 功能钟**，多出来的那一发就是
+     *    账外取时钟 ⇒ 先核它属不属于探针（探针必须守卫式，关时不取时钟），合法的
+     *    功能钟才照注释补账。现账本内的功能钟只有进度帧注入钟两发（见用例内注释）；
      * 3. 关时不分配：挂载点只交基本类型（`Int` id + 三个 `Long` 时标 + `Long` tag），
      *    源码里不许出现 `LockWatch(` 构造、也不许在 `noteSegment` 实参里拼字符串
      *    （读数行的拼装归 [LockWatch.readout]，只在读侧锁外做）。
@@ -140,46 +141,45 @@ class LockWatchMountPinTest {
      */
     @Test
     fun `关时新挂载点不取时钟不进监视器不分配的形状还在`() {
-        for (rel in listOf(
-            "src/main/kotlin/com/eratw/port/core/host/LineBufferConsoleSink.kt",
-            "src/main/kotlin/com/eratw/port/core/loader/ErbcStream.kt",
+        for ((rel, wantFeatureClock) in listOf(
+            // LineBufferConsoleSink 带进度帧注入钟 2 发（见下）；ErbcStream 无功能钟 ⇒ 0。
+            "src/main/kotlin/com/eratw/port/core/host/LineBufferConsoleSink.kt" to 2,
+            "src/main/kotlin/com/eratw/port/core/loader/ErbcStream.kt" to 0,
         )) {
             val text = source(rel) ?: throw AssertionError("读不到 $rel")
-            // 只数代码行：注释里出现的 `System.nanoTime()` 不是取时钟。
-            val code = text.lineSequence().filterNot { ln ->
-                val t = ln.trimStart()
-                t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")
-            }.joinToString("\n")
             val guards =
-                Regex("if \\(watch === null\\) 0L else System\\.nanoTime\\(\\)").findAll(code).count()
+                Regex("if \\(watch === null\\) 0L else System\\.nanoTime\\(\\)").findAll(text).count()
             val acquired =
-                Regex("if \\(watch !== null\\) acquiredNs = System\\.nanoTime\\(\\)").findAll(code).count()
-            val records = Regex("watch\\.noteSegment\\(").findAll(code).count()
+                Regex("if \\(watch !== null\\) acquiredNs = System\\.nanoTime\\(\\)").findAll(text).count()
+            val records = Regex("watch\\.noteSegment\\(").findAll(text).count()
             assertEquals(2, guards, "$rel 的守卫式取时钟应是 2 处（两个挂载点各一处），实读 $guards")
             assertEquals(2, acquired, "$rel 块内的 acquiredNs 应是 2 处，实读 $acquired")
             assertEquals(2, records, "$rel 的记录调用应是 2 处，实读 $records")
-            // 只数两个**锁挂载点代码块**（`val enterNs = ...` 到 `watch.noteSegment(...)`）：
-            // 文件里另有 `progressClockMs` 的帧保活默认参数（perf-yield 波 089ac4a7 新增）也含
-            // System.nanoTime()，它不在锁挂载点内，不算「关时也要付」的那一发。
-            val mountBlocks = Regex(
-                "val enterNs = if \\(watch === null\\)[\\s\\S]*?watch\\.noteSegment\\([\\s\\S]*?\\)",
-            ).findAll(code).toList()
-            assertEquals(2, mountBlocks.size, "$rel 应有两个锁挂载点代码块，实读 ${mountBlocks.size}")
-            val nanoPerBlock = mountBlocks.map { b -> Regex("System\\.nanoTime\\(\\)").findAll(b.value).count() }
+            // 进度帧注入钟（PERF-YIELD 进度帧档，merge 310629c4 / 本仓落点 089ac4a70）补进账本，恰 2 发：
+            //   ① `progressClockMs` 构造参数的缺省实现 `{ System.nanoTime() / 1_000_000L }` ——
+            //      进度帧 500ms 节流 / 150ms 静默双闸的功能时钟，deleteLine / publishProgressFrame /
+            //      appendGroup 三处**功能侧**调用。它与 LockWatch 探针无关、不受 watch 守卫：
+            //      探针关时它照常服务功能，不是探针开销，不破「探针零开销」不变式；
+            //   ② 该参数 KDoc 写缺省值的例文（文档字面，非代码）。
+            //   其余文件（ErbcStream）没有功能钟 ⇒ 计 0，公式不变。
+            val progressClock =
+                Regex("System\\.nanoTime\\(\\)\\s*/\\s*1_000_000L?").findAll(text).count()
             assertEquals(
-                listOf(3, 3), nanoPerBlock,
-                "$rel 每个挂载点块应恰好 3 发 System.nanoTime()（守卫 + 获锁 + 记录），实读 $nanoPerBlock",
+                wantFeatureClock, progressClock,
+                "$rel 的进度帧注入钟发数漂了（LineBufferConsoleSink 应恰 2 发 = 缺省实现 1 + " +
+                    "KDoc 例文 1；ErbcStream 应 0 发），实读 $progressClock",
             )
-            val nano = nanoPerBlock.sum()
+            val nano = Regex("System\\.nanoTime\\(\\)").findAll(text).count()
             assertEquals(
-                guards + acquired + records, nano,
-                "$rel 的 System.nanoTime() 总数应 = 守卫 $guards + 获锁 $acquired + 记录 $records = " +
-                    "${guards + acquired + records}（每处挂载点三发）；实读 $nano —— " +
-                    "多出来的那一发就是**无条件取时钟**，关时也要付，零开销形状破了",
+                guards + acquired + records + progressClock, nano,
+                "$rel 的 System.nanoTime() 总数应 = 守卫 $guards + 获锁 $acquired + 记录 $records + " +
+                    "进度帧注入钟 $progressClock = ${guards + acquired + records + progressClock}；实读 $nano —— " +
+                    "账外的那一发先核属不属于探针（探针必须守卫式，关时不取时钟），" +
+                    "合法的功能钟照上行注释补进账本",
             )
-            assertFalse("LockWatch(" in code, "$rel 出现了 LockWatch 构造形态 —— 探针不该自己分配对象")
+            assertFalse("LockWatch(" in text, "$rel 出现了 LockWatch 构造形态 —— 探针不该自己分配对象")
             assertFalse(
-                Regex("noteSegment\\([^)]*\\+").findAll(code).any(),
+                Regex("noteSegment\\([^)]*\\+").findAll(text).any(),
                 "$rel 的 noteSegment 实参里出现了字符串拼接 —— 挂载点必须只交基本类型",
             )
         }

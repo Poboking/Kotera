@@ -33,12 +33,12 @@ import kotlin.test.assertTrue
  *
  * 上报读数：8 份 / 4 台 / app 0.2.39（11-04 00:15–17:27），抛点
  * `ProcessRuntime.stampPosition` ← `executeStatementRaw`，ERB 帧链 `SOURCE_DOWNBASE ← SOURCE_CHECK`。
- * 「行625」是 0 基行号，对应物理行 626（本闸直接读真文件那两行，不抄副本）。
+ * 「行625」是 0 基行号，对应物理行 626（261017 语料；2026-11-14 换代 261111 后上报锚移到
  *
  * 语料原文（4.981 `ERB/ステータス計算関連/SOURCE/SOURCE_EXTRA.ERB`，函数 `@SOURCE_DOWNBASE(ARG)`
  * 定义起于 :584）：
- * - `:626` `DOWNBASE:ARG:体力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:体力)`
- * - `:627` `DOWNBASE:ARG:気力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:気力)`
+ * - `:630` `DOWNBASE:ARG:体力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:体力)`
+ * - `:631` `DOWNBASE:ARG:気力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:気力)`
  * 这两行是全语料仅有的 `POWER(0.95,…)` 形态：4.980 的同名文件更短、无此二行
  * （`grep -rn "POWER(0.95" 4.980/ERB` 实测 0 命中）。
  *
@@ -57,8 +57,8 @@ import kotlin.test.assertTrue
  *
  * ## 断言口径的两处补记（2026-11-05 本路复核）
  *
- * ① 「626 / 627 结构一致」这条钉的是**归一化掉行号之后**的同构，不是裸 toString 相等：
- *   两行的行号戳本就不同（626 / 627），裸比较永远红。归一化前先把差异面各自钉死
+ * ① 「630 / 631 结构一致」这条钉的是**归一化掉行号之后**的同构，不是裸 toString 相等：
+ *   两行的行号戳本就不同（630 / 631），裸比较永远红。归一化前先把差异面各自钉死
  *   （行号戳全集、逐结点列位点相等、关键词下标原文 = 清扫魔法 + 体力 / 気力），
  *   实测两棵树除这两轴外逐字符相同 ⇒ **解析没偏，不需要动 main**；
  *   上一轮的红是拿裸结构串比较造成的，属断言钉错，不是引擎缺陷。
@@ -90,12 +90,12 @@ class PowerFloatRealCorpusTest {
 
     private companion object {
         /** 真文件 1 基物理行号（上报「行625」= 0 基的 625）。 */
-        const val LINE_626 = 626
-        const val LINE_627 = 627
+        const val LINE_630 = 630
+        const val LINE_631 = 631
 
         /** 原文快照：与本闸读取的真行做逐字比较，防止装置读错行。 */
-        const val RAW_626 = "DOWNBASE:ARG:体力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:体力)"
-        const val RAW_627 = "DOWNBASE:ARG:気力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:気力)"
+        const val RAW_630 = "DOWNBASE:ARG:体力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:体力)"
+        const val RAW_631 = "DOWNBASE:ARG:気力 = TOINT(POWER(0.95,ITEM:清扫魔法) * DOWNBASE:ARG:気力)"
     }
 
     /** 真文件某物理行的原文（编码探测与拆行走装载链同一套 [LogicalLineReader.readAllLines]）。 */
@@ -165,18 +165,18 @@ class PowerFloatRealCorpusTest {
     }
 
     @Test
-    fun `真语料 626 行原文与上报形态逐字一致`() {
+    fun `真语料 630 行原文与上报形态逐字一致`() {
         val root = erbRoot
         Assumptions.assumeTrue(root != null, "缺 4.981 语料根（ERATW_GAMEDIR / ERATW_CORPUS 都没指到 4.981）：跳过")
-        assertEquals(RAW_626, realRaw(LINE_626))
-        assertEquals(RAW_627, realRaw(LINE_627))
+        assertEquals(RAW_630, realRaw(LINE_630))
+        assertEquals(RAW_631, realRaw(LINE_631))
     }
 
     @Test
-    fun `真语料 626 行 POWER 静态晋升为浮点且求值不抛`() {
+    fun `真语料 630 行 POWER 静态晋升为浮点且求值不抛`() {
         val root = erbRoot
         Assumptions.assumeTrue(root != null, "缺 4.981 语料根：跳过")
-        val term = realRhs(LINE_626)
+        val term = realRhs(LINE_630)
         val power = findFirst(term) { it is FuncCall && it.name == "POWER" }
         assertNotNull(power, "真语料行里必须有 POWER 调用节点")
         assertEquals(
@@ -195,10 +195,10 @@ class PowerFloatRealCorpusTest {
     }
 
     @Test
-    fun `真语料 626 行的读数随幂与扣减基数变化`() {
+    fun `真语料 630 行的读数随幂与扣减基数变化`() {
         val root = erbRoot
         Assumptions.assumeTrue(root != null, "缺 4.981 语料根：跳过")
-        val term = realRhs(LINE_626)
+        val term = realRhs(LINE_630)
         // POWER 若被钉成 INT，0.95^k 一律截成 0 ⇒ 整式恒 0；这三档读数把「贯通」与「不抛」同时钉住
         assertEquals(100L, run(term, StubReader(itemOwned = 0)), "0.95^0 × 100 = 100")
         assertEquals(95L, run(term, StubReader(itemOwned = 1)), "0.95^1 × 100 = 95")
@@ -208,11 +208,11 @@ class PowerFloatRealCorpusTest {
     }
 
     @Test
-    fun `真语料 627 行与 626 行是同一条式的两次实例化`() {
+    fun `真语料 631 行与 630 行是同一条式的两次实例化`() {
         val root = erbRoot
         Assumptions.assumeTrue(root != null, "缺 4.981 语料根：跳过")
-        val t626 = realRhs(LINE_626)
-        val t627 = realRhs(LINE_627)
+        val t626 = realRhs(LINE_630)
+        val t627 = realRhs(LINE_631)
         val power627 = findFirst(t627) { it is FuncCall && it.name == "POWER" }
         assertNotNull(power627)
         assertEquals(OperandType.FLOAT, power627.operandType, "気力行同样晋升浮点")
@@ -221,8 +221,8 @@ class PowerFloatRealCorpusTest {
         // ② `DOWNBASE` 的关键词下标原文（体力 / 気力）。归一化前先把这两处各自钉死，
         // 这样 shape() 的归一化不致退化成「放宽断言换绿」：列位点、结点类型、operandType
         // 晋升链全部逐字符相同，任一偏移都会在这里红。
-        assertEquals(setOf(LINE_626, -1), preorder(t626).map { it.line }.toSet(), "626 行树里的行号戳")
-        assertEquals(setOf(LINE_627, -1), preorder(t627).map { it.line }.toSet(), "627 行树里的行号戳")
+        assertEquals(setOf(LINE_630, -1), preorder(t626).map { it.line }.toSet(), "626 行树里的行号戳")
+        assertEquals(setOf(LINE_631, -1), preorder(t627).map { it.line }.toSet(), "627 行树里的行号戳")
         assertEquals(
             preorder(t626).map { it.col },
             preorder(t627).map { it.col },

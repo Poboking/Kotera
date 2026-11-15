@@ -4,6 +4,8 @@ import com.eratw.port.core.code.CodeBuilder
 import com.eratw.port.core.code.Opcode
 import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.CallArg
+import com.eratw.port.core.code.FunctionSlice
+import com.eratw.port.core.code.SliceVarArgSite
 import com.eratw.port.core.code.SlotAddr
 import com.eratw.port.core.code.StatementAliases
 import com.eratw.port.core.expr.Binary
@@ -23,6 +25,8 @@ import com.eratw.port.core.expr.Unary
 import com.eratw.port.core.expr.UnaryAfter
 import com.eratw.port.core.expr.VarRef
 import com.eratw.port.core.fn.Builtins
+import com.eratw.port.core.fn.CompileBuiltinView
+import com.eratw.port.core.fn.FullRegistryView
 import com.eratw.port.core.patch.CallSentinels
 import com.eratw.port.core.stmt.AssignStmt
 import com.eratw.port.core.stmt.Argument
@@ -250,6 +254,55 @@ class ErbProgramCompiler(
      */
     private val fuseEvalJump: Boolean = !java.lang.Boolean.getBoolean("eratw.perf.noEvalJumpFuse"),
     /**
+     * 编译期内建查表视图（ENGC-3b，B6 组长接线）：erbcc `--engine-profile` 通道注入
+     * [com.eratw.port.core.fn.EngineSurface]（按目标档函数面门控，被裁名返回 null 走
+     * 既有「未定义的函数」路径，D7/I4）。**缺省 [FullRegistryView] = 旧路径**：三个
+     * 查表点（`padRuntimeCalls` 的表缺席分支、语句位 `needsExprArgs`、
+     * [ExprCallTable.classify]）与改前直查 registry 逐位相同，eraTW 无 profile 编译
+     * 产物逐字节不变（I7）。erbcc 全量与既有装置不传本参数。
+     */
+    val builtinView: CompileBuiltinView = FullRegistryView,
+    /**
+     * 目标档「不可见内建名」收集钩（ENGC-3b `--engine-report` 的数据面，B6 组长接线）：
+     * [ArgSignatureCheck] 的内建调用位扫描里，视图判 null（被裁或未注册）且非用户函数的
+     * [FuncCall] 经此上报 `(名字, 行)`；行可为 -1（规范折叠抹掉行号的池节点），消费方
+     * 自行取舍。**缺省 null = 零开销零行为差**；仅在注入非缺省 [builtinView] 的编译
+     * （erbcc profile 通道）有意义，全量缺省路径不接（I7）。
+     */
+    val builtinUnknownSink: ((String, Int) -> Unit)? = null,
+    /**
+     * 循环条件融合开关（PERF-LOOP，**缺省开**）：FOR 的 `_LT/_GT` + `_JUMP_IF_FALSE`
+     * 发射成 `_LT_JZ/_GT_JZ`（a=左槽、b=右槽、c=相对偏移），省一条比较/跳假指令。
+     *
+     * **2026-11-09 翻默认**（全量门后）：4.980 全语料开态两次编译四件产物逐字节相同（确定性）；
+     * 4.981 金标四类门（E2EGolden / InternedArgsE2E / PerfGoldenInternedEquivalence /
+     * L3HashChain）开/关两档全绿，且 `full-run.norm.txt`/`section-run.norm.txt`/`sections.csv`
+     * 三件控制台输出逐字节相同；T5 双路差分 + R2 replay 全绿。
+     * 收益：动态指令 −10.4%（`GMF_METHOD_UPDATE` 87,200→78,120）/ −10.2%
+     * （`CHARA_MOVEMENT` 11,574,711→10,394,437）；同进程双产物 A/B（24 对 × 50 calls）
+     * 对象树通道 1.024×、flat 通道 1.029×（>1 = 融合更快）。
+     *
+     * **关态** = `-Deratw.perf.noCompareJumpFuse=true`：产物与翻默认前逐字节相同
+     * （4.980 全语料 `program.erbc`/`program.meta`/`program.stmt.idx` 三件 sha256 分别
+     * `bba8020e…`/`d0defa2d…`/`9aee54c9…`；manifest 只有 compiler-digest/compiler-sources
+     * 随源码树变化）。A/B 与回归排查请用这个开关，不要改代码。
+     */
+    private val fuseCompareJump: Boolean = !java.lang.Boolean.getBoolean("eratw.perf.noCompareJumpFuse"),
+    /**
+     * 形状内联开关族（每形状独立，默认开）：
+     * `-Deratw.perf.noInline<Shape>` 回退；`-Deratw.perf.inline<Shape>Any` 仅反向证明。
+     */
+    private val inlineChkDatenowOn: Boolean =
+        !java.lang.Boolean.getBoolean("eratw.perf.noInlineChkDatenow"),
+    private val inlineChkDatenowAny: Boolean =
+        java.lang.Boolean.getBoolean("eratw.perf.inlineChkDatenowAny"),
+    private val inlineGetMapIdOn: Boolean =
+        !java.lang.Boolean.getBoolean("eratw.perf.noInlineMapId") &&
+            !java.lang.Boolean.getBoolean("eratw.perf.noInlineGetMapId"),
+    private val inlineGetMapIdAny: Boolean =
+        java.lang.Boolean.getBoolean("eratw.perf.inlineGetMapIdAny"),
+
+    /**
      * **Mod 包编译档**（D-3 kojo 派发覆盖契约，era-arch §16）：true = 保留
      * `CALL SUPER(...)` / `TRYCALL SUPER(...)` 表面语法，编译成 `_CALL.a` 的 super 哨兵
      * （[CallSentinels.CALL_SUPER_SENTINEL] / [CallSentinels.TRY_CALL_SUPER_SENTINEL]），
@@ -260,7 +313,18 @@ class ErbProgramCompiler(
      * 语料本来可以定义 `@SUPER`，全局保留会改变普通语料的编译结果。
      */
     val allowSuperCalls: Boolean = false,
+    /**
+     * 形状内联的被调体表：`uppercase(函数名) -> 已解析 body`。
+     * 名字只用于**查体**；形状判定在 [FunctionPass.tryInlineShape] 里只看 AST。
+     */
+    val inlineShapeBodies: Map<String, List<Statement>> = emptyMap(),
 ) {
+
+    /** 每形状实际内联的调用点数（只计正式发射遍）。 */
+    private val inlineShapeInlined = LinkedHashMap<String, Int>()
+    val inlineChkDatenowInlined: Int get() = inlineShapeInlined["chkDatenow"] ?: 0
+    val inlineGetMapIdInlined: Int get() = inlineShapeInlined["getMapId"] ?: 0
+    fun inlineShapeSummary(): String = inlineShapeInlined.entries.joinToString(" ") { "${it.key}=${it.value}" }
 
     private val b: CodeBuilder = codeBuilder ?: CodeBuilder()
 
@@ -332,7 +396,73 @@ class ErbProgramCompiler(
         statements: List<Statement>,
         knownFunctions: Set<String> = emptySet(),
         exprCalls: ExprCallTable? = null,
-    ): FunctionBytecode {
+    ): FunctionBytecode =
+        compileFunctionImpl(sig, statements, knownFunctions, exprCalls, capture = false).first
+
+    /**
+     * 与 [compileFunction] 逐条同序地真编译一次，并把本函数对共享 [CodeBuilder] 的
+     * 全部可重放副作用折成 [FunctionSlice] 返回 —— 命中时 [adoptFunction] 重放的就是它。
+     * 只在新能力开态的未命中路径调用；关态一行都不执行。
+     */
+    fun compileFunctionRecorded(
+        sig: FuncSig,
+        statements: List<Statement>,
+        knownFunctions: Set<String> = emptySet(),
+        exprCalls: ExprCallTable? = null,
+    ): FunctionSlice = try {
+        checkNotNull(compileFunctionImpl(sig, statements, knownFunctions, exprCalls, capture = true).second)
+    } catch (t: Throwable) {
+        // 失败路径不留录制中的切片：否则下次 beginSliceCapture 的 check 会连锁失败，
+        // 且失败桩重试（capture=false）会把后续池追加记进一段永不被收尾的孤立日志。
+        b.abortSliceCapture()
+        throw t
+    }
+
+    /**
+     * 命中重放：把 [slice] 的字节原样重放进共享 [CodeBuilder]，再按 [compileFunction]
+     * 的登记序逐条复刻 declareFunction / declaredNames / varArgSites / setFunctionSlots /
+     * declareLabel / compiled / layout.endFunction（declaredNames 追加序 = FuncMeta.index 来源）。
+     *
+     * [sig] 默认取 [slice.sig]；缓存键不含函数名字，命中时调用方必须传**当前函数**的 sig
+     * （函数体与环境相同、名字不同的两个函数共享同一片切片）。
+     */
+    fun adoptFunction(slice: FunctionSlice, sig: FuncSig = slice.sig): FunctionBytecode {
+        val entryPc = b.adoptSlice(slice)
+        val index = b.declareFunction(sig.name, entryPc, sig.arity, sig.arity, sig.paramNames)
+        declaredNames.add(sig.name.uppercase())
+        varArgSites.addAll(slice.varArgSites.map {
+            VarArgSite(it.target, it.position, entryPc + it.relEvalPc, it.isStr)
+        })
+        b.setFunctionSlots(index, slice.slotCount)
+        val labels = LinkedHashMap<String, Int>()
+        val labelIndexes = LinkedHashMap<String, Int>()
+        for (l in slice.labels) {
+            val pc = entryPc + l.relPc
+            labels[l.name] = pc
+            labelIndexes[l.name] = b.declareLabel(index, l.name, pc)
+        }
+        val fb = FunctionBytecode(
+            sig = sig,
+            index = index,
+            entryPc = entryPc,
+            instructionCount = slice.wordCount,
+            slotCount = slice.slotCount,
+            labels = labels,
+            labelIndexes = labelIndexes,
+            callRefs = slice.callRefs.map { it.at(entryPc) },
+        )
+        compiled.add(fb)
+        layout.endFunction()
+        return fb
+    }
+
+    private fun compileFunctionImpl(
+        sig: FuncSig,
+        statements: List<Statement>,
+        knownFunctions: Set<String>,
+        exprCalls: ExprCallTable?,
+        capture: Boolean,
+    ): Pair<FunctionBytecode, FunctionSlice?> {
         val key = sig.name.uppercase()
         if (key in declaredNames) {
             throw CompileException(sig.name, -1, "函数重复声明: ${sig.name}")
@@ -351,6 +481,7 @@ class ErbProgramCompiler(
         probe.run()
         // pass 2：正式发射（先发射、成功后才登记 —— CMP-26）
         val entryPc = b.here()
+        if (capture) b.beginSliceCapture()
         // 局部布局不再参与发射（契约 C1：具名变量只在 VariableStore）；临时槽基址 = 暂存区之上。
         // 标签只在 pass 内记账，函数表条目建立后再由 `pass.labels` 统一升格导出
         // （CMP-26：失败不得留下半个函数/半张标签表）。
@@ -397,7 +528,17 @@ class ErbProgramCompiler(
         )
         compiled.add(fb)
         layout.endFunction()
-        return fb
+        // 录制收尾必须在登记之后：登记动作不发射指令，count 不变，切片覆盖的仍是
+        // [entryPc, 函数尾) 全段；相对化用的入口基址就是本函数的 entryPc。
+        val slice = if (capture) {
+            b.captureSlice(
+                entryPc, sig, slotCount, pass.labels, pass.callRefs,
+                pass.varArgSites.map {
+                    SliceVarArgSite(it.target, it.position, it.evalPc, it.isStr)
+                },
+            )
+        } else null
+        return fb to slice
     }
 
     /**
@@ -465,7 +606,14 @@ class ErbProgramCompiler(
         patchRefArgEvals()
         // 装载期实参签名校验（CORE-05）：显式传缺省口径（宽松，无静态全局可设）；
         // 告警经返回值交调用方，本钩子不接（邻波接线装载返回值 / BootMetadata 时在此挂出）。
-        return b.build(entry).also { ArgSignatureCheck.checkProgram(it, ArgSignatureCheck.Options()) }
+        return b.build(entry).also {
+            ArgSignatureCheck.checkProgram(
+                it,
+                ArgSignatureCheck.Options(),
+                builtinView,
+                builtinUnknownSink,
+            )
+        }
     }
 
     // ======================================================================
@@ -855,6 +1003,17 @@ class ErbProgramCompiler(
         private fun emitJumpIfTrue(slotRaw: Int, line: Int): Fixup {
             val pc = out.emit(Opcode._JUMP_IF_TRUE, slotRaw, 0, 0, line)
             return Fixup(pc, 2)
+        }
+
+        /** `_LT/_GT` + `_JUMP_IF_FALSE` 的融合发射；[cmp] 只收 `_LT`/`_GT`。 */
+        private fun emitCompareJump(cmp: Int, leftRaw: Int, rightRaw: Int, line: Int): Fixup {
+            val op = when (cmp) {
+                Opcode._LT -> Opcode._LT_JZ
+                Opcode._GT -> Opcode._GT_JZ
+                else -> error("emitCompareJump 只支持 _LT/_GT: $cmp")
+            }
+            val pc = out.emit(op, leftRaw, rightRaw, 0, line)
+            return Fixup(pc, 3)
         }
 
         /** GOTO 到函数内 `$标签`（前向引用允许，run() 结束统一回填）。 */
@@ -1574,11 +1733,16 @@ class ErbProgramCompiler(
                 // 会让 FOR A,0,5 多跑一轮，已废。
                 val cmpOp = if (stepConst < 0) Opcode._GT else Opcode._LT
                 val cntT = evalTemp(cnt, s.line)          // _EVAL_INT 读 VariableStore
-                val c = alloc()
-                out.emit(cmpOp, local(c), local(cntT), local(endT), s.line)
-                free(cntT)
-                exits.add(emitJumpIfFalse(local(c), s.line))
-                free(c)
+                if (fuseCompareJump) {
+                    exits.add(emitCompareJump(cmpOp, local(cntT), local(endT), s.line))
+                    free(cntT)
+                } else {
+                    val c = alloc()
+                    out.emit(cmpOp, local(c), local(cntT), local(endT), s.line)
+                    free(cntT)
+                    exits.add(emitJumpIfFalse(local(c), s.line))
+                    free(c)
+                }
             } else {
                 // 非常量步长（审计 finding 2）：符号/零值**运行期**才知道，但读的是 FOR 行的
                 // 步长快照槽（[stepSlot]，CORE-03）而不是重求步长表达式。
@@ -1600,20 +1764,30 @@ class ErbProgramCompiler(
                 free(cPos)
                 // 正步长：cnt < end
                 val cntPos = evalTemp(cnt, s.line)
-                val cPosCmp = alloc()
-                out.emit(Opcode._LT, local(cPosCmp), local(cntPos), local(endT), s.line)
-                free(cntPos)
-                exits.add(emitJumpIfFalse(local(cPosCmp), s.line))
-                free(cPosCmp)
+                if (fuseCompareJump) {
+                    exits.add(emitCompareJump(Opcode._LT, local(cntPos), local(endT), s.line))
+                    free(cntPos)
+                } else {
+                    val cPosCmp = alloc()
+                    out.emit(Opcode._LT, local(cPosCmp), local(cntPos), local(endT), s.line)
+                    free(cntPos)
+                    exits.add(emitJumpIfFalse(local(cPosCmp), s.line))
+                    free(cPosCmp)
+                }
                 val toDone = emitJumpAlways(s.line)
                 // 负步长：cnt > end
                 patch(listOf(toNeg), out.here())
                 val cntNeg = evalTemp(cnt, s.line)
-                val cNegCmp = alloc()
-                out.emit(Opcode._GT, local(cNegCmp), local(cntNeg), local(endT), s.line)
-                free(cntNeg)
-                exits.add(emitJumpIfFalse(local(cNegCmp), s.line))
-                free(cNegCmp)
+                if (fuseCompareJump) {
+                    exits.add(emitCompareJump(Opcode._GT, local(cntNeg), local(endT), s.line))
+                    free(cntNeg)
+                } else {
+                    val cNegCmp = alloc()
+                    out.emit(Opcode._GT, local(cNegCmp), local(cntNeg), local(endT), s.line)
+                    free(cntNeg)
+                    exits.add(emitJumpIfFalse(local(cNegCmp), s.line))
+                    free(cNegCmp)
+                }
                 patch(listOf(toDone), out.here())
                 // stepT 不在此归还：它是 FOR 行的步长快照，存活期 = 整个循环，
                 // 由 NEXT/REND 处随 [LoopScope.holdSlots] 统一释放（CORE-03）。
@@ -2052,6 +2226,7 @@ class ErbProgramCompiler(
          */
         private fun padRuntimeCalls(e: Expr): Expr = when (e) {
             is FuncCall -> {
+                tryInlineShape(e)?.let { return it }
                 var changed = false
                 val args = e.args.map { a ->
                     if (a == null) null else {
@@ -2071,7 +2246,7 @@ class ErbProgramCompiler(
                     }
                 } else {
                     // 表缺席：同名内建存在时补位会改内建实参形状 ⇒ 只认无内建同名的名字。
-                    Builtins.registry.returnType(e.name) == null &&
+                    builtinView.returnType(e.name) == null &&
                         callDefaults.containsKey(e.name.uppercase())
                 }
                 val base = if (changed) e.copy(args = args) else e
@@ -2199,7 +2374,204 @@ class ErbProgramCompiler(
             return if (changed) e.copy(parts = parts) else e
         }
 
+        /**
+         * 形状内联总入口：**只按 AST 形状判定**；函数名只用于从 [inlineShapeBodies] 查体。
+         *
+         * 公共前置（所有形状共用）：
+         * - 调用必须是单参 int 表达式位；
+         * - 实参无嵌套 `FuncCall`（避免副作用/重复求值）；
+         * - 体剥掉 `FuncLabelStmt`/`SharpStmt` 后，必须有且只有 1 个 `ARG:0` 引用；
+         * - 体里**实际引用** `LOCAL/LOCALS/LOCALSS/ARGS/ARGSS/RESULT/RESULTS` 一律拒
+         *   （`#LOCALSIZE`/`#LOCALSSIZE` 声明本身不算引用 —— GET_MAPID 的 `#LOCALSIZE 1` 是预留）。
+         */
+        private fun tryInlineShape(fc: FuncCall): Expr? {
+            if (fc.operandType != OperandType.INT || fc.args.size != 1) return null
+            val arg = fc.args[0] ?: return null
+            if (containsFuncCall(arg)) return null
+
+            // 反向证明：强制把任意单参 int 调用按某形状模板内联（仅测试用，必须让状态摘要红）。
+            if (inlineGetMapIdAny) {
+                countInline("getMapId")
+                return Binary(OperatorCode.DIV, arg, IntLiteral(100L), OperandType.INT, fc.line, fc.col)
+            }
+            if (inlineChkDatenowAny) {
+                countInline("chkDatenow")
+                return Ternary(
+                    Binary(OperatorCode.EQUAL, arg, IntLiteral(1L), OperandType.INT, fc.line, fc.col),
+                    IntLiteral(0L),
+                    IntLiteral(1L),
+                    OperandType.INT,
+                    fc.line,
+                    fc.col,
+                )
+            }
+
+            val body = inlineShapeBodies[fc.name.uppercase()] ?: return null
+            val stmts = body.filter { it !is FuncLabelStmt && it !is SharpStmt }
+            if (!argRefsOk(stmts)) return null
+            if (hasForbiddenBodyRefs(stmts)) return null
+
+            if (inlineChkDatenowOn) {
+                matchChkDatenow(stmts)?.let { cond ->
+                    countInline("chkDatenow")
+                    return Ternary(
+                        cond.copy(left = arg),
+                        IntLiteral(0L),
+                        IntLiteral(1L),
+                        OperandType.INT,
+                        fc.line,
+                        fc.col,
+                    )
+                }
+            }
+            if (inlineGetMapIdOn) {
+                matchGetMapId(stmts)?.let { divisor ->
+                    countInline("getMapId")
+                    return Binary(
+                        OperatorCode.DIV,
+                        arg,
+                        IntLiteral(divisor),
+                        OperandType.INT,
+                        fc.line,
+                        fc.col,
+                    )
+                }
+            }
+            return null
+        }
+
+        private fun countInline(id: String) {
+            if (out === b) inlineShapeInlined[id] = (inlineShapeInlined[id] ?: 0) + 1
+        }
+
+        /** `IF ARG:0 == <pure> RETURNF 0 ELSE RETURNF 1 ENDIF` → 返回 `<pure>`。 */
+        private fun matchChkDatenow(stmts: List<Statement>): Binary? {
+            if (stmts.size != 5) return null
+            val ifStmt = stmts[0] as? IfStmt ?: return null
+            if (ifStmt.single) return null
+            val thenRet = stmts[1] as? ReturnFStmt ?: return null
+            if (stmts[2] !is ElseStmt) return null
+            val elseRet = stmts[3] as? ReturnFStmt ?: return null
+            if (stmts[4] !is EndIfStmt) return null
+            if (thenRet.code != FunctionCode.RETURNF || elseRet.code != FunctionCode.RETURNF) return null
+            val thenVal = (thenRet.value as? IntLiteral)?.value ?: return null
+            val elseVal = (elseRet.value as? IntLiteral)?.value ?: return null
+            if (thenVal != 0L || elseVal != 1L) return null
+            val cond = ifStmt.condition
+            if (cond !is Binary || cond.op != OperatorCode.EQUAL || cond.operandType != OperandType.INT) return null
+            val left = cond.left
+            if (left !is VarRef || !left.name.equals("ARG", ignoreCase = true)) return null
+            if (containsFuncCall(cond.right)) return null
+            return cond
+        }
+
+        /** `RETURNF ARG:0 / <正整数字面量>` → 返回除数字面量（从体里读，不硬编码）。 */
+        private fun matchGetMapId(stmts: List<Statement>): Long? {
+            if (stmts.size != 1) return null
+            val ret = stmts[0] as? ReturnFStmt ?: return null
+            if (ret.code != FunctionCode.RETURNF) return null
+            val v = ret.value as? Binary ?: return null
+            if (v.op != OperatorCode.DIV || v.operandType != OperandType.INT) return null
+            val left = v.left
+            if (left !is VarRef || !left.name.equals("ARG", ignoreCase = true)) return null
+            val d = (v.right as? IntLiteral)?.value ?: return null
+            if (d <= 0L) return null
+            if (containsFuncCall(v)) return null
+            return d
+        }
+
+        /**
+         * **共享断言（E1/MAPID 共用，不许各写一份）**：体里实际引用
+         * `LOCAL/LOCALS/LOCALSS/ARGS/ARGSS/RESULT/RESULTS` 就拒绝。
+         * `#LOCALSIZE`/`#LOCALSSIZE` 是 `SharpStmt`，在 [stmts] 之外，**不是**拒绝条件。
+         */
+        private fun hasForbiddenBodyRefs(stmts: List<Statement>): Boolean {
+            val forbidden = setOf("LOCAL", "LOCALS", "LOCALSS", "ARGS", "ARGSS", "RESULT", "RESULTS")
+            return bodyExprs(stmts).asSequence()
+                .flatMap { walkExprs(it) }
+                .filterIsInstance<VarRef>()
+                .any { it.name.uppercase() in forbidden }
+        }
+
+        /** `ARG` 必须恰好出现 1 次，下标只能是 `[IntLiteral(0)]`（裸 `ARG` 允许）。 */
+        private fun argRefsOk(stmts: List<Statement>): Boolean {
+            val argRefs = bodyExprs(stmts).asSequence()
+                .flatMap { walkExprs(it) }
+                .filterIsInstance<VarRef>()
+                .filter { it.name.equals("ARG", ignoreCase = true) }
+                .toList()
+            if (argRefs.size != 1) return false
+            val r = argRefs[0]
+            if (r.indices.size > 1) return false
+            val idx = r.indices.singleOrNull() as? IntLiteral
+            return idx == null || idx.value == 0L
+        }
+
+        /** 收集体里所有表达式（含 IF 条件、RETURNF 值、赋值/指令参数）。 */
+        private fun bodyExprs(stmts: List<Statement>): List<Expr> {
+            val out = ArrayList<Expr>()
+            fun add(e: Expr?) { if (e != null) out.add(e) }
+            fun addArg(a: Argument?) {
+                when (a) {
+                    null -> {}
+                    is ExpressionArgument -> add(a.term)
+                    is ExpressionArrayArgument -> a.terms.forEach { add(it) }
+                    is ExpressionsArgument -> a.terms.forEach { add(it) }
+                    is MethodArgument -> add(a.methodTerm)
+                    is SpSetArgument -> { add(a.dest); add(a.term) }
+                    else -> {}
+                }
+            }
+            for (s in stmts) {
+                when (s) {
+                    is IfStmt -> add(s.condition)
+                    is ReturnFStmt -> add(s.value)
+                    is AssignStmt -> { add(s.dest); addArg(s.args) }
+                    is InstructionStmt -> addArg(s.args)
+                    else -> {}
+                }
+            }
+            return out
+        }
+
+        /** 表达式树遍历（含下标/实参/三元分支）。 */
+        private fun walkExprs(e: Expr?): Sequence<Expr> = sequence {
+            if (e == null) return@sequence
+            yield(e)
+            when (e) {
+                is Binary -> {
+                    yieldAll(walkExprs(e.left))
+                    yieldAll(walkExprs(e.right))
+                }
+                is Unary -> yieldAll(walkExprs(e.operand))
+                is UnaryAfter -> yieldAll(walkExprs(e.operand))
+                is Ternary -> {
+                    yieldAll(walkExprs(e.cond))
+                    yieldAll(walkExprs(e.ifTrue))
+                    yieldAll(walkExprs(e.ifFalse))
+                }
+                is KeywordIndexArg -> yieldAll(walkExprs(e.expr))
+                is VarRef -> e.indices.forEach { yieldAll(walkExprs(it)) }
+                is FuncCall -> e.args.forEach { yieldAll(walkExprs(it)) }
+                else -> {}
+            }
+        }
+
+        /** 保守的「表达式树里有没有 FuncCall」判定（FormStringTerm 一律按有处理）。 */
+        private fun containsFuncCall(e: Expr?): Boolean = when (e) {
+            null -> false
+            is FuncCall -> true
+            is Binary -> containsFuncCall(e.left) || containsFuncCall(e.right)
+            is Unary -> containsFuncCall(e.operand)
+            is UnaryAfter -> containsFuncCall(e.operand)
+            is Ternary -> containsFuncCall(e.cond) || containsFuncCall(e.ifTrue) || containsFuncCall(e.ifFalse)
+            is KeywordIndexArg -> containsFuncCall(e.expr)
+            is VarRef -> e.indices.any { containsFuncCall(it) }
+            is FormStringTerm -> true
+            else -> false
+        }
         private fun lowerFuncCall(fc: FuncCall): Expr {
+            tryInlineShape(fc)?.let { return it }
             val table = exprCalls ?: return padRuntimeCalls(fc)
             val kind = table.classify(fc.name)
             if (kind == ExprCallKind.NON_METHOD_LABEL) {
@@ -2362,7 +2734,7 @@ class ErbProgramCompiler(
             // 经 EvalContext.callFunctionRef 的引用路径交回方法体按需求值。
             // 表达式位本来就走这条路（lowerFuncCall 对 BUILTIN 保持原节点），此处把
             // 语句位与表达式位对齐，不是新语义。
-            if (s is MethodStmt && Builtins.registry.needsExprArgs(s.methodName)) {
+            if (s is MethodStmt && builtinView.needsExprArgs(s.methodName)) {
                 val a = s.args as? MethodArgument ?: return s
                 val term = a.methodTerm ?: return s
                 val kept = padRuntimeCalls(term)
@@ -3314,13 +3686,19 @@ class ExprCallTable(
      * [ExprCallKind.METHOD_UNKNOWN]）。与 strMethods 分桶，避免误判通道。
      */
     val unknownMethods: Set<String> = emptySet(),
+    /**
+     * 内建查表视图（ENGC-3b，B6 组长接线；缺省 [FullRegistryView] = 直查 registry，
+     * 既有调用方不传时 classify 行为逐位不变）。erbcc profile 通道传入
+     * [com.eratw.port.core.fn.EngineSurface]，被裁名字分类为 UNKNOWN/非内建。
+     */
+    val builtinView: CompileBuiltinView = FullRegistryView,
 ) {
     fun classify(name: String): ExprCallKind {
         val key = name.uppercase()
         if (key in intMethods) return ExprCallKind.METHOD_INT
         if (key in strMethods) return ExprCallKind.METHOD_STR
         if (key in unknownMethods) return ExprCallKind.METHOD_UNKNOWN
-        val isBuiltin = Builtins.registry.returnType(name) != null
+        val isBuiltin = builtinView.returnType(name) != null
         if (key in nonMethodLabels) return if (isBuiltin) ExprCallKind.BUILTIN else ExprCallKind.NON_METHOD_LABEL
         return if (isBuiltin) ExprCallKind.BUILTIN else ExprCallKind.UNKNOWN
     }

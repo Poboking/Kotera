@@ -6,7 +6,6 @@ import com.eratw.port.core.code.VmConfig
 import com.eratw.port.core.compile.ErbProgramCompiler
 import com.eratw.port.core.compile.ExprCallTable
 import com.eratw.port.core.compile.FuncSig
-import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.fn.NativeParam
 import com.eratw.port.core.fn.nativeMethods
 import com.eratw.port.core.fn.prefillSharpLinks
@@ -23,7 +22,6 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -75,14 +73,25 @@ class CallSharpLoadPrefillTest {
         return c.build("SHARP_PREFILL_PROBE")
     }
 
-    private fun runtimeWith(program: Program, store: VariableStore): ProcessRuntime =
+    private fun runtimeWith(
+        program: Program,
+        store: VariableStore,
+        sink: LineBufferConsoleSink =
+            LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900),
+    ): ProcessRuntime =
         ProcessRuntime(
             program,
             store,
             FunctionTable(emptyList()),
             VmConfig(maxStepsPerRun = 100_000),
-            consoleSink = LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900),
+            consoleSink = sink,
         )
+
+    /** 控制台上屏的**错误行**文案（printError 通道；Kind.ERROR 段）。 */
+    private fun errorLines(sink: LineBufferConsoleSink): List<String> =
+        sink.snapshot().flatMap { it.segments }
+            .filter { it.kind == LineBufferConsoleSink.Kind.ERROR }
+            .map { it.text }
 
     /** 对象树通道（Android 生产默认形态）：关掉 flat 直读（Program 的 internal 开关，同模块测试可及）。 */
     private fun asTreeChannel(program: Program): Program {
@@ -121,7 +130,7 @@ class CallSharpLoadPrefillTest {
     }
 
     @Test
-    fun `source 路径预填未命中 返回装载警告且首执行抛记录值`() {
+    fun `source 路径预填未命中 返回装载警告且首执行只提示不抛`() {
         val store = VariableStore()
         val program = compile("CALLSHARP Ghost(1)")
         val warnings = prefillSharpLinks(store.aux, program)
@@ -130,12 +139,20 @@ class CallSharpLoadPrefillTest {
             warnings,
             "未命中在装载趟就收进警告（FunctionIdentifier.cs:1204 文案原样，ParserMediator.cs:143-158 相位）",
         )
-        val rt = runtimeWith(program, store)
-        val first = assertFailsWith<CodeEE> { rt.execute() }
-        assertEquals("No native method Ghost found", first.message, "首执行抛预填记录值（Process.cs:1017-1019 相位）")
+        val sink = LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900)
+        val rt = runtimeWith(program, store, sink)
+        rt.execute()
+        assertEquals(
+            listOf("No native method Ghost found"),
+            errorLines(sink),
+            "首执行打预填记录值后跳过（通用策略 2026-11-09：官方此处抛 CodeEE，本移植版不抛）",
+        )
         // 注册表此刻才长出同名：行级错误已预填绑死 —— 原版 IsError 行不因后注册复活。
-        nativeMethods(store.aux).register("Ghost") { }
-        assertEquals(first.message, assertFailsWith<CodeEE> { rt.execute() }.message, "重执行照记录值重抛，不重查")
+        var hits = 0
+        nativeMethods(store.aux).register("Ghost") { hits++ }
+        rt.execute()
+        assertEquals(0, hits, "重执行不重查注册表")
+        assertEquals(1, errorLines(sink).size, "提示也只出一次")
     }
 
     // -----------------------------------------------------------------
@@ -143,7 +160,7 @@ class CallSharpLoadPrefillTest {
     // -----------------------------------------------------------------
 
     @Test
-    fun `erbc 惰性池预填未命中 只物化候选行且树通道抛记录值`(@TempDir dir: Path) {
+    fun `erbc 惰性池预填未命中 只物化候选行且树通道只提示不抛`(@TempDir dir: Path) {
         val store = VariableStore()
         val program = loadAsErbc(dir, compile("CALLSHARP Ghost(1)"), flat = false)
         assertTrue(program.holdsLazyStatementPool, "前置：本用例钉的就是惰性池装载路")
@@ -154,12 +171,16 @@ class CallSharpLoadPrefillTest {
             program.materializedStatementCount,
             "扫描只物化 CALLSHARP 候选行（7 条语句的池不整池物化 —— 真机惰性装载的红线）",
         )
-        val rt = runtimeWith(program, store)
-        val first = assertFailsWith<CodeEE> { rt.execute() }
-        assertEquals("No native method Ghost found", first.message)
-        assertTrue("filler0" in rt.output.toString(), "前置 PRINTL 已生效：错误只属于 CALLSHARP 那一行")
-        nativeMethods(store.aux).register("Ghost") { }
-        assertEquals(first.message, assertFailsWith<CodeEE> { rt.execute() }.message, "树通道同样抛预填记录值")
+        val sink = LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900)
+        val rt = runtimeWith(program, store, sink)
+        rt.execute()
+        assertEquals(listOf("No native method Ghost found"), errorLines(sink))
+        assertTrue("filler0" in rt.output.toString(), "前置 PRINTL 已生效：提示只属于 CALLSHARP 那一行")
+        var hits = 0
+        nativeMethods(store.aux).register("Ghost") { hits++ }
+        rt.execute()
+        assertEquals(0, hits, "树通道同口径：不重查注册表")
+        assertEquals(1, errorLines(sink).size)
     }
 
     @Test
@@ -211,8 +232,9 @@ class CallSharpLoadPrefillTest {
             prefillSharpLinks(store.aux, program),
             "第二次预填：已裁决行跳过，不因注册表变了重查（= 原版联结期绑死）也不重发警告",
         )
-        val rt = runtimeWith(program, store)
-        val e = assertFailsWith<CodeEE> { rt.execute() }
-        assertEquals("No native method Ghost found", e.message, "执行期照预填记录值走")
+        val sink = LineBufferConsoleSink(clientWidth = 136, printCWidth = 25, maxLines = 900)
+        val rt = runtimeWith(program, store, sink)
+        rt.execute()
+        assertEquals(listOf("No native method Ghost found"), errorLines(sink), "执行期照预填记录值提示后跳过")
     }
 }

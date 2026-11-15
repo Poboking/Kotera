@@ -329,6 +329,8 @@ class LiveSetCensusTest {
             // 新增：三枚物化读数 + 实占口径 + 每角色成本 + 去重注记
             " 物化语句 ", " 物化函数 ", " 扁平片驻/建 ",
             " 全局整数(实占) ", " 整数(容量行) ", " 每角色整数 ", "(已含上两列)",
+            // 2026-11-15 补账：运行期代码缓存三件套（节点块/逐出/规范表/内建串池）
+            "｜代码缓存：节点块 ", " 逐出 ", " 规范 ", " 串池 ",
         )) {
             assertTrue(frag in line, "新增标签没进账面：`$frag` → $line")
         }
@@ -348,5 +350,20 @@ class LiveSetCensusTest {
         val c = LiveSetCensus.census(null, null, null, null, null, fullScan = false)
         assertEquals(-1L, c.miB(-1L), "无读数不能被折成 0")
         assertEquals(2L, c.miB(2L * 1024 * 1024), "2 MiB 整除")
+    }
+
+    /**
+     * 代码缓存段的**无读数形状**：非惰性 Program（内存汇编档）没有惰性池 ⇒ 四读数全 -1，
+     * 成文为 `-` 不是 0（2026-11-15 补账；0 表示「确为零」会与真值混淆）。
+     */
+    @Test
+    fun `非惰性程序的代码缓存段给无读数哨兵`() {
+        val line = LiveSetCensus
+            .census(programWithInstructions(2), VariableStore(), null, null, null, fullScan = false)
+            .render()
+        assertTrue(
+            "｜代码缓存：节点块 - 逐出 - 规范 - 串池 -" in line,
+            "非惰性档四读数必须成文为 -：$line",
+        )
     }
 }

@@ -365,6 +365,34 @@ object LiveSetCensus {
          * 判性 = **桌面取不到(-1)**，同 [gfxResidentPixelBytes]。
          */
         val csvResidentPixelBytes: Long,
+
+        // ---- 代码缓存（运行期物化三件套；2026-11-15 补账）----
+        /**
+         * 节点表已分配块数合计（段2 表达式 + 段3 语句两张记录源；每块 4,096 槽）。
+         *
+         * 判性 = **真读数（条数）**：块位表 O(块数≈200) 次引用判空，不碰元素、不物化。
+         * 上界判式在册：`RUNTIME_NODE_ENTRY_BUDGET`（1<<19 条 = 128 块/表）武装后
+         * 两表合计 ≈ 256 块封顶；读数贴着上界跑 = 玩到的代码覆盖面已把缓存挤满（正常），
+         * **重置/逐出不再归还的是被语句缓存与扁平片持有的引用**（2026-11-14 OOM 根修语义）。
+         * -1 = 非惰性池（编译器/测试档）或无读数。
+         */
+        val codeCacheNodeBlocks: Long,
+        /** 节点表运行期块逐出累计合计。判性 = **真读数（计数器）**；-1 = 无读数。 */
+        val codeCacheNodeEvictions: Long,
+        /**
+         * 规范化代表表当前形态数（语句池那张 `ArgInterner`；整表重置后从 0 重新累计）。
+         * 判性 = **真读数（size 标量）**。2026-11-14 OOM 的主力簇之一——桌面直方图实测
+         * ~1.7M 形态 / 表壳 ~54 MiB；上界 `RUNTIME_INTERN_FORM_BUDGET`（1<<18）武装后
+         * 读数贴着预算周期性回落是正常形态。被它钉住的结点本体按「还被语句/片引用」
+         * 存活，**重置只还表壳与无引用代表** —— 读数高≠内存全在表上（判读别过头）。-1 = 无读数。
+         */
+        val codeCacheInternForms: Long,
+        /**
+         * 内建串池当前不同内容数（同上口径与上界 `RUNTIME_INTERN_STRING_BUDGET`）。
+         * 判性 = **真读数（size 标量）**；串本体按引用者存活，读数高≠堆上只有这么多串。
+         * -1 = 无读数。
+         */
+        val codeCacheInternStrings: Long,
     ) {
         /** 字节 → MiB（负数原样返回 = 「无读数」哨兵，不折 0）。 */
         fun miB(bytes: Long): Long = if (bytes < 0L) bytes else bytes / BYTES_PER_MIB
@@ -416,6 +444,10 @@ object LiveSetCensus {
             }
             append(" ｜图形 Java：正号段像素 ").append(mibTag(gfxResidentPixelBytes)).append("MiB")
             append(" 负号段 CSV ").append(mibTag(csvResidentPixelBytes)).append("MiB")
+            append(" ｜代码缓存：节点块 ").append(v(codeCacheNodeBlocks))
+            append(" 逐出 ").append(v(codeCacheNodeEvictions))
+            append(" 规范 ").append(v(codeCacheInternForms))
+            append(" 串池 ").append(v(codeCacheInternStrings))
         }
 
         /**
@@ -514,8 +546,12 @@ object LiveSetCensus {
         spritePool: SpritePool?,
         fullScan: Boolean,
         residentFace: SpriteEvictScratch? = null,
-    ): Census = Census(
-        functionCount = program read { functions.size.toLong() },
+    ): Census {
+        // 代码缓存读数一次取齐（惰性池才非 null；两处 `codeCacheCensus` 都是只读标量 +
+        // O(块位表) 判空，热路径钉发也照取，与 [globalIntResidentBytes] 同一廉价档）。
+        val programCache = program?.codeCacheCensus()
+        return Census(
+            functionCount = program read { functions.size.toLong() },
         instructionCount = program read { instructionCount.toLong() },
         globalSlots = program read { globalSlots.toLong() },
         exprPoolEntries = program read { exprCount.toLong() },
@@ -561,7 +597,13 @@ object LiveSetCensus {
 
         gfxResidentPixelBytes = gfxPool read { residentBytes() },
         csvResidentPixelBytes = spritePool read { resourceResidentPixelBytes(residentFace) },
-    )
+
+        codeCacheNodeBlocks = programCache?.nodeBlocks?.toLong() ?: -1L,
+        codeCacheNodeEvictions = programCache?.nodeEvictions?.toLong() ?: -1L,
+        codeCacheInternForms = programCache?.internForms?.toLong() ?: -1L,
+        codeCacheInternStrings = programCache?.internStrings?.toLong() ?: -1L,
+        )
+    }
 
     /**
      * 装载侧字符串池字符数：遍历 `ConstantPool.strings` 的逐条 `.length`（堆内已物化，非惰性表）。

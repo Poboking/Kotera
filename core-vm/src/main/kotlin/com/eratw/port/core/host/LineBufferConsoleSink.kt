@@ -214,6 +214,17 @@ class LineBufferConsoleSink(
      */
     val imageSizeOf: ((String) -> ImageSizePx?)? = null,
     /**
+     * 绘制帧可用查询（**宿主供给**，MODERN-R12-DIVW2）：`<img>` 尺寸表**命中**而绘制时
+     * **帧拿不到**（`SpriteBitmapSource.frameOf` 的各 null 支：帧表空 / 缓冲未建 / 位图解不出）
+     * ⇒ 原版单出口（`ConsoleImagePart.cs:104-115` 的 `cImage == null` 支）：宽度按 AltText
+     * 文本度量、显式 `width`/`height` 不生效 —— 与绘制侧的缺帧回落（R9-B）同一把尺。
+     *
+     * null（缺省）= 不接线：判不了缺帧面，宽度保持图宽（接线前旧读数，与 [imageSizeOf]
+     * 未接线时同一纪律）。生产装配点（`GameSession`）应与 [imageSizeOf] 同源喂入
+     * （`SpriteBitmapSource` 同时是尺寸源与帧源）；接线前 core 折行与行内游标读数逐位不变。
+     */
+    val frameAvailableOf: ((String) -> Boolean)? = null,
+    /**
      * 文本像素量宽（**宿主供给**）：`(纯文本) -> 脚本像素宽`；null = 未接线。
      *
      * 唯一的消费点是 [inlineCursor] 的**文本分段**（图元段不走它）：div 锚点/按钮列位的
@@ -827,6 +838,25 @@ class LineBufferConsoleSink(
     var revision: Long = 0L
         private set
 
+    /**
+     * 长页忙碌指示器（[ConsoleSink.setBusyIndicator] 的唯一状态位）：**纯显示态**。
+     *
+     * 只被 VM 线程写（宿主页中检查点）、UI 线程读（渲染层每帧画横带），故单字段
+     * `@Volatile` 发布不可变实例即可。它与 [revision] / `publishedLines` / `frameOptions`
+     * 完全无关：置/清它不打印行、不改快照、不置脏，所以金标哈希链与语料 `CLEARLINE`
+     * 都看不到它。
+     */
+    @Volatile
+    private var busy: BusyIndicator? = null
+
+    /** [ConsoleSink.setBusyIndicator] 的写入侧；见 [busy] 的线程口径。 */
+    override fun setBusyIndicator(indicator: BusyIndicator?) {
+        busy = indicator
+    }
+
+    /** 当前忙碌指示器；null = 没有长页（UI 线程只读快照）。 */
+    fun busyIndicator(): BusyIndicator? = busy
+
     /** 显示行条数（含临时行与折行续行）。逻辑行数见 [lineCount]（LINECOUNT 口径）。 */
     // size 读虽然不会撕裂，但为了与写侧的增删互斥（避免读到同一次复合操作的中途态）、
     // 与其他 displayLines 读点保持同一把锁，统一走 synchronized。
@@ -907,7 +937,7 @@ class LineBufferConsoleSink(
     private fun newGeneration(request: InputRequest) {
         val currentLine = if (request.scriptLine >= 0L) request.scriptLine else lineSerial
         if (!updatedGeneration && currentLine != lastInputLine) {
-            lastButtonGeneration = newButtonGeneration
+            moveLastButtonGeneration(newButtonGeneration)
         } else {
             updatedGeneration = false
         }
@@ -925,7 +955,7 @@ class LineBufferConsoleSink(
                 if (lastButtonGeneration == newButtonGeneration) {
                     newButtonGeneration++
                 } else if (!lastButtonIsInput) {
-                    lastButtonGeneration = newButtonGeneration
+                    moveLastButtonGeneration(newButtonGeneration)
                 }
                 lastButtonIsInput = true
             }
@@ -933,7 +963,7 @@ class LineBufferConsoleSink(
                 if (lastButtonGeneration == newButtonGeneration) {
                     newButtonGeneration++
                 } else if (lastButtonIsInput) {
-                    lastButtonGeneration = newButtonGeneration
+                    moveLastButtonGeneration(newButtonGeneration)
                 }
                 lastButtonIsInput = false
             }
@@ -946,9 +976,40 @@ class LineBufferConsoleSink(
      */
     private fun stampButtonGeneration(): Long {
         val generation = newButtonGeneration
-        lastButtonGeneration = generation
+        moveLastButtonGeneration(generation)
         updatedGeneration = true
         return generation
+    }
+
+    /**
+     * [lastButtonGeneration] 的唯一写口：世代前移**同时**把帧口径选项快照置脏。
+     *
+     * ## 为什么必须在这里置脏（真机 0.2.45 `ABLNAME:900/1150` 簇的根因）
+     *
+     * 原版没有「缓存一份可点按钮表」这回事：鼠标命中当场读按钮对象的世代
+     * （`EmueraConsole.cs:2724`、`:2740` 的 `Generation != lastButtonGeneration` ⇒
+     * `continue` / `canSelect = false`），选中态在 `:1823` 再判一次，
+     * `IntButton`/`StrButton` 提交时 `:1188`/`:1246` 第三次判。三处判的都是**当下**的
+     * [lastButtonGeneration]，所以世代一前移，上一页按钮当场全部不可点，与它们是否还
+     * 留在 `displayLineList` 的滚屏历史里无关。
+     *
+     * 移植侧把可点集合提前算成 [frameOptions] 快照（[publishedOptions]），而快照只在
+     * [publishOptionsIfDirty] 里按 [optionsDirty] 重算。[publishFrame] 通常先于
+     * [noteInputWait] 到达：那一帧按**旧**世代算出快照并清了脏，随后 [newGeneration]
+     * 前移世代却不置脏 ⇒ [publishedOptions] 里留着整批已作废的旧按钮，壳层的世代闸
+     * `GameHost.isCurrentGeneration` 于是一路放行。真机现场就是能力编辑子菜单屏上
+     * 仍留着主设定菜单的 `[2000] 能力编辑` / `[2500] 种族编辑`，玩家点下去，值落进
+     * 子菜单的 `INPUT`，经 `CUSTOM_ABL` 的 `(ARG-200)/2` 变成 `ABLNAME:900/1150`。
+     *
+     * 置脏后，[noteInputWait] 收尾那次 [publishOptionsIfDirty] 会按**新**世代重算
+     * [frameOptions]，与同一入口的 [optionSnapshot] 同源同刻；[publishFrame] 边界也
+     * 照常消费。不新增读侧口径、不引入跨线程读：本方法只在 VM 线程调用，
+     * [optionsDirty] 的既有读点也全在 VM 线程。
+     */
+    private fun moveLastButtonGeneration(to: Long) {
+        if (lastButtonGeneration == to) return
+        lastButtonGeneration = to
+        optionsDirty = true
     }
 
     /**
@@ -1044,6 +1105,26 @@ class LineBufferConsoleSink(
      */
     fun publishedOptions(): List<ConsoleOption> =
         if (frameGateEnabled) frameOptions else displayOptions()
+
+    /**
+     * 一次按钮命中的世代判据：这个值是不是**当前世代**里某颗可点按钮的提交值。
+     *
+     * 判据落在控制台（世代字段的唯一持有者）而不是壳层，对应原版
+     * `EmueraConsole.cs:2724`/`:2740` 的 `button.Generation != lastButtonGeneration`
+     * ⇒ 不命中；`:1823` 的 `selectingButton` 失效；以及 `:1188`/`:1246` 在
+     * `IntButton`/`StrButton` 提交时按世代反查按钮。
+     *
+     * **没有「当前页没有按钮就一律放行」的兜底**：原版在 `pointingStrings` 里逐颗
+     * `continue`，一颗当前世代按钮都没有时 `canSelect = false`，点空白只会走到
+     * `PressEnterKey` 那条路（`MainWindow.cs:806-820`），绝不会把某个旧世代按钮的值
+     * 当成输入交出去。旧实现 `options.isEmpty() || ...` 的短路正是 0.2.45 那批
+     * 「上一屏按钮值串进下一屏 INPUT」还能通过的最后一扇门。
+     *
+     * [publishedOptions] 已由 [moveLastButtonGeneration] 保证随世代前移重算，
+     * 因此这里读到的快照与 `noteInputWait` 冻结的 [optionSnapshot] 同世代。
+     */
+    fun isCurrentGeneration(value: String): Boolean =
+        publishedOptions().any { it.submitValue == value }
 
     /** 锁内枚举当前世代（`lastButtonGeneration`）的全部按钮与浮岛按钮。 */
     private fun collectGenerationOptionsLocked(): List<ConsoleOption> {
@@ -2457,6 +2538,83 @@ class LineBufferConsoleSink(
     // ------------------------------------------------------------------
 
     /**
+     * HTML_PRINTC / HTML_PRINTLC 的逐项预折（fork-src `EmueraConsole.Print.cs:521-574`）。
+     *
+     * fork 的 `PrintHtmlC` 在补齐/追加之前先取 `printBuffer.CurrentLineWidth`，判
+     * `currentPx > 0 && currentPx + cellWidthPx > Config.DrawableWidth`（:529-539）：
+     * 命中就把当前缓冲行 `Flush` + `addRangeDisplayLine` 落表，**再**写这一项。
+     * 端口此前没有这一步，整张网格一直攒在 [pending] 里等 `PRINTL` 一次 [flushPending]，
+     * 于是所有列共享 1 个逻辑行（组内只有首排 `isLogicalLine=true`）、1 次 flush、
+     * 1 份 journal。后果是可观测的，不只是「落表时机」的内部差异：
+     * - `LINECOUNT` 只 +1（fork 按显示行 +N），同一屏跨文件的
+     *   `UI_STARTLINE = LINECOUNT`（INFO.ERB:25）与 `CLEARLINE LINECOUNT - UI_STARTLINE`
+     *   （USERCOM.ERB:391）因此读到不同行数；
+     * - `deleteLine(1)` / `CLEARLINE 1`（QOL_USERCOM.ERB:270、`BeginFlow` 的引擎级
+     *   `deleteLine(1)/(2)`）按逻辑行从表尾摘到组内首排，一次把**整张网格**摘光；
+     * - 整批按钮对象同时入表、同时失效，缺了逐显示行的按钮边界。
+     *
+     * 这里只做「判界 + 提前 flush」，不改 [printHtml] 的补齐与选项登记。[columnCells]
+     * 是 `Config.PrintCLength` 的格数口径（与 `StatementExecutor.padHtmlColumn` 同一把尺），
+     * [clientWidth] 是本类的 DrawableWidth 格数。`clientWidth <= 0`（不折行）或
+     * [columnCells] <= 0（宿主未接配置）时退化为旧路径，headless 装置零行为变化。
+     */
+    override fun printHtmlC(text: String, columnCells: Int) {
+        val width = clientWidth
+        if (width > 0 && columnCells > 0 && pending.isNotEmpty()) {
+            val current = pendingLineCellsLocked(width)
+            if (current > 0 && current + columnCells > width) {
+                // 非 force：缓冲非空，等价 fork 的 Flush + addRangeDisplayLine；
+                // 不像 newLine() 那样在空缓冲里补一条空格行。
+                flushPending(force = false)
+            }
+        }
+        printHtml(text, true)
+    }
+
+    /**
+     * fork `printBuffer.CurrentLineWidth` 的格数口径：当前待决缓冲**最后一排**已占列宽。
+     *
+     * 只测宽、不排版、不发号、不改状态 —— 预折判界绝不能碰按钮世代
+     * （[stampButtonGeneration]）与自动按钮编号（[splitAutoButtons]），否则每写一项
+     * 都会给同页按钮盖一次章。逐段沿用 [layoutRows] 的移行规则（HTML 段原子整段移行、
+     * 文本逐码点、按钮段按 ButtonWrap），保证判界与真正 [flushPending] 排出的行分布同尺。
+     */
+    private fun pendingLineCellsLocked(width: Int): Int {
+        var col = 0
+        fun place(w: Int) {
+            if (w <= 0) return
+            if (width > 0 && col > 0 && col + w > width) col = 0
+            col += w
+        }
+        for (span in pending) {
+            when (span) {
+                is HtmlSpan -> place(visibleHtmlWidth(span.text))
+                is TextSpan -> {
+                    var i = 0
+                    while (i < span.text.length) {
+                        val cp = span.text.codePointAt(i)
+                        place(fontWidth.codePointCells(cp, span.font))
+                        i += Character.charCount(cp)
+                    }
+                }
+                is ButtonSpan -> {
+                    if (buttonWrap) {
+                        place(fontWidth.cells(span.text, span.font))
+                    } else {
+                        var i = 0
+                        while (i < span.text.length) {
+                            val cp = span.text.codePointAt(i)
+                            place(fontWidth.codePointCells(cp, span.font))
+                            i += Character.charCount(cp)
+                        }
+                    }
+                }
+            }
+        }
+        return col
+    }
+
+    /**
      * HTML_PRINT。
      *
      * - `option=true`（toPrintBuffer）：HTML 作为一段进入当前打印缓冲，原文与标志都保留
@@ -2994,19 +3152,33 @@ class LineBufferConsoleSink(
                         i = CellWidth.divBlockEnd(html, end)
                         continue
                     }
+                    // 连续四参 rect 条带：渲染侧把它们合成一个矩形，折行预算 [visibleHtmlCells]
+                    // 也只在整段末尾折一次格。本游标必须与两者同走 [CellWidth.rectBandRun]，
+                    // 否则同一个 sink 里「折行说 20 格、div 锚点说 180 格」—— 0.2.46 进度条
+                    // 折散那条缺陷的第三把尺（命中列位与图形实占错位）。
+                    val band = CellWidth.rectBandRun(html, i, scriptFontSize.toLong())
+                    if (band != null) {
+                        px += band.totalScriptPx.toInt()
+                        cells += CellWidth.graphicCells(band.totalScriptPx, scriptFontSize.toLong())
+                        i = band.endIndex
+                        continue
+                    }
                     // 图元占宽的基尺 = [scriptFontSize]（**只能这一把**）：`lineWidth` /
                     // `HtmlSpan` 折行预算走的 [visibleHtmlWidth] 就是 `visibleHtmlCells(s,
                     // scriptFontSize, imageSizeOf)`；本游标若改用 [divFontSize]（未接线时是 18
                     // 的兜底），同一个 sink 里就会出现「行宽说图元 0、锚点说图元 180px」两套
                     // 答案。scriptFontSize ≤ 0 = 本装置不做图形折算（headless）⇒ 图元不占宽，
                     // 与 [visibleHtmlWidth] 逐值一致（历史「只数文本」的锚点读数也由此保住）。
-                    val g = CellWidth.graphicWidthPxOrNull(tag, scriptFontSize.toLong(), imageSizeOf)
+                    val g = CellWidth.graphicWidthPxOrNull(tag, scriptFontSize.toLong(), imageSizeOf, frameAvailableOf)
                     if (g != null) {
                         px += g.toInt()
                         cells += CellWidth.graphicCells(g, scriptFontSize.toLong())
                     } else if (scriptFontSize > 0 && CellWidth.isImgTag(tag)) {
-                        // 图元 miss 的单出口（`ConsoleImagePart.cs:60-65`）：查表在尺寸计算之前，
+                        // 原版单出口（`ConsoleImagePart.cs:60-65`）：查表在尺寸计算之前，
                         // 显式 width/height 一概不生效 ⇒ 节点宽 = AltText 的文本度量（`:104-115`）。
+                        // 触发面 = 图元 miss（宿主已接线但查表未命中 / 基图高 <= 0）+ 缺帧
+                        // （尺寸命中而 [frameAvailableOf] 答 false —— MODERN-R12-DIVW2，与画回落
+                        // R9-B 同一把文本尺；判据唯一名下见 CellWidth.imgWidthPxOrNull）。
                         // 这与 [CellWidth.visibleHtmlCells] 的 miss 支同值（`displayCells(imgAltText)`），
                         // 否则同一个 sink 里「行宽说图元占 N 格、锚点说 0」。
                         // `scriptFontSize <= 0`（headless 不折算图形）时 [visibleHtmlCells] 对图形
@@ -4971,7 +5143,7 @@ class LineBufferConsoleSink(
      * （`value="a>b"` 的裸 `>` 不出标签，H5 修正）、实体解析与图形段逐形口径见那边。
      */
     private fun visibleHtmlWidth(s: String): Int =
-        CellWidth.visibleHtmlCells(s, scriptFontSize.toLong(), imageSizeOf)
+        CellWidth.visibleHtmlCells(s, scriptFontSize.toLong(), imageSizeOf, frameAvailableOf)
 
     companion object {
         /**

@@ -2,7 +2,9 @@ package com.eratw.port.core.data.save
 
 import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.fn.SaveFileKind
+import com.eratw.port.core.save.SaveDiagnostics
 import com.eratw.port.core.vars.VarType
+import com.eratw.port.core.vars.VariableCode
 import com.eratw.port.core.vars.VariableStore
 
 /**
@@ -26,6 +28,9 @@ import com.eratw.port.core.vars.VariableStore
  * CharacterData.cs:515 的 GetVarTokenDic 遍历序同构；XML/键名回读不依赖顺序。
  */
 object CharaFileIO {
+
+    /** 物化入口的初始缓冲（16 KiB）：与 SaveFormat.encodePayload 同量级。 */
+    private const val BYTE_SINK_CAPACITY = 1 shl 16
 
     /** `chara_` 文件名前缀（VariableEvaluator.cs:2044-2047）。 */
     const val PREFIX = "chara_"
@@ -59,43 +64,95 @@ object CharaFileIO {
         nos: List<Long>,
         text: String,
         compressed: Boolean = true,
+        plan: com.eratw.port.core.vars.ModCsvInjectionPlan? = null,
     ): SaveData {
+        val baos = java.io.ByteArrayOutputStream(BYTE_SINK_CAPACITY)
+        SaveFormat.writeStreaming(compressed, baos) { w -> emitCapture(store, nos, text, w, plan) }
+        return SaveFormat.read(baos.toByteArray())
+    }
+
+    /**
+     * CHARVAR 存档的**流式发射**（SAVE-STREAM 波，生产写盘路）：`SaveChara`
+     * （VariableEvaluator.cs:2248-2283）的段序 —— 头四字段 → 角色数 → 每块条目 + `EOC`
+     * → 末尾补一个 `EOF`（:2270 的 `WriteEOF()`）。
+     *
+     * 校验（负值 / 过大 / 超登记范围 / 重复）与原版逐元素同序，抛 [CodeEE] 即原版语句层
+     * 打印错误行的路径；**全部通过才动编码器**，与旧实现「先全验后抓取」同序。
+     *
+     * L41（CONTRACT-RT2-SAVECHARA-CHARSLICES）：写每个选中角色块时消费普通存档角色块的
+     * 未认领切片（L17 / L23 的 `SaveUnclaimedPassthrough.charaSlicesOf`，按该角色**当前
+     * `NO`** 对账；当前表里 `NO` 不唯一 ⇒ 该角色不回写 + 留痕）。计划在**任何字节写出前**
+     * 成型 ⇒ 取切片失败只是不回写切片，已知条目照常发射。CHARVAR 自身的读侧捕获仍关闭
+     * （L38 裁定），所以 `LOADCHARA` 读进来的未知键不会出现在这里。
+     */
+    internal fun emitCapture(
+        store: VariableStore,
+        nos: List<Long>,
+        text: String,
+        writer: SaveFormat.SaveWriter,
+        plan: com.eratw.port.core.vars.ModCsvInjectionPlan? = null,
+    ) {
         val gb = store.registry.gameBase
-        val count = store.characters.count.toLong()
+        badCharaArgMessage(nos, store.characters.count.toLong())?.let { throw CodeEE(it) }
+        // L41：导出面切片计划；错误面 = 空计划 + 留痕（与 SaveCapture.emitNormal 的
+        // charaSlicePlan 同一口径：宁可丢切片，也不让 SAVECHARA 因旁路数据失败）。
+        val slicePlan = charaExportSlicePlan(store)
+        writer.fileType(SaveFileKind.CHARVAR)
+        writer.i64(gb.gameCode)
+        writer.i64(gb.version)
+        writer.str(text)
+        writer.count(nos.size)
+        for (pos in nos) {
+            val ipos = pos.toInt()
+            emitCharacter(store, ipos, writer, plan, slicePlan.slicesFor(store, ipos))
+            writer.eoc()
+        }
+        writer.eof()
+    }
+
+    /**
+     * 物化形态（[capture] 的实现）：发射到字节 → 用同一个解码器读回。
+     *
+     * 理由与 `SaveCapture.normal` 同一条：物化入口只在测试与诊断面用，换来的保证是
+     * 「物化入口与流式入口段序逐字节同源」，不靠两份手写实现互相对账。
+     */
+
+    /**
+     * `SAVECHARA` 实参校验（原版 `FunctionIdentifier.cs:1876-1896` 的逐元素判序）：
+     * 负值 → 过大 → 超登记范围 → 重复；返回 null = 全部通过。
+     *
+     * 返回文案（而不是就地抛）有两个理由：四条分支的判序与文案仍是**独立**的四条，
+     * 不会退化成一句「参数非法」；同时整个 `SAVECHARA` 入口只留一个 `throw CodeEE`
+     * （detekt ThrowsCount 口径），错误出口因此只有一处。
+     */
+    private fun badCharaArgMessage(nos: List<Long>, count: Long): String? {
         val seen = HashSet<Long>()
         for ((i, no) in nos.withIndex()) {
             val argnum = i + 3 // 原版实参序 = (文件名, 描述, 角色号…)：第 3 个起是角色号
-            if (no < 0) {
-                throw CodeEE("SAVECHARA函数: 第${argnum}个参数被是负值($no)")
+            val message = when {
+                no < 0 -> "SAVECHARA函数: 第${argnum}个参数被是负值($no)"
+                no > Int.MAX_VALUE -> "SAVECHARA函数: 第${argnum}个参数($no)过大"
+                no >= count -> "SAVECHARA第${argnum}参数的值超出角色登记编号的范围"
+                !seen.add(no) -> "同一个角色登记编号($no)被多次指定"
+                else -> null
             }
-            if (no > Int.MAX_VALUE) {
-                throw CodeEE("SAVECHARA函数: 第${argnum}个参数($no)过大")
-            }
-            if (no >= count) {
-                throw CodeEE("SAVECHARA第${argnum}参数的值超出角色登记编号的范围")
-            }
-            if (!seen.add(no)) {
-                throw CodeEE("同一个角色登记编号($no)被多次指定")
-            }
+            if (message != null) return message
         }
-        val blocks = nos.map { no -> captureCharacter(store, no.toInt()) }
-        return SaveData(
-            fileType = SaveFileKind.CHARVAR,
-            uniqueCode = gb.gameCode,
-            scriptVersion = gb.version,
-            text = text,
-            characters = blocks,
-            compressed = compressed,
-        )
+        return null
     }
 
-    /** [capture] + [SaveFormat.write]：直接得到可写盘的字节。 */
+    /** [capture] + 流式容器写口：直接得到可写盘的字节（生产 `SAVECHARA` 走这里）。 */
     fun encode(
         store: VariableStore,
         nos: List<Long>,
         text: String,
         compressed: Boolean = true,
-    ): ByteArray = SaveFormat.write(capture(store, nos, text, compressed))
+        plan: com.eratw.port.core.vars.ModCsvInjectionPlan? = null,
+    ): ByteArray {
+        val baos = java.io.ByteArrayOutputStream(BYTE_SINK_CAPACITY)
+        SaveFormat.writeStreaming(compressed, baos) { w -> emitCapture(store, nos, text, w, plan) }
+        return baos.toByteArray()
+    }
 
     /**
      * 把角色存档字节还原进变量池（**追加**角色，不清空既有角色）。
@@ -143,27 +200,48 @@ object CharaFileIO {
     // ------------------------------------------------------------------
     // 单个角色 → 条目块
     // ------------------------------------------------------------------
-    private fun captureCharacter(store: VariableStore, pos: Int): List<SaveEntry> {
-        val out = ArrayList<SaveEntry>()
-        // 系统角色变量：按 varTokenDic 字典枚举序（CharacterData.cs:515 的 GetVarTokenDic 遍历），
-        // 取 IsSavedata && IsCharacterData && !IsGlobal；值按原版为 null 的格整条不写（[isNullInOriginal]）。
-        // 此前用 registry.all() 的分组构造序：改档整档重写（SAVECHARA/SAVEDATA 经 encode）时角色段
-        // 与 PC 产字节不同序，破坏 specs/save-format.md §5.3 的逐字节目标
-        // （2026-10-26 fixcore 审查 save-B3；allInVarTokenDicOrder 已含角色段序）。
+    /**
+     * 单个角色的条目块发射（`CharacterData.SaveToStreamBinary`，CharacterData.cs:513-558）。
+     *
+     * 与旧 `captureCharacter` 的唯一差别：不建 `List<SaveEntry>`、不建数组 —— 每个条目
+     * 直接写进 [writer]，元素的读法仍是活列访问器（`c.int1[i].get(pos, e)`），与原版
+     * `writer.WriteWithKey(key, value.GetArrayChara(charano))` 同形。
+     *
+     * 条目序不可动：系统角色变量走 `allInVarTokenDicOrder()`（= `varTokenDic` Add 序，
+     * CharacterData.cs:515 的遍历），用户自定义角色变量在一个 `Separator` 之后逐个写
+     * （CharacterData.cs:546-556 / :666-684）。
+     *
+     * @param slices 该块未认领条目的原始切片（L17 / L23；缺省空 = 零变化）。按
+     *   [UnclaimedCharaEntry.phase] 放置：SYSTEM 落 `Separator` **之前**（与系统项同段），
+     *   USER 落 `Separator` **之后**（与用户项同段）；当前声明表没有用户角色变量但存在 USER
+     *   切片 ⇒ **补一个 `Separator`** 再写（否则读侧会按系统相位认它们，见
+     *   `CharacterData.cs:702-720`）。普通存档由 `SaveCapture.emitNormal` 的
+     *   `charaSlicePlan` 传入；`SAVECHARA` 自 L41 起由 [emitCapture] 按选中角色的当前
+     *   `NO` 传入（`charaSlicesOf`）。CHARVAR 自身的读侧捕获仍关闭（L38），`LOADCHARA`
+     *   读进来的未知键不会进这里。
+     */
+    internal fun emitCharacter(
+        store: VariableStore,
+        pos: Int,
+        writer: SaveFormat.SaveWriter,
+        plan: com.eratw.port.core.vars.ModCsvInjectionPlan? = null,
+        slices: List<UnclaimedCharaEntry> = emptyList(),
+    ) {
         for (def in store.registry.allInVarTokenDicOrder()) {
             if (!def.isSavedata || !def.isCharacterData || def.isGlobal) continue
             if (isNullInOriginal(store, def, pos)) continue
-            out.add(systemEntry(store, def, pos))
+            emitSystemCharaEntry(store, def, pos, writer, plan)
         }
-        // 用户自定义角色变量：原版在一个 Separator 之后逐个写。spec: CharacterData.cs:546-556
+        val systemSlices = slices.filter { it.phase == CharaPhase.SYSTEM }
+        val userSlices = slices.filter { it.phase == CharaPhase.USER }
+        // 系统相位切片：最后一个系统项之后、Separator 之前（原版的位置就是系统段内）。
+        for (u in systemSlices) writer.raw(u.bytes)
         val userChara = store.savedUserVarList().filter {
             it.def.isSavedata && it.def.isCharacterData && !it.def.isGlobal
         }
-        if (userChara.isNotEmpty()) {
-            out.add(SaveEntry.Separator)
-            for (uv in userChara) out.add(userEntry(uv, pos))
+        emitUserCharaSegment(writer, userChara.isNotEmpty(), userSlices) { w ->
+            for (uv in userChara) emitUserCharaEntry(uv, pos, w)
         }
-        return out
     }
 
     /**
@@ -210,54 +288,182 @@ object CharaFileIO {
     }
 
     /** 系统角色变量：直接读列存储（绕开 indices 口径，避免角色位置混入元素下标）。 */
-    private fun systemEntry(store: VariableStore, def: com.eratw.port.core.vars.VarDef, pos: Int): SaveEntry {
+    private fun emitSystemCharaEntry(
+        store: VariableStore,
+        def: com.eratw.port.core.vars.VarDef,
+        pos: Int,
+        writer: SaveFormat.SaveWriter,
+        plan: com.eratw.port.core.vars.ModCsvInjectionPlan?,
+    ) {
         val c = store.characters
-        return when (def.storage) {
+        when (def.storage) {
             com.eratw.port.core.vars.Storage.C_INT0 ->
-                SaveEntry.IntValue(def.name, c.int0[def.index].get(pos, 0))
-            com.eratw.port.core.vars.Storage.C_INT1 ->
-                intEntry(def, c.int1[def.index].blockSize, { e -> c.int1[def.index].get(pos, e) })
-            com.eratw.port.core.vars.Storage.C_INT2 ->
-                intEntry(def, c.int2[def.index].blockSize, { e -> c.int2[def.index].get(pos, e) })
+                writer.intValue(def.name, c.int0[def.index].get(pos, 0))
+            com.eratw.port.core.vars.Storage.C_INT1 -> {
+                val length = plan?.baseLength(def.name, def.storage, def.dims)
+                    ?.coerceIn(0, c.int1[def.index].blockSize)
+                    ?: c.int1[def.index].blockSize
+                writer.int1(def.name, length) { e -> c.int1[def.index].get(pos, e) }
+            }
+            com.eratw.port.core.vars.Storage.C_INT2 -> {
+                val dims = plan?.baseDimsOf(def.name, def.dims) ?: def.dims
+                writer.int2(def.name, dims[0], dims[1]) { e -> c.int2[def.index].get(pos, e) }
+            }
             com.eratw.port.core.vars.Storage.C_STR0 ->
-                SaveEntry.StrValue(def.name, store.pool.lookup(c.str0[def.index].get(pos, 0)))
-            com.eratw.port.core.vars.Storage.C_STR1 ->
-                strEntry(def, c.str1[def.index].blockSize, { e -> store.pool.lookup(c.str1[def.index].get(pos, e)) })
+                writer.strValue(def.name, store.pool.lookup(c.str0[def.index].get(pos, 0)))
+            com.eratw.port.core.vars.Storage.C_STR1 -> {
+                val length = plan?.baseLength(def.name, def.storage, def.dims)
+                    ?.coerceIn(0, c.str1[def.index].blockSize)
+                    ?: c.str1[def.index].blockSize
+                writer.str1(def.name, length) { e -> store.pool.lookup(c.str1[def.index].get(pos, e)) }
+            }
             else -> error("非角色变量存储 $def")
         }
     }
 
     /** 用户自定义角色变量：走 [UserVar.readInt]/readStr（elem 为行主序扁平下标）。 */
-    private fun userEntry(uv: com.eratw.port.core.vars.UserVar, pos: Int): SaveEntry {
+    private fun emitUserCharaEntry(
+        uv: com.eratw.port.core.vars.UserVar,
+        pos: Int,
+        writer: SaveFormat.SaveWriter,
+    ) {
         val def = uv.def
-        val n = def.totalSize
-        return if (def.type == VarType.INT) {
-            intEntry(def, n) { e -> uv.readInt(pos, e) }
+        if (def.type == VarType.INT) {
+            when (def.dims.size) {
+                0 -> writer.intValue(def.name, uv.readInt(pos, 0))
+                1 -> writer.int1(def.name, def.dims[0]) { e -> uv.readInt(pos, e) }
+                2 -> writer.int2(def.name, def.dims[0], def.dims[1]) { e -> uv.readInt(pos, e) }
+                else -> error("角色变量 ${def.name} 的维度 ${def.dims.size} 不受支持")
+            }
         } else {
-            strEntry(def, n) { e -> uv.readStr(pos, e) }
+            when (def.dims.size) {
+                0 -> writer.strValue(def.name, uv.readStr(pos, 0))
+                1 -> writer.str1(def.name, def.dims[0]) { e -> uv.readStr(pos, e) }
+                2 -> writer.str2(def.name, def.dims[0], def.dims[1]) { e -> uv.readStr(pos, e) }
+                else -> error("角色变量 ${def.name} 的维度 ${def.dims.size} 不受支持")
+            }
         }
     }
-
-    private fun intEntry(def: com.eratw.port.core.vars.VarDef, n: Int, read: (Int) -> Long): SaveEntry =
-        when (def.dims.size) {
-            0 -> SaveEntry.IntValue(def.name, read(0))
-            1 -> SaveEntry.IntArray1(def.name, LongArray(n) { read(it) })
-            2 -> SaveEntry.IntArray2(def.name, def.dims[0], def.dims[1], LongArray(def.dims[0] * def.dims[1]) { read(it) })
-            else -> error("角色变量 ${def.name} 的维度 ${def.dims.size} 不受支持")
-        }
-
-    private fun strEntry(def: com.eratw.port.core.vars.VarDef, n: Int, read: (Int) -> String): SaveEntry =
-        when (def.dims.size) {
-            0 -> SaveEntry.StrValue(def.name, read(0))
-            1 -> SaveEntry.StrArray1(def.name, Array<String?>(n) { read(it) })
-            2 -> SaveEntry.StrArray2(
-                def.name, def.dims[0], def.dims[1],
-                Array<String?>(def.dims[0] * def.dims[1]) { read(it) },
-            )
-            else -> error("角色变量 ${def.name} 的维度 ${def.dims.size} 不受支持")
-        }
 
     // ------------------------------------------------------------------
     // 校验：口径本体在 [GameBaseGate]（GameBase.cs:60-80），本层不再各写一份近似。
     // ------------------------------------------------------------------
 }
+
+/**
+ * 用户 `#DIM CHARADATA` 段（`Separator` + 已知用户项 + 用户相位切片）。
+ *
+ * 段本身只在「有用户角色变量**或**有用户相位切片」时写出：后者是 L23 的合成条件 ——
+ * 没有声明表也要补一个 `Separator`，否则用户相位切片会被读侧当系统项
+ * （`CharacterData.cs:702-720`）。
+ *
+ * 放在 object 外：`CharaFileIO` 的对象成员数已顶到 detekt `TooManyFunctions` 阈值（11），
+ * 拓扑上它也只是「按相位写一段」。
+ */
+private fun emitUserCharaSegment(
+    writer: SaveFormat.SaveWriter,
+    hasKnown: Boolean,
+    userSlices: List<UnclaimedCharaEntry>,
+    emitKnown: (SaveFormat.SaveWriter) -> Unit,
+) {
+    if (!hasKnown && userSlices.isEmpty()) return
+    writer.separator()
+    emitKnown(writer)
+    for (u in userSlices) writer.raw(u.bytes)
+}
+
+/**
+ * `SAVECHARA` 导出面的角色块未认领切片计划（L41，CONTRACT-RT2-SAVECHARA-CHARSLICES）。
+ *
+ * ## 为什么要有计划这一层
+ *
+ * 槽里的桶以**读普通存档时**的角色 `NO` 为键，而 `SAVECHARA` 的实参是**当前角色表的
+ * 位置**子集。对账只有一处能做对：当前角色表的 `NO` 列（与 `SaveCapture.charaSlicePlan`
+ * 同源）。计划在发射前一次性抓好 `currentNoCounts`：
+ * - 该 `NO` 在当前表里恰好一次 ⇒ 选中块回写自己的桶（身份唯一）；
+ * - 出现多次（当前表自身 `NO` 重复，含 `ADDVOIDCHARA` 的 `NO=0` 与 `LOADCHARA` 追加的
+ *   同 `NO` 块）⇒ 该角色的桶**不写** + `SaveDiagnostics.note`（宁可丢也不挂错人）；
+ * - 未被选中角色的桶**不写也不留痕**：子集 `SAVECHARA` 本身就是「文件 = 选中角色的快照」
+ *   （原版 `FileMode.Create` 整档覆写，未选中的块不在文件里），不是丢弃。
+ *
+ * 每条切片自带块内相位（[UnclaimedCharaEntry.phase]），放置由 [CharaFileIO.emitCharacter]
+ * 按相位做（SYSTEM 落 `Separator` 之前、USER 落之后，缺 `Separator` 时补一个）。
+ *
+ * 放在 object 外：`CharaFileIO` 的对象成员数已顶到 detekt `TooManyFunctions` 阈值（11）。
+ */
+private class CharaExportSlicePlan(
+    private val buckets: Map<Long, List<UnclaimedCharaEntry>>,
+    private val currentNoCounts: Map<Long, Int>,
+) {
+
+    /** 已留痕过的 `NO`（同一次导出里只留一条，不随选中次数刷屏）。 */
+    private val noted = HashSet<Long>()
+
+    /** 选中位置 [pos] 应回写的切片：当前 `NO` 唯一才交出，否则空表 + 留痕一次。 */
+    fun slicesFor(store: VariableStore, pos: Int): List<UnclaimedCharaEntry> {
+        val no = charaNoAt(store, pos)
+        val entries = buckets[no] ?: return emptyList()
+        return if (currentNoCounts[no] == 1) entries else ambiguous(no, entries)
+    }
+
+    /** 身份歧义：不挂给任何块（fail-closed），按 `NO` 去重留痕。 */
+    private fun ambiguous(no: Long, entries: List<UnclaimedCharaEntry>): List<UnclaimedCharaEntry> {
+        if (noted.add(no)) {
+            SaveDiagnostics.note(
+                OP,
+                "unclaimed",
+                "角色块未认领切片丢弃（当前角色表里该 NO 出现 ${currentNoCounts[no]} 次（身份歧义））：" +
+                    "NO=$no 键=${entries.joinToString(",") { it.key }}",
+            )
+        }
+        return emptyList()
+    }
+
+    companion object {
+
+        /** 留痕的语句名（`SaveDiagnostics.note` 的 `op`）。 */
+        const val OP: String = "SAVECHARA"
+
+        /** 空计划（无切片 / 槽未装配 / 装载号不匹配）：零成本、零留痕。 */
+        val EMPTY: CharaExportSlicePlan = CharaExportSlicePlan(emptyMap(), emptyMap())
+    }
+}
+
+/**
+ * 抓取 `SAVECHARA` 的切片计划（L41）：槽里的角色桶 ∩ 当前角色表的 `NO`。
+ *
+ * 失败面与 `SaveCapture.charaSlicePlan` 同口径：取切片抛异常 ⇒ 空计划 + 留痕，已知条目
+ * 照常发射（不半截写入）；`OutOfMemoryError` 原样上抛给 `FileSystemOps.saveChara` 的
+ * 落盘失败面。
+ */
+private fun charaExportSlicePlan(store: VariableStore): CharaExportSlicePlan =
+    runCatching { buildCharaExportSlicePlan(store) }.getOrElse { e ->
+        if (e is OutOfMemoryError) throw e
+        SaveDiagnostics.note(
+            CharaExportSlicePlan.OP,
+            "unclaimed",
+            "角色块未认领切片丢弃：${e.javaClass.simpleName}: ${e.message}",
+        )
+        CharaExportSlicePlan.EMPTY
+    }
+
+/** [charaExportSlicePlan] 的本体（拆出来让失败面只有一个 `runCatching`）。 */
+private fun buildCharaExportSlicePlan(store: VariableStore): CharaExportSlicePlan {
+    val buckets = SaveUnclaimedPassthrough.charaSlicesOf(store)
+    if (buckets.isEmpty()) return CharaExportSlicePlan.EMPTY
+    val counts = HashMap<Long, Int>(buckets.size * 2)
+    val noColumn = store.characters.int0[VariableCode.lowIndex(VariableCode.NO_VAR)]
+    for (pos in 0 until store.characters.count) {
+        val no = noColumn.get(pos, 0)
+        if (buckets.containsKey(no)) counts[no] = (counts[no] ?: 0) + 1
+    }
+    return CharaExportSlicePlan(buckets, counts)
+}
+
+/**
+ * 当前角色 [pos] 的身份号：与 [CharaFileIO.emitSystemCharaEntry] 写 `NO` 条目读的是
+ * **同一列**（`characters.int0` 的 `NO` 列）。发射侧与对账侧必须同源 —— 与
+ * `SaveCapture.charaNoAt` 同一条理由。
+ */
+private fun charaNoAt(store: VariableStore, pos: Int): Long =
+    store.characters.int0[VariableCode.lowIndex(VariableCode.NO_VAR)].get(pos, 0)

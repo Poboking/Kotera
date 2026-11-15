@@ -43,6 +43,35 @@ class LinkedProgram(
 }
 
 /**
+ * 链接请求（L8 LPL-DEBT 形状收敛）：[ModuleLinker.link] 的全部输入。
+ *
+ * 字段与收敛前的形参逐个同序同名、缺省值逐字保留 —— 参数对象只把六个形参收成一个
+ * 请求体，不新增字段、不改缺省值、不改链接语义：
+ *
+ * - [base]：已装载的 base 产物（全量口径；入口函数即链接产物入口）。
+ * - [baseMetas]：base 的运行期元数据（装载序；[FuncMeta.index] = 物理下标，必须与
+ *   [base] 函数表同序同长、稠密 0 基）。base 候选签名恒空（完整签名导出落地前，
+ *   MODERN 下覆盖 base 函数被签名闸拒绝 —— fail-closed）。
+ * - [modules]：模块集（**输入 List 的枚举顺序不参与链接语义**，序由
+ *   [ModuleLinkOrder.plan] 内部裁决）。
+ * - [policy]：LSC 解析政策（带模块组合的默认口径是 MODERN；LEGACY 用于 M2-3
+ *   组合矩阵对拍）。
+ * - [baseSignatureOf]：base 侧完整签名指纹查询（M2-5 erbcc 导出接缝）：MODERN 显式
+ *   覆盖 base 函数时要求两侧指纹非空且相等。缺省恒空串 = 接缝落地前的 fail-closed
+ *   行为（覆盖 base 一律被签名闸拒），与接缝引入前逐位一致。
+ * - [linkOrder]：链接请求级的显式排序配置（缺省 = 全部走 `packageId` 规范序）。
+ *   属于组合配置而非 Mod 声明，故不进 [ModuleDescriptor]；依赖约束始终优先于它。
+ */
+data class LinkInputs(
+    val base: Program,
+    val baseMetas: List<FuncMeta>,
+    val modules: List<LinkableModule>,
+    val policy: ResolverPolicy,
+    val baseSignatureOf: (String) -> String = { "" },
+    val linkOrder: LinkOrder = LinkOrder(),
+)
+
+/**
  * 装载期链接器（M2-1 单位 C；era-arch-v61u.md §4）。
  *
  * 把零基线 Module（[LinkableModule]，已按 [ModuleLinkOrder.plan] 可定序的任意集合
@@ -86,35 +115,27 @@ object ModuleLinker {
     const val BASE_OWNER_ID: String = "·base·"
 
     /**
-     * 链接 [modules]（任意输入序，内部定序）到 [base] 之后。
+     * 链接 [LinkInputs.modules]（任意输入序，内部定序）到 [LinkInputs.base] 之后。
      *
-     * @param base 已装载的 base 产物（全量口径；入口函数即链接产物入口）。
-     * @param baseMetas base 的运行期元数据（装载序；[FuncMeta.index] = 物理下标，
-     *   必须与 [base] 函数表同序同长、稠密 0 基 —— 装载侧 [com.eratw.port.core.proc.FunctionTable]
-     *   的 `all()` 满足）。base 候选签名恒空（完整签名导出落地前，MODERN 下覆盖
-     *   base 函数被签名闸拒绝 —— fail-closed，见 [LinkCandidateAssembler.baseCandidates]）。
-     * @param baseSignatureOf base 侧完整签名指纹查询（M2-5 erbcc 导出接缝）：MODERN
-     *   显式覆盖 base 函数时要求两侧指纹非空且相等。缺省恒空串 = 接缝落地前的
-     *   fail-closed 行为（覆盖 base 一律被签名闸拒），与接缝引入前逐位一致。
-     * @param modules 模块集（[LinkableModule]；链接序由内部 [ModuleLinkOrder.plan]
-     *   裁决，输入顺序不影响产物）。
-     * @param policy LSC 解析政策（带模块组合的默认口径是 MODERN；LEGACY 用于
-     *   M2-3 组合矩阵对拍）。
+     * 输入形状由 [LinkInputs] 承载（L8 LPL-DEBT 形状收敛：逐参签名收成请求体，
+     * 字段语义与缺省值逐字沿用收敛前的形参文档，见 [LinkInputs] KDoc）。
+     *
      * @throws IllegalArgumentException 模块集为空 / base 元数据不对齐 / 模块形状或
      *   指令流病态（三层自检任一命中）。
-     * @throws LinkOrderException 依赖缺失 / 包重名 / 依赖环。
+     * @throws LinkOrderException 依赖缺失 / 包重名 / 显式排序配置重复 / 依赖环。
      * @throws com.eratw.port.core.code.SymbolConflictException MODERN 下未声明重名。
      * @throws com.eratw.port.core.code.OverrideSignatureException 覆盖签名不可验证。
      * @throws ImportResolutionException 导入无法解析（缺提供者 / 重复 / 事件名）。
      * @throws RelocationException `_CALL.a` 无法决议（super 缺失 / 导入越域）。
      */
-    fun link(
-        base: Program,
-        baseMetas: List<FuncMeta>,
-        modules: List<LinkableModule>,
-        policy: ResolverPolicy,
-        baseSignatureOf: (String) -> String = { "" },
-    ): LinkedProgram {
+    fun link(inputs: LinkInputs): LinkedProgram {
+        // 别名只为让函数体与收敛前逐字一致（零行为变化的第一道证明：body 无改写）。
+        val base = inputs.base
+        val baseMetas = inputs.baseMetas
+        val modules = inputs.modules
+        val policy = inputs.policy
+        val baseSignatureOf = inputs.baseSignatureOf
+        val linkOrder = inputs.linkOrder
         require(modules.isNotEmpty()) {
             "模块集为空——base-only 组合不走链接器（直接用 base 原产物，golden 恒等）"
         }
@@ -128,9 +149,9 @@ object ModuleLinker {
         }
         for (m in modules) LinkableModule.validate(m)
 
-        // 定序：plan 只收描述符，按 packageId 映射回模块（稳定拓扑保输入序，输入已序
-        // 时 plan 结果恒等 —— ABI-8 缓存指纹的确定性前提）。
-        val ordered = ModuleLinkOrder.plan(modules.map { it.descriptor })
+        // 定序：plan 只收描述符，按 packageId 映射回模块。输入枚举顺序不参与语义，
+        // 同一模块集合 + 同一 linkOrder ⇒ 同一条链接序（ABI-8 缓存指纹的确定性前提）。
+        val ordered = ModuleLinkOrder.plan(modules.map { it.descriptor }, linkOrder)
         val byPkg = modules.associateBy { it.descriptor.packageId }
         val sorted = ordered.map { byPkg.getValue(it.packageId) }
 

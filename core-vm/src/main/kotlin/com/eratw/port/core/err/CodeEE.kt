@@ -52,7 +52,44 @@ open class CodeEE(
     val langKey: LangKey? = null,
     /** [langKey] 的实参表，个数 = `langKey.argCount`（与定型 [message] 同源同值）。 */
     val langArgs: List<Any?> = emptyList(),
+    scriptFile: String? = null,
+    /**
+     * 算术错误（除零 / 取模）的**取证面**：被除数、除数与抛点二元表达式的源码形态重建。
+     *
+     * ## 为什么要有（2026-11-09 lane bug-divzero）
+     * 玩家上报只给「除数为0的除法运算 @ 催眠発動 行764」—— 该物理行一行里就有 6 处
+     * `X / MAXBASE:TARGET:*`，报告正文推不出**是哪一项**为 0（6 选 1），只能靠猜。
+     * 把抛点当场的三元组带上，下一份同类上报就能直接点名 `MAXBASE:情緒` 还是 `MAXBASE:理性`。
+     *
+     * ## 三条纪律
+     * 1. **不进 [message]**：官方文案（[DIVIDE_BY_ZERO_TEXT] = `Error.DivideByZero`）逐字不变，
+     *    日志 / 错误报告正文 / 上报去重签名也不因取证字段漂移（AGENTS §6 的取证面口径）。
+     * 2. **null = 没有这一项**：非算术错误一律 null；算术错误里求值序上拿不到的那一项也 null
+     *    （`DIV`/`MOD` 原版先取除数判零、再取被除数，见 `ExprEvalException` 的同名字段 KDoc）。
+     * 3. **不改求值语义**：填字段不许额外求值带副作用的子树（`RAND` / 用户函数 / `++`），
+     *    宁可 null —— 取证面不得反过来改变被测代码的行为（ADR-005）。
+     *
+     * @property operandA 被除数（左操作数）；null = 求值序上尚未求值，或该子树带副作用不能补求值
+     * @property operandB 除数（右操作数；整型除零时恒为 0）；浮点通道为 null（Long 折损精度）
+     * @property exprText 抛点二元表达式的**源码形态重建**（AST → 文本，见 `expr/Expr.kt` 的
+     *   `renderSourceText`）；不是逐字原文 —— ERB 原文不随产物保存，标点/空格按规范化形态给出
+     */
+    val operandA: Long? = null,
+    /** 除数（右操作数）；口径同 [operandA]。 */
+    val operandB: Long? = null,
+    /** 抛点二元表达式的源码形态重建；口径同 [operandA]。 */
+    val exprText: String? = null,
 ) : RuntimeException(message) {
+
+    /**
+     * 错误所属 ERB 源文件的**显示名**（`FuncMeta.position` 冒号前的原文，不是绝对路径）；null = 未知。
+     *
+     * 由 [com.eratw.port.core.proc.ProcessRuntime] 的语句层捕获点补一次（`stampPosition`），
+     * **首写为准**：内层帧先盖、外层帧不覆盖，已带文件的错误也不重建（保保护闸子类的身份）。
+     * 只在错误路径上写，不参与热路径；模块内可写、宿主只读。
+     */
+    var scriptFile: String? = scriptFile
+        internal set
 
     /**
      * 屏上/报告用的 1 基行号（无位置 = 负数原样返回，调用方继续按 `< 0` 判「没有位置」）。

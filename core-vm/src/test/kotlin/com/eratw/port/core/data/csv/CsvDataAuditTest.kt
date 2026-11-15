@@ -32,6 +32,29 @@ import org.junit.jupiter.api.Assumptions
  */
 class CsvDataAuditTest {
 
+    /**
+     * 261017 与 261111（2026-11-14 语料换代）**不同值**的字面格。键 = "槽:下标"。
+     * 实测出处：两根 CSV 逐格对照（2026-11-14 本机）；先例 = CorpusMacroTableAuditTest 的两列 map。
+     */
+    private val literalCells980: Map<String, String> = linkedMapOf(
+        "2:711" to "濃厚精液殘留", "4:0" to "愛撫", "6:998" to "永久凍土欠片", "7:35" to "絶頂余韻",
+        "9:0" to "Ｃ絶頂", "11:1" to "飾品", "12:0" to "下半身着衣状況",
+        "17:48" to "童貞喪失履歴", "18:0" to "口", "18:7" to "腸内",
+        "26:0" to "総日数", "26:45" to "依頼期限５", "27:0" to "時間",
+    )
+    private val literalCells111: Map<String, String> = linkedMapOf(
+        "2:711" to "浓厚精液残留", "4:0" to "爱抚", "6:998" to "永久冻土碎片", "7:35" to "绝顶余韵",
+        "9:0" to "Ｃ绝顶", "11:1" to "アクセサリ", "12:0" to "下半身着衣状况",
+        "17:48" to "童贞丧失履历", "18:0" to "嘴", "18:7" to "肠内",
+        "26:0" to "总日数", "26:45" to "委托期限５", "27:0" to "时间",
+    )
+
+    private fun cell(profile: com.eratw.port.boot.CorpusProfile, slot: Int, idx: Int): String =
+        when (profile) {
+            com.eratw.port.boot.CorpusProfile.V4_980 -> literalCells980
+            com.eratw.port.boot.CorpusProfile.V4_981 -> literalCells111
+        }.getValue("$slot:$idx")
+
     // ---------------------------------------------------------------- 合成数据
 
     /**
@@ -311,29 +334,30 @@ class CsvDataAuditTest {
         val t = data.registry.csvTables
 
         // 存在且非空的槽：首项 / 尾项逐槽核对（文件行数见交付报告表格）。
-        // 4.981 名字表大面积简体化；与 4.980 的差集只有 5 格（两根 CSV 逐格对照，2026-11-05），
-        // 简体格按 ${profile.name} 列取，其余格子两根同值、维持单一定值。
+        // 4.981 名字表大面积简体化；与 4.980 的差集 = 名字表 5 格（profile 列）+ 换代 261111 后
+        // 13 格字面格（下方 literalCells 双列 map，先例 = CorpusMacroTableAuditTest 的两列 map）
+        //（两根 CSV 逐格对照）；其余格子两根同值、维持单一定值。
         assertEquals(profile.ablName0, t[0][0]); assertEquals("TSLv", t[0][60])
         assertEquals(profile.expName0, t[1][0]); assertEquals("站式小人飞机杯Ａ绝顶经验", t[1][138])
-        assertEquals(profile.talentName0, t[2][0]); assertEquals("濃厚精液殘留", t[2][711])
+        assertEquals(profile.talentName0, t[2][0]); assertEquals(cell(profile, 2, 711), t[2][711])
         assertEquals("快Ｃ", t[3][0]); assertEquals("否定", t[3][100])
-        assertEquals("愛撫", t[4][0]); assertEquals("自定义指令", t[4][381])
+        assertEquals(cell(profile, 4, 0), t[4][0]); assertEquals("自定义指令", t[4][381])
         assertEquals("苦痛刻印", t[5][0]); assertEquals(profile.markName8, t[5][8])
-        assertEquals("跳蛋", t[6][0]); assertEquals("永久凍土欠片", t[6][998])
-        assertEquals("体力", t[7][0]); assertEquals("絶頂余韻", t[7][35])
+        assertEquals("跳蛋", t[6][0]); assertEquals(cell(profile, 6, 998), t[6][998])
+        assertEquals("体力", t[7][0]); assertEquals(cell(profile, 7, 35), t[7][35])
         assertEquals("快Ｃ", t[8][0]); assertEquals("魔力印记", t[8][233])
-        assertEquals("Ｃ絶頂", t[9][0]); assertEquals("妊娠判定用精液量", t[9][80])
+        assertEquals(cell(profile, 9, 0), t[9][0]); assertEquals("妊娠判定用精液量", t[9][80])
         assertEquals("鳥居", t[10][1]); assertEquals("武力", t[10][19585])
-        assertEquals("飾品", t[11][1]); assertEquals("腕部装束", t[11][22])
-        assertEquals("下半身着衣状況", t[12][0]); assertEquals("PREV_PANTY_STATE", t[12][905])
+        assertEquals(cell(profile, 11, 1), t[11][1]); assertEquals("腕部装束", t[11][22])
+        assertEquals(cell(profile, 12, 0), t[12][0]); assertEquals("PREV_PANTY_STATE", t[12][905])
         assertEquals("休憩FLAG", t[13][0]); assertEquals("DEFAULT_PREGNANCY_MODE", t[13][9126])
         assertEquals("射精部位", t[14][1]); assertEquals("WeddingNight", t[14][917])
         assertEquals(profile.cflagName1, t[15][1]); assertEquals("LatestEggGiftDay", t[15][9173])
         assertEquals("射精部位", t[16][2]); assertEquals("口服避孕药（假）", t[16][998])
-        assertEquals("FIRSTTIME", t[17][0]); assertEquals("童貞喪失履歴", t[17][48])
-        assertEquals("口", t[18][0]); assertEquals("腸内", t[18][7])
-        assertEquals("総日数", t[26][0]); assertEquals("依頼期限５", t[26][45])
-        assertEquals("時間", t[27][0]); assertEquals("虹", t[27][7])
+        assertEquals("FIRSTTIME", t[17][0]); assertEquals(cell(profile, 17, 48), t[17][48])
+        assertEquals(cell(profile, 18, 0), t[18][0]); assertEquals(cell(profile, 18, 7), t[18][7])
+        assertEquals(cell(profile, 26, 0), t[26][0]); assertEquals(cell(profile, 26, 45), t[26][45])
+        assertEquals(cell(profile, 27, 0), t[27][0]); assertEquals("虹", t[27][7])
 
         // 缺文件的 7 槽（Cdflag1/Cdflag2/Tstr/Savestr/Global/Globals/Money）：空表且不扩容
         for (slot in listOf(19, 20, 22, 23, 24, 25, 28)) {

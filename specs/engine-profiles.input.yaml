@@ -1,0 +1,216 @@
+# 引擎/语料身份的唯一手写权威（契约 CONTRACT-ENGCPL §4）。
+#
+# 本文件是 input；specs/engine-profiles.yaml 与
+# core-vm/src/main/kotlin/com/eratw/port/core/compat/EngineProfileData.kt 都是**生成物**，
+# 由 `python devtools/gen_engine_profiles.py --emit-kotlin <kt>` 投影，禁止手改。
+#
+# 加一家 era 引擎 = 这里加一段 engines + 把参考树放到 <ERATW_ROOT>/reference/ 下；
+# 换一份语料 = 改 corpora 段。两者都不需要改 python/Kotlin 源码。
+# 例外只有「产物里的段序」：engines 段的文件内顺序决定 references/registration 段的行序，
+# 不属于引擎身份事实；新增引擎若要落在非末尾位置，须同时登记
+# devtools/gen_engine_profiles.py 里的 _SOURCES_ORDER / _KOTLIN_ORDER 元组
+# （这两个元组只排段序，不含任何语义，事实一律在本文件）。
+schema: eratw.engine-profiles-input/v1
+
+# 引擎身份：一家引擎一段。字段：
+#   reference_dir  相对 <ERATW_ROOT>/reference/ 的 C# 树根
+#   registry       三份注册表（相对 reference_dir）
+#   kotlin         投影到 EngineProfileData 的常量前缀与 EngineFamily 名；无此键 = 不投影
+#   meta           版本/出处串，逐字进生成物的 sources 段
+engines:
+  v24:
+    reference_dir: Emuera1824+v24/src1824/Emuera
+    registry:
+      functions: GameData/Function/Creator.cs
+      commands: GameProc/Function/FunctionIdentifier.cs
+      enum: GameProc/Function/BuiltInFunctionCode.cs
+    kotlin: { const_prefix: V24, family: V24_1824 }
+    meta:
+      path: 'reference/Emuera1824+v24/src1824/Emuera'
+      origin: 'https://ux.getuploader.com/ninnohito/ (download/493)'
+      archive_md5: fa0e837c475855bf7766825b241e8bfd
+      version: '1824+v24'
+      runtime: '.NET Framework v4.8'
+      branch: 'private-edition bugfix fork'
+
+  cs_reference:
+    reference_dir: emuera-cs
+    registry:
+      functions: MinorShift.Emuera.GameData.Function/FunctionMethodCreator.cs
+      commands: MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs
+      enum: MinorShift.Emuera.Runtime.Script.Statements/FunctionCode.cs
+    meta:
+      path: 'reference/emuera-cs'
+      runtime: netcoreapp8.0
+      version: '1.824 label (EvilMask EM+EE-lineage decompile)'
+      note: 'The tree specs were built from; NOT a target engine.'
+
+  em_ee:
+    reference_dir: emuera-em/Emuera
+    registry:
+      functions: Runtime/Script/Statements/Function/Creator.cs
+      commands: Runtime/Script/Statements/FunctionIdentifier.cs
+      enum: Runtime/Script/Statements/BuiltInFunctionCode.cs
+    kotlin: { const_prefix: EM_EE, family: EM_EE_1824_V22 }
+    meta:
+      path: 'reference/emuera-em'
+      origin: 'https://gitlab.com/EvilMask/emuera.em'
+      git_tag: 'Emuera.NET1824+v22+EMv18+EEv57'
+      commit: '9608cf62feee531778dc2a7360937cfa8e3817bd'
+      version: '1824+v22+EMv18+EEv57'
+      runtime: net10.0-windows
+      branch: 'EM+EE master'
+
+  snake:
+    reference_dir: emuera-skia-4.981/Emuera
+    registry:
+      functions: Runtime/Script/Statements/Function/Creator.cs
+      commands: Runtime/Script/Statements/FunctionIdentifier.cs
+      enum: Runtime/Script/Statements/BuiltInFunctionCode.cs
+    kotlin: { const_prefix: SNAKE, family: SNAKE_4981 }
+    meta:
+      path: 'reference/emuera-skia-4.981'
+      version: '1824+v24+EMv18+EEv56+Skiav16'
+      runtime: net8.0-windows
+      branch: 'eratw 4.981 snake (SkiaSharp)'
+      version_anchor: 'reference/emuera-skia-4.981/CHANGELOG.md:11'
+
+# 档位：印章（assets/engine-profile.json）可写的三串 + 解析结果。
+#   stamp_version 是对外版本号（印章里的 version），不必等于 engines.<id>.meta.version ——
+#   snake 就是历史上唯一的例外（对外版本号 = eraTW 语料版本 4.981）。
+#   default 恰一条：它是「无 --engine-profile / 无印章」时的缺省档。
+#   full_statement_coverage（缺省 false）= 本档的语句头合法集（命令 ∪ 函数 ∪ 端口扩展 ∪
+#   结构码）覆盖**全部** FunctionCode 枚举名。它是启动期命令审计那趟 171.7 万条记录短路的
+#   唯一合法依据（原先按家族名 SNAKE_4981 硬判）；覆盖性本身由 CompatCommandAuditTest 的
+#   枚举级用例对每个声明为 true 的档逐名担保，声明错了立刻红。
+targets:
+  snake_4981:
+    engine: snake
+    stamp_version: '4.981'
+    family: SNAKE_4981
+    corpus: V4_981
+    default: true
+    full_statement_coverage: true
+  em_ee_1824_v22:
+    engine: em_ee
+    stamp_version: '1824+v22+EMv18+EEv57'
+    family: EM_EE_1824_V22
+    corpus: V4_981
+  v24_1824:
+    engine: v24
+    stamp_version: '1824+v24'
+    family: V24_1824
+    corpus: V4_981
+
+# 语料身份：语料版本一段。marker_file 是「认根」标记（相对语料根），null = 无标记只认目录名；
+# retired = 已退役（出包/装载不得默认选中）。
+# 2026-11-14 语料换代 261017→261111（蛇版官方仓 gitgud eratw-sub-modding 提交 278662ced，
+# 2026-11-11 发行；磁盘 ERB/CSV 与仓树逐字节对账一致）：现行根换 261111，261017 转退役留档
+# （golden 基准采集根、回归对拍根仍指 261017，见 docs/golden-runbook.md）。两根同属
+# 引擎语义版 4.981（CorpusVersion.V4_981 不变、蛇版宿主同为 Skiav16 代），id 只区分内容日期。
+corpora:
+  V4_981:
+    root_dir: eraTW4.981-261111-EAGLOV3
+    marker_file: 'ERB/DLC/AI对话补丁/对话调用.erb'
+    retired: false
+  V4_981_261017:
+    root_dir: eraTW4.981-261017-EAGLOV3
+    marker_file: 'ERB/DLC/AI对话补丁/对话调用.erb'
+    retired: true
+  V4_980:
+    root_dir: eratw-画蛇添足版eratw4.980
+    marker_file: null
+    retired: true
+
+# 枚举里定义了但从不 addFunction 的成员（四树一致）：SET 是赋值伪指令、__NULL__ 是占位。
+# 漂移即报错（强制重新审计），不是悄悄收进命令面。锚：各树 FunctionIdentifier 静态构造器。
+unregistered_enum_allowlist: [SET, __NULL__]
+
+# 语句面回填与枚举→ERB 恒等映射的 C# 锚（2026-11-10 Roslyn 审计 manual_mapping_and_dynamic_anchors）。
+# method_fallback：static FunctionIdentifier() 末尾 foreach methodList，把每个式中函数补注册为
+# METHOD 指令 ⇒ 语句面 = 显式命令 ∪ 函数。enum_to_erb：addFunction 助手 code.ToString()（大写枚举名
+# 上 ToUpper 是 no-op）⇒ 枚举名即 ERB 关键字，恒等。
+registration_anchors:
+  v24:
+    method_fallback: 'reference/Emuera1824+v24/src1824/Emuera/GameProc/Function/FunctionIdentifier.cs:391-399'
+    enum_to_erb: 'reference/Emuera1824+v24/src1824/Emuera/GameProc/Function/FunctionIdentifier.cs:47-64'
+  em_ee:
+    method_fallback: 'reference/emuera-em/Emuera/Runtime/Script/Statements/FunctionIdentifier.cs:452-460'
+    enum_to_erb: 'reference/emuera-em/Emuera/Runtime/Script/Statements/FunctionIdentifier.cs:51-64'
+  snake:
+    method_fallback: 'reference/emuera-skia-4.981/Emuera/Runtime/Script/Statements/FunctionIdentifier.cs:481-489'
+    enum_to_erb: 'reference/emuera-skia-4.981/Emuera/Runtime/Script/Statements/FunctionIdentifier.cs:51-64'
+  cs_reference:
+    method_fallback: 'reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:4135-4142'
+    enum_to_erb: 'reference/emuera-cs/MinorShift.Emuera.GameProc.Function/FunctionIdentifier.cs:3790-3805'
+
+# Bug 方言轴。每条都有 description / values（四树必填，缺 cs_reference 也算缺）/ anchors / evidence。
+dialect:
+  string_compare_ge_le:
+    description: 'String >= and <= operators. ''bug'' = both compiled as (compare < 0) (honke-1824 bug: >= behaves like <, <= behaves like <); ''fixed'' = >= is (c>=0), <= is (c<=0).'
+    values:
+      v24: bug
+      cs_reference: bug
+      em_ee: fixed
+      snake: fixed
+    anchors:
+      v24: 'reference/Emuera1824+v24/src1824/Emuera/GameData/Expression/OperatorMethod.cs:487 (c<0), :518 (c<0)'
+      cs_reference: 'reference/emuera-cs/MinorShift.Emuera.Runtime.Script.Statements.Expression/OperatorMethodManager.cs:331,367 (both <0; StringComparison.Ordinal)'
+      em_ee: 'reference/emuera-em/Emuera/Runtime/Script/Statements/Expression/OperatorMethod.cs:478 (c>=0), :509 (c<=0)'
+      snake: 'reference/emuera-skia-4.981/Emuera/Runtime/Script/Statements/Expression/OperatorMethod.cs:547 (c>=0), :578 (c<=0)'
+    evidence: 'Differential run 2026-11-10 (SAVETEXT outputs): v24 GE(a,a)=0, GE(a,b)=1, LE(a,a)=0 (bug); em_ee and snake = 1,0,1 (fixed).'
+
+  getnum_nickname_mastername:
+    description: 'GETNUM/GETNUMB accept NICKNAME/MASTERNAME keywords iff GetKeywordDictionary has those cases. v24 added them (v23); EM+EE-lineage trees keep only NAME/CALLNAME.'
+    values:
+      v24: true
+      cs_reference: false
+      em_ee: false
+      snake: false
+    # GETNUM 关键字名单的单一出处（E4）：routed = 直接按关键字查表的名单，
+    # gated = 受 values 开关门控、仅 v24 能解析的名单。两处消费点（GETNUM 求值、
+    # 关系串逆引）读同一份生成常量 EngineProfileData.RELATION_ROUTED_KEYWORDS / _GATED_KEYWORDS。
+    keywords:
+      routed: [NAME, CALLNAME, RELATION]
+      gated: [NICKNAME, MASTERNAME]
+    anchors:
+      v24: 'reference/Emuera1824+v24/src1824/Emuera/GameData/ConstantData.cs:876-877 (NICKNAME/MASTERNAME cases)'
+      cs_reference: 'reference/emuera-cs/MinorShift.Emuera.Runtime.Script.Data/ConstantData.cs:1091-1092 (NAME/CALLNAME only)'
+      em_ee: 'reference/emuera-em/Emuera/Runtime/Script/Data/ConstantData.cs:1075-1076 (NAME/CALLNAME only)'
+      snake: 'reference/emuera-skia-4.981/Emuera/Runtime/Script/Data/ConstantData.cs:1454-1455 (NAME/CALLNAME only)'
+    evidence: 'Differential run 2026-11-10 (chara CSV 0 with nick/master ''Ali''): v24 GETNUM(NICKNAME,"Ali") = 0 and GETNUM(MASTERNAME,"Ali") = 0 (found); em_ee and snake both = -1. GETNUM(NAME,"Alice") = 0 in all three.'
+
+  relation_mastername:
+    description: 'RELATION reverse-lookup dictionary (relationDic) includes the MASTERNAME column iff the engine registers it. Distinct from getnum_nickname_mastername: EM registers MASTERNAME into relationDic (so RELATION:MASTER:"..." resolves) while its GetKeywordDictionary still has no MASTERNAME case for GETNUM; v24 does both.'
+    values:
+      v24: true
+      cs_reference: false
+      em_ee: true
+      snake: false
+    anchors:
+      v24: 'reference/Emuera1824+v24/src1824/Emuera/GameData/ConstantData.cs:640-641 (Mastername added to relationDic)'
+      cs_reference: 'reference/emuera-cs/MinorShift.Emuera.Runtime.Script.Data/ConstantData.cs:743-753 (Name/Callname/Nickname only)'
+      em_ee: 'reference/emuera-em/Emuera/Runtime/Script/Data/ConstantData.cs:711-712 (Mastername added to relationDic)'
+      snake: 'reference/emuera-skia-4.981/Emuera/Runtime/Script/Data/ConstantData.cs:854-863 (Name/Callname/Nickname only)'
+    evidence: 'Static source diff 2026-11-11 (relationDic build loops above); no probe run. The gap em_ee true vs getnum_nickname_mastername false is the whole reason this facet exists: EM can read MASTERNAME only through RELATION string subscripts.'
+
+  isnumeric_v24_fix:
+    description: 'v24 added LexicalAnalyzer.NumericCheck so ISNUMERIC returns 0 instead of throwing on non-numeric strings. NumericCheck bodies are semantically identical in all four trees (v24/em_ee/snake byte-identical modulo stream type; cs decompile is a switch-form rewrite of the same algorithm). No observable divergence remains.'
+    values:
+      v24: fixed
+      cs_reference: fixed
+      em_ee: fixed
+      snake: fixed
+    anchors:
+      v24: 'reference/Emuera1824+v24/src1824/Emuera/GameData/Function/Creator.Method.cs:2545; Sub/LexicalAnalyzer.cs:266'
+      cs_reference: 'reference/emuera-cs/MinorShift.Emuera.GameData.Function/FunctionMethodCreator.cs:5765; MinorShift.Emuera.Runtime.Script.Parser/LexicalAnalyzer.cs:167'
+      em_ee: 'reference/emuera-em/Emuera/Runtime/Script/Statements/Function/Creator.Method.cs:4754; Runtime/Script/Parser/LexicalAnalyzer.cs:275'
+      snake: 'reference/emuera-skia-4.981/Emuera/Runtime/Script/Statements/Function/Creator.Method.cs:6514; Runtime/Script/Parser/LexicalAnalyzer.cs:303'
+    evidence: 'Differential run 2026-11-10: ISNUMERIC("123")=1, ("1.2.3")=0, ("0xZZ")=0, ("+")=0, ("")=0 -- identical in v24, em_ee and snake; no CodeEE thrown.'
+
+# 注：CSV/ALS 的装载期解码策略（官方 1.824 线固定 Shift-JIS，画蛇添足版先嗅探）**不在本波**。
+# 现状对全部引擎统一 sniff（core-vm/.../data/csv/CsvLoader.kt:17-25 的 KDoc 与
+# specs/verify-notes.md §4 记了这条差异），不存在「换档要重抄」的硬编码；把它变成可配置项
+# 等于新增一条尚未接线就能被翻的开关。接它的前置是补三棵 reference 树 EraStreamReader /
+# EncodingHandler 的编码分支 C# 锚，并把策略作为装载相位显式参数穿过六个装载函数。
+# 详见内部契约 ENGCPL §3.1 E5（已裁）与 §9 续报池第 7 条（内部文档不随公开仓发布）。

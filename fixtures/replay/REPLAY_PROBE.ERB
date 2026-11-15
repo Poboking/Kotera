@@ -1,0 +1,19 @@
+@REPLAY_HTML_COMOPT
+#FUNCTION
+	#DIM COM_ALTER_301
+	PRINTL START-COMOPT
+	; QOL_USERCOM.ERB @COM_OPTION 的最小复刻（2026-11-12 泡茶「点红茶没反应」案回归锁）：
+	; div 弹窗（rect 属性形态，vmdbg 实跑 COM_OPTION(301) 的控制台尾行原文）+ INPUT -1, 1
+	; + 双槽读（RESULT:0 按钮值 / RESULT:1 左键位 / RESULTS:1 按钮文本）+ SETVAR 动态变量名写入。
+	HTML_PRINT "<div rect='20px, -81px, 248px, 71px' border='2px' bcolor='#888888' depth='-1' padding='10px,10px'><button value='0'>[泡茶]</button><shape type='space' param='162px'><br><button value='1'>[泡红茶]</button><shape type='space' param='100px'><button value='99'>[关闭]</button><br></div>", 1
+	INPUT -1, 1
+	PRINTFORML INPUT_VALUES={RESULT}
+	PRINTFORML MOUSE_BTN={RESULT:1}
+	PRINTFORML BTN_TEXT=%RESULTS:1%
+	IF RESULT:1 == 1
+		IF INRANGE(RESULT, 0, 2)
+			SETVAR @"COM_ALTER_301", RESULT
+			PRINTL ALTER-WRITTEN
+		ENDIF
+	ENDIF
+	PRINTL END-COMOPT

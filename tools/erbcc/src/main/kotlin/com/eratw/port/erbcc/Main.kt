@@ -4,10 +4,13 @@ import com.eratw.port.core.lexer.CharStream
 import com.eratw.port.erbcc.audit.Finding
 import com.eratw.port.erbcc.audit.FindingKind
 import com.eratw.port.erbcc.audit.ReachabilityAudit
+import com.eratw.port.erbcc.audit.ReachabilityExpect
+import com.eratw.port.erbcc.audit.ReachabilityReport
 import com.eratw.port.erbcc.audit.SymbolLinkAudit
 import com.eratw.port.erbcc.compile.ArtifactFreshness
 import com.eratw.port.erbcc.compile.CorpusCompile
 import com.eratw.port.erbcc.compile.ErbcArtifacts
+import com.eratw.port.erbcc.compile.ErbModuleCompiler
 import com.eratw.port.erbcc.compile.ErhLoadAudit
 import com.eratw.port.erbcc.compile.decodeRenameDic
 import com.erbcc.bridge.droppedByUnresolvableDim
@@ -20,6 +23,7 @@ import com.eratw.port.core.lexer.LineKind
 import com.eratw.port.core.lexer.LogicalLineReader
 import com.eratw.port.core.lexer.OperatorCode
 import com.eratw.port.core.lexer.Token
+import com.eratw.port.core.proc.EngineProfiles
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
@@ -48,17 +52,30 @@ import kotlin.system.exitProcess
 //   函数名→文件表在运行期取回并完整解析（Process.cs:711）。因此全量编译的判定不变。
 //   scan 默认策略为 all；index/union/engine 三策略仅作报告对比数据保留。
 
-private const val USAGE = """erbcc - EraBasic 编译器 (eratw-android)
+/**
+ * `--help` / 无参数 / 参数错误路径共用的用法正文（单一份，不许两处各写一套）。
+ *
+ * 目标档名单**不写死在这段字符串里**：`--engine-profile` 那段从
+ * [EngineProfiles.TARGETS] 运行时渲染（CONTRACT-ENGCPL E1 的 erbcc 面）——
+ * 加一家引擎/一档只改 `specs/engine-profiles.input.yaml` 再重生成，本文件一个字都不用动；
+ * `EngineProfileArgsTest` 的「每个 profileId 都出现在 help 正文里」用例把这条钉成机器事实。
+ */
+private val USAGE_TEXT: String = """erbcc - EraBasic 编译器 (eratw-android)
 
 用法:
   erbcc scan --corpus <ERB目录> [--use-index <lazyloadingfiles.dat>] [--rename <_Rename.csv>] [--out <报告目录>]
   erbcc symbols --corpus <ERB目录> [--json <输出文件>]
-  erbcc compile --corpus <ERB目录> --out <产物目录> [--limit <N>] [--mode strict|compat] [--allow-parse-failures <容错清单>]
+  erbcc compile --corpus <ERB目录> --out <产物目录> [--limit <N>] [--mode strict|compat] [--allow-parse-failures <容错清单>] [--require-fold] [--foreign-corpus]
   erbcc check --corpus <ERB目录> [--out <产物目录>]
   erbcc audit --corpus <ERB目录> [--game-root <游戏根>] [--out <TSV文件>] [--limit <N>] [--strict] [--allow <白名单>]
   erbcc audit --corpus <ERB目录> [--game-root <游戏根>] --roundtrip [--artifact-dir <产物目录>] [--limit <N>]
   erbcc --help
   erbcc --version
+
+--engine-profile <profile_id>（scan/compile/check/audit 通用，目标引擎档位过滤）:
+  profile_id ∈ EngineProfiles.TARGETS（${EngineProfiles.TARGETS.joinToString(" / ") { it.profileId }}）；
+  未知 id 退出码 2 并列出支持表。不带此 flag = 零过滤：行为与产物和不带时逐字节一致。
+  check 无过滤面（新鲜度检查不消费档位），仅做参数校验与解析。
 
 symbols 选项（@标签符号表，规约见 specs/loader.md 附录 D）:
   --corpus          游戏数据根（ERB 语料所在目录）
@@ -78,6 +95,17 @@ compile 选项（全量语料 → .erbc 产物 + 确定性 manifest，规约见 
   --allow-parse-failures <清单>
                 容错档清单（每行 `相对路径:行号`，`#` 开头为注释）。仅 --mode compat 接受。
                 清单外的任何失败、或清单项未命中（源已修好/行号漂移）一律退出码 1。
+  --require-fold  正式产物口径：要求常量关键字解析期折叠的数据面完整（CSV/系统名表/ERD 表）。
+                数据面缺失时折叠会静默归零、产物退回运行期按名查表，故这里直接退出码 1。
+                gradle :tools:erbcc:compileCorpus 恒带此开关，手工调试可不带。
+  --foreign-corpus
+                声明本语料根是第三方游戏（= gradle `-PeratwForeignCorpus=1` 同一身份）。
+                ERD 一项随之按官方口径放宽：没有用户 ERD 表不是错误（ErhLoader.cs:274-283），
+                只对 eraTW 语料保留「ERD 表必须非空」的打包判据。
+  --engine-report <json 路径>
+                输出目标档缺口报告（形状契约见 ENGCOMPAT §8.0.3；必须与 --engine-profile
+                同用，否则退出码 2）。即使 compile 按 strict 模式解析失败退出非零，
+                报告也完整写出已收集的全部 unknown 命中（先写报告、后取退出码）。
   退出码        0 = 成功并落盘；1 = 编译/构建失败（stderr 逐条给 文件:行号，不落盘）；2 = 参数错误
   侧车          program.meta 是装载期元数据（函数元数据 / #DIM / 标签 / 数据节 / 宏表），
                 与 program.erbc 成对分发；装载侧用 ProgramLoader + BootMetadata.read 一起读。
@@ -96,7 +124,9 @@ audit 选项（装载期符号链接审计：解析期使用点 × 运行期真�
   --allow       白名单 TSV（每行 `<kind>\t<name>` 或 `<kind>\t<functionKey>\t<name>`；# 开头为注释）；不是合法 UTF-8 ⇒ 退出码 2 拒绝（不做有损解码，且在落任何产物之前挡下）；文件不存在不是错误 —— 打一行提示后按空白名单处理
   --reachability 追加可达性/可移植性报告（缺省关；审计的 stdout/退出码/TSV 与不带本开关时逐字节相同）：根 = 事件名（IdentifierDictionary.cs:72-89）∪ 系统名（:91-135），BFS 给可达集与深度；静态不可判定的调用落成 dynamic-call 行（报告是下界）；可达函数上的 CLIENTWIDTH/CLIENTHEIGHT/GETFONT/GGETFONT*/GDRAWTEXT 按 persist/display/unknown 分级
   --reach-out    可达性报告 TSV（缺省 = --out 同目录的 reachability.tsv；仅 --reachability 时生效）
-  退出码        0 = 审计完成且（--strict 时）无硬差异；1 = 编译失败或 --strict 下有硬差异；2 = 参数错误（含 `--allow` 白名单不是合法 UTF-8 的拒绝档）
+  --reach-expect 可达性读数对拍基线（仅 --reachability 时生效，与 --reach-write-expect 互斥）：基线是纯 ASCII key=value（version=1 + roots/reachable/dynamicCalls/portability/persist 五项计数 + 全表 TSV 的 tsvSha256）；六项全等 ⇒ 追加一行「reachability 基线一致」；任一漂移 ⇒ stderr 逐字段一行「reachability 基线不一致：<field> 期望 <a> 实际 <b>」并退出码 1；基线文件坏（非文件/缺字段/未知或重复字段/version 不认识/tsvSha256 不是 64 位小写十六进制）⇒ 退出码 2
+  --reach-write-expect 把当前读数写成该基线文件（父目录不存在则创建；仅 --reachability 时生效），stdout 追加「reachability 基线已写入：<绝对路径>」
+  退出码        0 = 审计完成且（--strict 时）无硬差异；1 = 编译失败或 --strict 下有硬差异、或可达性读数与基线有漂移；2 = 参数错误（含 `--allow` 白名单不是合法 UTF-8 的拒绝档，以及两个基线开关缺 --reachability 或互斥同给）
 
 audit --roundtrip（CMP-79：落盘后再装载对账，审计口径改走 .erbc + program.meta 真装载链）:
   --roundtrip      编译 → 落盘 → ProgramLoader + BootMetadata.read 重建会话 → 与内存产物对账；
@@ -118,14 +148,17 @@ scan 选项:
   union  磁盘与索引的并集
 """
 
+internal fun usageText(): String = USAGE_TEXT
+
 fun main(args: Array<String>) {
     val code = when {
-        args.isEmpty() -> { println(USAGE); 0 }
-        args[0] == "--help" -> { println(USAGE); 0 }
+        args.isEmpty() -> { println(usageText()); 0 }
+        args[0] == "--help" -> { println(usageText()); 0 }
         args[0] == "--version" -> { println("erbcc ${com.eratw.port.core.Version.VERSION}"); 0 }
         args[0] == "scan" -> { cmdScan(args.drop(1)); 0 }
         args[0] == "symbols" -> { cmdSymbols(args.drop(1)); 0 }
         args[0] == "compile" -> cmdCompile(args.drop(1))
+        args[0] == "compile-module" -> cmdCompileModule(args.drop(1))
         args[0] == "check" -> cmdCheck(args.drop(1))
         args[0] == "audit" -> cmdAudit(args.drop(1))
         else -> {
@@ -141,11 +174,18 @@ fun main(args: Array<String>) {
 // scan 子命令
 // ---------------------------------------------------------------------------
 
-private fun cmdScan(args: List<String>) {
+/**
+ * scan 子命令。
+ *
+ * internal（同 [cmdCompile] 先例）：合法参数路径不触发 [err] 的进程退出，测试源集
+ * 直接调它对拍报告产物；参数错误路径仍走 [err]（会带测试 JVM 一起退出，测试不进）。
+ */
+internal fun cmdScan(args: List<String>) {
     var corpus: Path? = null
     var index: Path? = null
     var rename: Path? = null
     var out = Path("tools/erbcc/scan-report")
+    var engineProfile: String? = null
     var i = 0
     while (i < args.size) {
         when (args[i]) {
@@ -153,10 +193,14 @@ private fun cmdScan(args: List<String>) {
             "--use-index" -> index = Path(args.getOrNull(++i) ?: err("--use-index 需要参数"))
             "--rename" -> rename = Path(args.getOrNull(++i) ?: err("--rename 需要参数"))
             "--out" -> out = Path(args.getOrNull(++i) ?: err("--out 需要参数"))
+            "--engine-profile" -> engineProfile = args.getOrNull(++i) ?: err("--engine-profile 需要参数")
             else -> err("无法识别的 scan 参数: ${args[i]}")
         }
         i++
     }
+    val profileArg = parseEngineProfileArg(engineProfile)
+    if (profileArg is EngineProfileArg.Bad) err(profileArg.message)
+    val profile = (profileArg as? EngineProfileArg.Present)?.view
     val corpusDir = corpus ?: err("缺少 --corpus 参数")
     if (!Files.isDirectory(corpusDir)) err("corpus 不是目录: $corpusDir")
     if (index != null && !index.isRegularFile()) err("use-index 不是文件: $index")
@@ -167,7 +211,7 @@ private fun cmdScan(args: List<String>) {
     val renameDic = rename?.let { loadRenameDic(it) } ?: emptyMap()
     if (rename != null) System.err.println("置換名辞書: ${rename!!.fileName}（${renameDic.size} 项）")
 
-    val report = ScanRunner(corpusDir, index, renameDic).run()
+    val report = ScanRunner(corpusDir, index, renameDic, profile).run()
     writeReports(report, out)
     printSummary(report)
 }
@@ -352,6 +396,11 @@ internal fun cmdCompile(args: List<String>): Int {
      */
     var allowList: Path? = null
     var mode = "strict"
+    /** 正式产物口径：常量关键字折叠的数据面必须完整（缺则拒落盘，见 [CorpusCompile.compile]）。 */
+    var requireFold = false
+    var foreignCorpus = false
+    var engineProfile: String? = null
+    var engineReport: Path? = null
     var i = 0
     while (i < args.size) {
         when (args[i]) {
@@ -363,6 +412,10 @@ internal fun cmdCompile(args: List<String>): Int {
             "--allow-parse-failures" -> allowList = Path(
                 args.getOrNull(++i) ?: err("--allow-parse-failures 需要清单文件（每行 文件:行号）"),
             )
+            "--require-fold" -> requireFold = true
+            "--foreign-corpus" -> foreignCorpus = true
+            "--engine-profile" -> engineProfile = args.getOrNull(++i) ?: err("--engine-profile 需要参数")
+            "--engine-report" -> engineReport = Path(args.getOrNull(++i) ?: err("--engine-report 需要参数"))
             else -> err("无法识别的 compile 参数: ${args[i]}")
         }
         i++
@@ -372,6 +425,11 @@ internal fun cmdCompile(args: List<String>): Int {
     if (mode == "strict" && allowList != null) {
         err("strict 档不接受容错清单（要容错请用 --mode compat --allow-parse-failures <清单>）")
     }
+    engineReportArgError(reportGiven = engineReport != null, profileGiven = engineProfile != null)
+        ?.let { err(it) }
+    val profileArg = parseEngineProfileArg(engineProfile)
+    if (profileArg is EngineProfileArg.Bad) err(profileArg.message)
+    val profile = (profileArg as? EngineProfileArg.Present)?.view
     val corpusDir = corpus ?: err("缺少 --corpus 参数")
     if (!Files.isDirectory(corpusDir)) err("corpus 不是目录: $corpusDir")
     val root = corpusDir.toAbsolutePath().normalize()
@@ -379,8 +437,47 @@ internal fun cmdCompile(args: List<String>): Int {
     if (limit != null) System.err.println("降级模式：只编译前 $limit 个文件（正式产物必须全量）")
 
     val t0 = System.currentTimeMillis()
-    val result = CorpusCompile.compile(root, limit, degradedStub = mode == "compat")
+    val result = try {
+        CorpusCompile.compile(
+            root,
+            limit,
+            degradedStub = mode == "compat",
+            requireConstantFolding = requireFold,
+            foreignCorpus = foreignCorpus,
+            engineProfile = profile,
+        )
+    } catch (e: IllegalStateException) {
+        // `--require-fold` 的数据面闸（CorpusCompile 内的 check）：给一行可读报文而不是栈，
+        // 出包机上一眼看清缺的是 CSV / 名表 / ERD 表哪一项。
+        System.err.println("编译中止：${e.message}")
+        return 1
+    }
     val st = result.stats
+    // --engine-report：先写报告、后取退出码（strict 解析失败也要完整落盘已收集的命中）。
+    // unknownCommands / unknownFunctions 由 CorpusCompile 的目标档视图收集（行首预识别 +
+    // builtinUnknownSink），此处只做形状契约的写出端。
+    profile?.let { view ->
+        EngineReport(
+            profile = view.target.profileId,
+            engine = view.target.engine,
+            version = view.target.version,
+            corpusRoot = root,
+            files = st.corpusFiles,
+            compiled = st.compiled,
+            parseFailures = st.parseFailures,
+            unknownCommands = result.unknownCommands,
+            unknownFunctions = result.unknownFunctions,
+        ).let { report ->
+            engineReport?.let { out ->
+                report.writeJson(out)
+                System.err.println(
+                    "[engine-profile] 报告已写出: ${out.toAbsolutePath().normalize()}" +
+                        "（unknownCommands ${result.unknownCommands.size} 条 / " +
+                        "unknownFunctions ${result.unknownFunctions.size} 条）",
+                )
+            }
+        }
+    }
     System.err.println("编译档：$mode")
     System.err.println(
         "编译：文件 ${st.corpusFiles}  切片 ${st.slices}  成功 ${st.compiled}  " +
@@ -477,7 +574,16 @@ internal fun cmdCompile(args: List<String>): Int {
     val report = ErbcArtifacts.write(
         out, result.program!!, root, result.sourceFiles, st, result.bootMetadata,
         degraded = if (allowList != null) result.failures else emptyList(),
+        disabledErb = result.disabledErbFiles,
+        // P15S 余量三：base 签名段随标准产物落盘（M2-5 旁路块；装载侧 BootMetadata.read 已容差）。
+        signatures = result.signatures,
     )
+    if (result.disabledErbFiles.isNotEmpty()) {
+        System.err.println(
+            "[patch-policy] ERB 补丁整体禁载 ${result.disabledErbFiles.size} 个脚本" +
+                "（清单已留 disabled-erb 段）：${result.disabledErbFiles.sorted().joinToString("、")}",
+        )
+    }
     println("=== 落盘完成 ===")
     println("指令 ${st.instructions}  语句 ${st.statements}  函数 ${st.functions}  " +
         "串池 ${st.strings}  常量 ${st.constants}  表达式 ${st.expressions}  " +
@@ -518,6 +624,56 @@ internal fun listedSourceMissing(corpusRoot: Path, entry: String): Boolean {
 }
 
 // ---------------------------------------------------------------------------
+// compile-module 子命令：RT2 G2 零基线 Mod 模块编译档
+// ---------------------------------------------------------------------------
+
+/**
+ * RT2 G2 波（P1-5 余量二）：零基线 Mod 模块编译档的 CLI 出口。
+ *
+ * 与 `compile`（标准全量 base 档）**完全分离**：本子命令只写调用方指定的 `--out`
+ * `.erbm`，不进 `erbc.v1/` 产物目录、不改 `manifest.txt`、不碰 `program.meta`。
+ * 这就是「`compileCorpus` 出厂 no-op」的结构保证（不是靠运行时开关）。
+ *
+ * 用法：`compile-module --package <id> --out <file.erbm> [--signature KEY=CANONICAL]... <ERB>...`
+ */
+internal fun cmdCompileModule(args: List<String>): Int {
+    var packageId: String? = null
+    var out: Path? = null
+    val signatures = LinkedHashMap<String, String>()
+    val sources = ArrayList<String>()
+    var i = 0
+    while (i < args.size) {
+        when (val a = args[i]) {
+            "--package" -> packageId = args.getOrNull(++i) ?: err("--package 缺参数")
+            "--out" -> out = Path(args.getOrNull(++i) ?: err("--out 缺参数"))
+            "--signature" -> {
+                val kv = args.getOrNull(++i) ?: err("--signature 缺参数")
+                val eq = kv.indexOf('=')
+                if (eq <= 0) err("--signature 需要 KEY=CANONICAL：$kv")
+                signatures[kv.substring(0, eq).uppercase(Locale.ROOT)] = kv.substring(eq + 1)
+            }
+            else -> if (a.startsWith("--")) err("未知参数: $a") else sources += a
+        }
+        i++
+    }
+    val pkg = packageId ?: err("compile-module 需要 --package <id>")
+    val target = out ?: err("compile-module 需要 --out <path>")
+    if (sources.isEmpty()) err("compile-module 需要至少一个 ERB 源文件")
+    val functions = ArrayList<ErbModuleCompiler.FunctionSpec>()
+    var fileName = ""
+    for (s in sources) {
+        val p = Path(s)
+        fileName = p.fileName.toString()
+        functions += ErbModuleCompiler.specFromErb(pkg, fileName, p.readText().lines(), signatures).functions
+    }
+    val bytes = ErbModuleCompiler.write(target, ErbModuleCompiler.ModuleSpec(pkg, fileName, functions))
+    val sha = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+        .joinToString("") { "%02x".format(java.lang.Byte.toUnsignedInt(it)) }
+    println("compile-module: $target (${bytes.size} bytes, sha256=$sha, functions=${functions.size})")
+    return 0
+}
+
+// ---------------------------------------------------------------------------
 // check 子命令：产物新鲜度（源改了没重编 ⇒ 当场检出）
 // ---------------------------------------------------------------------------
 
@@ -526,20 +682,27 @@ internal fun listedSourceMissing(corpusRoot: Path, entry: String): Boolean {
  *
  * 判据全部在 [ArtifactFreshness]（可执行代码）：容器字节数/摘要/段表、每个源文件摘要、
  * `program.meta` 的 `program-sha256`、`program.stmt.idx` 的语句条数、以及**编译器指纹**
- * `compiler-digest` × 当前 `core-vm/src/main/kotlin` 源码树（清单无此行或不等 ⇒ 旧产物）。**不重编**。
+ * `compiler-digest` × 当前编译器源码树（`core-vm/src/main/kotlin` + `tools/erbcc/src/main/kotlin`
+ * 两根，`ErbcCompilerDigest` 口径；清单无此行或不等 ⇒ 旧产物）。**不重编**。
+ *
+ * `--engine-profile` 只做解析与校验（新鲜度检查不消费档位，无过滤面）；未知 id 退出码 2。
  */
 internal fun cmdCheck(args: List<String>): Int {
     var out = Path("tools/erbcc/erbc-out")
     var corpus: Path? = null
+    var engineProfile: String? = null
     var i = 0
     while (i < args.size) {
         when (args[i]) {
             "--out" -> out = Path(args.getOrNull(++i) ?: err("--out 需要参数"))
             "--corpus" -> corpus = Path(args.getOrNull(++i) ?: err("--corpus 需要参数"))
+            "--engine-profile" -> engineProfile = args.getOrNull(++i) ?: err("--engine-profile 需要参数")
             else -> err("无法识别的 check 参数: ${args[i]}")
         }
         i++
     }
+    val profileArg = parseEngineProfileArg(engineProfile)
+    if (profileArg is EngineProfileArg.Bad) err(profileArg.message)
     val corpusDir = corpus ?: err("缺少 --corpus 参数")
     if (!Files.isDirectory(corpusDir)) err("corpus 不是目录: $corpusDir")
     val report = ArtifactFreshness.check(out, corpusDir)
@@ -572,6 +735,9 @@ internal fun cmdAudit(args: List<String>): Int {
     var reachability = false
     var reachOut: Path? = null
     var reachOutGiven = false
+    var reachExpect: Path? = null
+    var reachWriteExpect: Path? = null
+    var engineProfile: String? = null
     var i = 0
     while (i < args.size) {
         when (args[i]) {
@@ -592,10 +758,16 @@ internal fun cmdAudit(args: List<String>): Int {
                 reachOut = Path(args.getOrNull(++i) ?: err("--reach-out 需要参数"))
                 reachOutGiven = true
             }
+            "--reach-expect" -> reachExpect = Path(args.getOrNull(++i) ?: err("--reach-expect 需要参数"))
+            "--reach-write-expect" ->
+                reachWriteExpect = Path(args.getOrNull(++i) ?: err("--reach-write-expect 需要参数"))
+            "--engine-profile" -> engineProfile = args.getOrNull(++i) ?: err("--engine-profile 需要参数")
             else -> err("无法识别的 audit 参数: ${args[i]}")
         }
         i++
     }
+    val profileArg = parseEngineProfileArg(engineProfile)
+    if (profileArg is EngineProfileArg.Bad) err(profileArg.message)
     val corpusDir = corpus ?: err("缺少 --corpus 参数")
     if (!Files.isDirectory(corpusDir)) err("corpus 不是目录: $corpusDir")
     val root = corpusDir.toAbsolutePath().normalize()
@@ -609,6 +781,15 @@ internal fun cmdAudit(args: List<String>): Int {
     // 免得「以为开了报告、实际什么都没写」。
     if (reachOutGiven && !reachability) err("--reach-out 需要配合 --reachability（可达性报告缺省关）")
     if (roundtrip && reachability) err("--reachability 与 --roundtrip 互斥（对账链不产可达性报告）")
+    // MODERN-R8-B：两个基线开关是可达性报告的消费面，同样要求报告先开（否则「以为对拍了、
+    // 实际什么都没比」）；对拍与写基线是相反动作，同给按入参矛盾挡下（exit 2，`err()` 那把尺）。
+    if (reachExpect != null && !reachability) err("--reach-expect 需要配合 --reachability（可达性报告缺省关）")
+    if (reachWriteExpect != null && !reachability) {
+        err("--reach-write-expect 需要配合 --reachability（可达性报告缺省关）")
+    }
+    if (reachExpect != null && reachWriteExpect != null) {
+        err("--reach-expect 与 --reach-write-expect 互斥（对拍与写基线不能在同一跑里做）")
+    }
 
     if (roundtrip) return cmdAuditRoundTrip(root, game, artifactDir, if (outGiven) out else null, limit)
 
@@ -617,7 +798,7 @@ internal fun cmdAudit(args: List<String>): Int {
     // 整份审计并落 TSV —— 「以为挂了白名单，实际挂的是一堆乱码」属于静默放过，本仓要防的形状。
     // 这里只把**读字节**提前，解析与告警仍留在原处（下面 readAllowList 那一格）：合法 UTF-8 白名单的
     // stdout/stderr 读数与 TSV 字节一字不变（对拍读数见 tools/erbcc-rs/build/cli-fixes 的 before/after）。
-    // 退出码取 2（`err()` 那把尺，Main.kt:163-166）而不是 1：坏的是入参，不是审计结果；
+    // 退出码取 2（`err()` 那把尺，Main.kt:179-182）而不是 1：坏的是入参，不是审计结果；
     // 取 1 会和「--strict 下有硬差异」混成一类，让使用者以为要去看 TSV 里的符号。
     // 校验点在 `--roundtrip` 分派之后（Main.kt:476 原样）：那条子路一个字节都不消费 `--allow`
     // （USAGE 的 `--roundtrip` 行也没有它），把它一起收紧属于超出本格的改动。
@@ -693,6 +874,10 @@ internal fun cmdAudit(args: List<String>): Int {
         }
         reach.writeTsv(reachPath)
         println("可移植性明细：${reachPath.toAbsolutePath().normalize()}（${reach.rows.size} 行）")
+        // MODERN-R8-B：基线面。两个新开关缺省关 ⇒ 上面每一行、退出码、TSV 逐字节不变
+        // （对拍见 ReachabilityCliTest 的缺省关基准）。开启后只读/写一份 ASCII 基线，
+        // 不改 TSV 与 --reach-out 语义。
+        if (applyReachBaseline(reach, reachExpect, reachWriteExpect) != 0) return 1
     }
     if (strict && blocking.isNotEmpty()) {
         System.err.println("审计未通过：--strict 下仍有 ${blocking.size} 处硬差异。")
@@ -700,6 +885,33 @@ internal fun cmdAudit(args: List<String>): Int {
     }
     println("结论：" + if (blocking.isEmpty()) "PASS（解析期使用点全部落在运行期命名空间内）" else "报告模式（加 --strict 可作闸）")
     return 0
+}
+
+/**
+ * 可达性基线的消费面（MODERN-R8-B）：`--reach-write-expect` 写基线、`--reach-expect` 对拍。
+ *
+ * 返回退出码增量：0 = 无漂移（或没开对拍）；1 = 有漂移（逐字段行已打到 stderr）。
+ * 基线文件坏（不是文件 / 缺键 / 版本不认识 / sha 不是 64 位小写十六进制）不是「报告红」而是
+ * 入参或环境坏，走 [err] 的退出码 2；两个开关都给时 `cmdAudit` 已在解析段挡下。
+ */
+private fun applyReachBaseline(
+    report: ReachabilityReport,
+    expectPath: Path?,
+    writePath: Path?,
+): Int {
+    val actual = ReachabilityExpect.of(report)
+    if (writePath != null) {
+        println("reachability 基线已写入：${ReachabilityExpect.write(writePath, actual)}")
+    }
+    if (expectPath == null) return 0
+    val expected = try {
+        ReachabilityExpect.read(expectPath)
+    } catch (e: IllegalStateException) {
+        err(e.message ?: "可达性基线读取失败")
+    }
+    val drift = ReachabilityExpect.compare(expected, actual)
+    if (drift.isEmpty()) println("reachability 基线一致") else drift.forEach { System.err.println(it) }
+    return if (drift.isEmpty()) 0 else 1
 }
 
 // ---------------------------------------------------------------------------
@@ -906,10 +1118,19 @@ private class ScanReport {
 }
 
 /** 文件集策略 */
-private enum class Strategy { ALL, INDEX, UNION, ENGINE }private class ScanRunner(
+private enum class Strategy { ALL, INDEX, UNION, ENGINE }/**
+ * scan 执行器。
+ *
+ * @param profile 目标引擎档位视图；`null` = 零过滤（无 flag，行为与产物逐字节一致）。
+ *   非空时行首分派用 [EngineProfileView.statementAllowedNames]（接线缝见该属性 KDoc），
+ *   命中判定同 B4 审计口径；被裁名不进指令分派、落入赋值两段式 —— 失败即既有
+ *   InvalidLine / 解析失败路径，不新增报错文案（I4）。
+ */
+private class ScanRunner(
     private val corpusDir: Path,
     private val indexFile: Path?,
     private val renameDic: Map<String, String>,
+    private val profile: EngineProfileView? = null,
 ) {
 
     fun run(): ScanReport {
@@ -1112,7 +1333,11 @@ private enum class Strategy { ALL, INDEX, UNION, ENGINE }private class ScanRunne
             }
 
             // 指令/方法命中 → 参数延后语句层 —— spec: LogicalLineParser.cs:415-475
-            if (id.uppercase(Locale.ROOT) in ERB_INSTRUCTIONS) {
+            // 带 --engine-profile 时改用目标档行首合法集（命令集 ∪ 函数集 ∪ PORT_EXTENSIONS ∪
+            // 结构码，接线缝 = statementAllowedNames）；数据源未接线时该视图为 null，此处按
+            // 零过滤走原 568 项静态表 —— 不拿替代名单充当过滤集（EngineProfileView 类 KDoc）。
+            val headSet = profile?.statementAllowedNames ?: ERB_INSTRUCTIONS
+            if (id.uppercase(Locale.ROOT) in headSet) {
                 route = ROUTE_INSTR_TAIL
                 val next = CharStream(content).let { st ->
                     lexer.readSingleIdentifier(st)

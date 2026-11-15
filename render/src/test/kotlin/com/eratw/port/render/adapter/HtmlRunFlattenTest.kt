@@ -27,7 +27,7 @@ import kotlin.test.assertTrue
  * | `height` 缺省 = FontSize 一行高 | `ConsoleImagePart.cs:66` | 无尺寸那条 |
  * | `width` 缺省 = 基图纵横比 `DestBaseSize.Width * h / Height` | `ConsoleImagePart.cs:67-71` | 纵横比推宽那条 |
  * | 带 `px` 用像素、否则按 FontSize 百分比 | `ConsoleImagePart.cs:66,78` | 百分比那条 |
- * | `ypos` 同口径（px / 百分比） | `ConsoleImagePart.cs:81` | ypos 那条 |
+ * | `ypos`：px 按字号、百分比按**行高** | `ConsoleImagePart.cs:81` + 端口行高口径 | ypos 两条 |
  * | `srcb=''` 视作没有 | `FunctionIdentifier.cs:423-426`（PRINT_IMG 侧同式） | srcb 那条 |
  * | `shape type='rect'` 4 参守卫 `x>=0 && w>0 && h>0` | `ConsoleShapePart.cs:56-69` | 负宽不成立那条 |
  * | `shape type='space'` 只有 1 参形态有效 | `ConsoleShapePart.cs:50-55` | space 那条 |
@@ -143,7 +143,9 @@ class HtmlRunFlattenTest {
         val px = flatten("<img src='a' height='30px' ypos='20px'>").single().graphic as InlineGraphic.Image
         assertEquals(20, px.yOffsetPx)
         val pct = flatten("<img src='a' height='30px' ypos='50'>").single().graphic as InlineGraphic.Image
-        assertEquals(9, pct.yOffsetPx, "50 * 18 / 100 = 9（整数除，与原版同式）")
+        // 百分比按**行高**折（`CellMetrics(18)` 的行高 = 19）。本夹具上 50*19/100 与
+        // 50*18/100 同为 9，看不出差别；真机档的差异由下面的「百分比 ypos 按行高折」两例钉住。
+        assertEquals(9, pct.yOffsetPx, "50 * 19 / 100 = 9（整数除）")
     }
 
     /** `srcb=''` 等于没给（`FunctionIdentifier.cs:423-426` 的空串置 null）。 */
@@ -203,6 +205,27 @@ class HtmlRunFlattenTest {
     fun `px 折算时 ypos 一起折算`() {
         val g = image(deviceFlat(18).flatten(htmlRun("<img src='a' height='180px' ypos='-30px'>")))
         assertEquals(-68, g.yOffsetPx, "-30 * 41 / 18 = -68（向零截断，负号原样保留）")
+    }
+
+    /**
+     * 百分比 `ypos` 必须按**行高**折（2026-11-03 立绘压字）。
+     *
+     * 语料的 `ypos` 百分比是「几行」的另一种写法（`グラフィック表示.ERB:219`：一行 = 100 点），
+     * 而端口一行 = 行高（41/43 档 43px）≠ 字号（41px）。按字号折每挂一行欠 2px，
+     * 挂 12 行欠 24px —— 图底越进后面的台词行，正是玩家报的「立绘过大遮住字」。
+     */
+    @Test
+    fun `百分比 ypos 按行高折：挂 12 行正好挂回 12 行`() {
+        val g = image(deviceFlat(18).flatten(htmlRun("<img src='a' height='180px' ypos='-1200'>")))
+        assertEquals(410, g.heightPx, "height 仍按字号折（不跟着换尺）")
+        assertEquals(-516, g.yOffsetPx, "-1200% = 12 行 × 43px")
+    }
+
+    /** 正向下推同尺（`IMAGE2.ERB:604` / X 光叠层）：少推就顶进上一行，即「压上面的字」。 */
+    @Test
+    fun `百分比 ypos 正向下推也按行高折`() {
+        val g = image(deviceFlat(18).flatten(htmlRun("<img src='a' height='180px' ypos='500'>")))
+        assertEquals(215, g.yOffsetPx, "500% = 5 行 × 43px")
     }
 
     /** `<shape>` 的两支（1 参宽 / 4 参 x,y,w,h）与 img 同尺，否则色块与立绘各行其是。 */

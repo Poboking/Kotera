@@ -33,7 +33,9 @@
 #                 - 判「不改-同形」未入通道的键 → 写屏上原文的**静态前缀**（不带 `${}` 插值段）；
 #                 - 尚未接线的键 → 写**将来落点的函数名**（如 `private fun changeable`）。
 #               路径一律相对 `core-vm/src/main/kotlin/com/eratw/port/core/`（`sem/`、`stmt/`、
-#               `vars/`、`err/`、`fn/`、`lexer/`、`code/`、`frontend/`、`data/save/`）。
+#               `vars/`、`err/`、`fn/`、`lexer/`、`code/`、`frontend/`、`data/save/`）；
+#               唯一例外：`tools/` 开头 = erbcc 编译面的抛点，相对仓库根
+#               `eratw-android/` 解析（MODERN-R12-PRE 补）。
 #               没有「」的条目 = 本条无可核锚点（无消费点 / 未移植 / 待接线），闸会打印清单。
 #               为什么不留行号：行号每次重构必漂，且**过去没有任何闸核对过它**。2026-11-05
 #               lane usedat 全量对账读数：97 条里 70 条带 `文件.kt:行号`、共 100 处行号，

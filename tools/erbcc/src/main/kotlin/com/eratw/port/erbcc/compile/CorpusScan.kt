@@ -2,6 +2,7 @@ package com.eratw.port.erbcc.compile
 
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.VarInfo
+import com.eratw.port.core.frontend.LabelTable
 import com.eratw.port.core.lexer.LogicalLineReader
 import com.eratw.port.core.stmt.DefinitionScopedResolver
 import com.eratw.port.core.stmt.SymbolTable
@@ -226,11 +227,18 @@ class CorpusScan(
                             // `#DIM X = 1, 25, 50` 的逗号后是初始值，不是维度（spec: UserDefinedVariableData.cs:344-427）
                             val tail = head.substring(name.length).substringBefore(';').substringBefore('=')
                             // 维度计数（spec: UserDefinedVariableData.cs:300-343）：
-                            // 一般变量每个 ',' 后须跟可求值整数表达式；REF 每个 ',' 恰贡献一个 0 尺寸（cs:309-319）
+                            // 一般变量每个**顶层** ',' 后须跟可求值整数表达式；REF 每个顶层 ',' 恰贡献
+                            // 一个 0 尺寸（cs:309-319）。原版每段交
+                            // `ReduceIntegerTerm(wc, TermEndWith.Comma_Assignment)`（cs:325）整条表达式
+                            // 求值，括号内的 ',' 属函数实参、不切段（em 同形：
+                            // UserDefinedVariable.cs:217）—— 朴素 `split(',')` 把
+                            // `#DIM SAVEDATA X, VARSIZE("Y", 1)` 数成 2 维，使用点 `X:i` 于是被
+                            // 误报「下标不能省略」（eraFL VARIABLE_DAILY.ERH 一族）。
+                            val segs = LabelTable.splitTopLevel(tail, ',')
                             val dims = if (isRef) {
-                                tail.count { it == ',' }.coerceIn(1, 3)
+                                (segs.size - 1).coerceIn(1, 3)
                             } else {
-                                tail.split(',').map { it.trim() }.count { it.isNotEmpty() }.coerceIn(1, 3)
+                                segs.count { it.isNotBlank() }.coerceIn(1, 3)
                             }
                             // 类型：`#DIMS` → STR，`#DIMF` → FLOAT（4.981 fork；spec:
                             // variables.yaml:99-100）。`#DIMF CHARADATA` 是 fork 的已知 quirk：
@@ -246,6 +254,25 @@ class CorpusScan(
                             continue
                         }
                         continue
+                    }
+                    // spec: LogicalLineParser.cs:412-511 —— VARI/VARS 在装载期（ParseLine）
+                    // 扫到本行时立即 `parentLine.AddPrivateVariable`（cs:471 / :508），而函数体内
+                    // 实参的求值被推迟到整文件行扫描之后（setLabelsArg → ArgumentParser.
+                    // SetArgumentTo，cs:ErbLoader.cs:514-521 + cs:ArgumentParser.cs:2687-2705）
+                    // ⇒ 声明对**整个函数体**可见，与书写位置无关。只登记「本行之后」会把
+                    // 先引用后声明的行判成未定义标识符（eraFL F_COL / EQUIP_TYPE 一族）。
+                    // AddPrivateVariable 先到者胜（cs:FunctionLabelLine.cs:98-111，重名不覆盖）。
+                    if (curFunc != null && !line.startsWith(";")) {
+                        val ident = line.takeWhile { it.isLetterOrDigit() || it == '_' }
+                        val kw = ident.uppercase(Locale.ROOT)
+                        if (kw == "VARI" || kw == "VARS") {
+                            val def = curDef
+                            val info = parseScopedVarDecl(kw, line.substring(ident.length))
+                            if (def != null && info != null) {
+                                val vars = privateVars.getOrPut(def) { LinkedHashMap() }
+                                vars.getOrPut(info.name.uppercase(Locale.ROOT)) { info }
+                            }
+                        }
                     }
                     // spec: ErbLoader.cs:413-424 —— '#' 行只在紧随 FunctionLabelLine 时生效
                     //（logicalLine2 必须仍是该标签行；连续 '#' 行因 ErbLoader continue 不更新
@@ -266,6 +293,40 @@ class CorpusScan(
                 warnings.addAll(pp.warnings)
             }
             return CorpusScan(funcTypes, privateVars, global, macroNames, warnings)
+        }
+
+        /**
+         * `VARI` / `VARS` 行的**装载期**私有名（spec: LogicalLineParser.cs:412-511）。
+         *
+         * 原版对参数原文做**字面**切分：首个 `;` 截断（cs:418-423）、首个 `=` 之前为声明头
+         * （cs:424-437）、头按 `,` `Split`（cs:438）、长度逐项 `int.Parse`（cs:440-447 /
+         * :480-486），无长度时默认 `[1]`（cs:427-433）；名字/长度都不认括号或引号。
+         * 类型 = VARI 整数 / VARS 字符串，`Static=false`（cs:463-470 / :500-507）。
+         *
+         * 解析失败返回 null：该行在切片侧会以 `StmtParseException` 落成 poisoned，
+         * 预扫描不替它登记半截结果。维度按 VarInfo 口径收进 1..3（原版 Dimension>3
+         * 在 `CreatePrivateVariable` 抛 ExeEE，spec: VariableData.cs:3292-3348）。
+         */
+        private fun parseScopedVarDecl(kw: String, argText: String): VarInfo? {
+            val head = argText.substringBefore(';').substringBefore('=')
+            val parts = head.split(',')
+            val name = parts[0].trim()
+            if (name.isEmpty()) return null
+            val lengths = ArrayList<Int>()
+            if (parts.size > 1) {
+                for (i in 1 until parts.size) {
+                    lengths.add(parts[i].trim().toIntOrNull() ?: return null)
+                }
+            } else {
+                lengths.add(1)
+            }
+            return VarInfo(
+                name = name,
+                operandType = if (kw == "VARS") OperandType.STR else OperandType.INT,
+                dimension = lengths.size.coerceIn(1, 3),
+                isCharacterData = false,
+                isConst = false,
+            )
         }
 
         /**

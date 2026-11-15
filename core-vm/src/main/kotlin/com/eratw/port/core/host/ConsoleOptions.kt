@@ -19,7 +19,7 @@ enum class OptionOrigin { EXPLICIT, HTML, AUTO_TEXT }
  * - [TEXT]：普通文字按钮（即使脚本给它设过颜色，也只按默认按钮外观显示）；
  * - [COLOR_SWATCH]：整颗按钮的标签就是一个纯色块字形，颜色是按钮的数据本身。
  *
- * 这个字段是识别口径的单一真源：`ShellUi` 的色格、`LeanOptionFilter` 的保留判据、
+ * 这个字段是识别口径的单一真源：`ShellUi` 的色格、`LeanOptionFilter` 的常用指令判据、
  * `MainActivity` 的选项指纹都只读它，避免三处各自扫标签后分叉。
  */
 enum class OptionVisual { TEXT, COLOR_SWATCH }
@@ -58,7 +58,8 @@ enum class OptionVisual { TEXT, COLOR_SWATCH }
  *   编号印在名字**末尾**（`移动[400]`）时这里是 false —— 编号还留在 [label] 原文里，
  *   不必另说一句。屏上印的数与提交值对不上时同样是 false：地图格子印的是本地图内的号，
  *   提交值却是 `MAIN_MAP*100+LOCAL`（`MOVEMENTS/DRAW_MAP.ERB:467`），那不是按钮自己的编号。
- *   消费点是显示层的「更精简的游戏选项」（`LeanOptionFilter`），可点性判定不看它。
+ *   消费点是右栏的两条规则（`RailOptionRules` 的隐藏无编号、历史候选判据；长按菜单的
+ *   置顶入口不收窄到这一条），可点性判定不看它。
  * @property colorRgb 按钮打印时的显式前景色（`0xRRGGBB`）；普通文字按钮和色块按钮都保留。
  *   null = 原按钮没有 `SETCOLOR` / HTML 显式色，右栏保持默认外观。是否色块只看 [visual]。
  *

@@ -8,6 +8,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -63,6 +64,8 @@ class VmdbgCliTest {
         assertEquals("MINI_PASS", fields["target"])
         // PASS 无错误现场：location 为占位 -
         assertEquals("-", fields["location"])
+        // 文件列与 location 同源（无 CodeEE 现场）⇒ -
+        assertEquals("-", fields["file"], "PASS 没有失败点，file 应为 -：${r.out}")
         // 步数已读出且为正（反射 executedSteps；GameBootSmoke.kt:85 口径）
         assertTrue((fields["steps"]?.toLong() ?: -1L) > 0, "steps=${fields["steps"]}")
         assertTrue((fields["elapsedMs"]?.toLong() ?: -1L) >= 0)
@@ -103,11 +106,16 @@ class VmdbgCliTest {
         val line = loc.split(":").getOrNull(1)?.toIntOrNull() ?: -1
         assertTrue(line in 10..11, "CALLFORM 在 mini.erb 物理第 11 行，行表报 10..11：$loc")
         assertTrue((fields["message"] ?: "").contains("MINI_NOPE_XYZ"), "message 应点名未定义函数：${fields["message"]}")
+        // 文件列 = 该 pc 所属函数的 position 文件（mini.erb），与 location 同一现场
+        val file = fields["file"] ?: ""
+        assertTrue(file.endsWith("mini.erb"), "file 应指向 mini.erb：$file | ${r.out}")
+        assertFalse(SourceMap.isAbsolutePath(file), "输出面不得上屏绝对路径：$file")
     }
 
     @Test
     fun whereReadsLastErrorWrittenByCall() {
-        run(*MiniCorpus.args(built, work, "call", "MINI_CODEEE"))
+        val call = run(*MiniCorpus.args(built, work, "call", "MINI_CODEEE"))
+        val callFields = kv(call.out)
         val r = run(*MiniCorpus.args(built, work, "where"))
         assertEquals(0, r.code, r.out)
         val fields = kv(r.out)
@@ -115,6 +123,9 @@ class VmdbgCliTest {
         assertTrue((fields["funcName"] ?: "").contains("MINI_CODEEE"), r.out)
         assertTrue((fields["line"]?.toIntOrNull() ?: -1) >= 0, "line 应与 call 的 location 同源：${r.out}")
         assertTrue((fields["message"] ?: "").isNotEmpty(), r.out)
+        // where 回读的文件列与 call 上屏值一致（同一个 last-error.json 键）
+        assertEquals(callFields["file"], fields["file"], "where 应回读 call 写下的 file：${r.out}")
+        assertTrue((fields["file"] ?: "").isNotEmpty(), r.out)
     }
 
     @Test
@@ -160,10 +171,18 @@ class VmdbgCliTest {
         assertEquals(0, r.code, r.out)
         // 头行 + 恰好 4 条指令行
         assertTrue(r.out.contains("instructionCount="), r.out)
+        val header = r.out.lineSequence().first { it.startsWith("pc=") }
         val rows = r.out.lines().filter { it.startsWith("pc=") && "instructionCount" !in it }
         assertEquals(4, rows.size, r.out)
-        // 每行带 words=[op,a,b,c] 与 line=
+        // 每行带 words=[op,a,b,c]、line= 与 file=
         assertTrue(rows.all { "words=[" in it && "line=" in it }, r.out)
+        // header 不带 file=（文件列只属于指令行）
+        assertTrue("file=" !in header, "header 不该有 file=：$header")
+        val files = rows.map { Regex(" line=-?\\d+ file=(\\S+) ").find(it)?.groupValues?.get(1) ?: "" }
+        assertTrue(files.all { it.isNotEmpty() }, "每条指令行都要有 file=：$rows")
+        assertTrue(files.toSet().size == 1, "mini 语料四条指令同属同一文件：$files")
+        assertTrue(files[0].endsWith("mini.erb"), "file 应指向 mini.erb：$files")
+        assertFalse(SourceMap.isAbsolutePath(files[0]), "输出面不得上屏绝对路径：$files")
     }
 
     @Test

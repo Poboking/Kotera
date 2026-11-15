@@ -197,7 +197,9 @@ class CallStrRuntimeTest {
     @Test
     fun `实参求值失败折成 Failed 且不抛出`() {
         val p = parseProgram("FOO" to 1)
-        val r = rt(p, metasOf(p, "FOO" to 1)).resolveRuntimeCall("FOO(1/0)")
+        // 整数 1/0 自 4.981 起是「钳制 0 + 警告」（SafeArithmetic.cs:67-77），不再是求值失败；
+        // 浮点除零仍是硬错（OperatorMethod.cs:987 / Binary.getFloatValue），用其覆盖求值失败折道。
+        val r = rt(p, metasOf(p, "FOO" to 1)).resolveRuntimeCall("FOO(1.5/0.0)")
         assertTrue(r is RuntimeCallResolution.Failed, "期望 Failed，实际 $r")
     }
 

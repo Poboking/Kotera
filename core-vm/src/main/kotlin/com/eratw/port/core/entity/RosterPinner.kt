@@ -65,6 +65,9 @@ class RosterPinner(
     private val entityToChara = HashMap<Long, Int>()
     private val charaToEntity = HashMap<Int, Long>()
 
+    /** 行排列世代：只在 [rewrite]（排列/删除/退场删行）递增；[project] 尾增不走 rewrite，故不递增。 */
+    private var generation = 0L
+
     override fun project(entityId: Long): Int {
         entityToChara[entityId]?.let { return it } // 幂等：已投射返回当前行号
         if (!kernel.exists(entityId)) return -1
@@ -91,6 +94,11 @@ class RosterPinner(
     }
 
     override fun charIndexOf(entityId: Long): Int = entityToChara[entityId] ?: -1
+
+    override val rosterGeneration: Long get() = generation
+
+    override fun charIndexOfChecked(entityId: Long, expectedGeneration: Long): Int =
+        if (generation != expectedGeneration) -1 else charIndexOf(entityId)
 
     override fun entityAt(charIndex: Int): Long = charaToEntity[charIndex] ?: EntityIdCodec.NULL
 
@@ -137,6 +145,8 @@ class RosterPinner(
     }
 
     private fun rewrite(mapping: Map<Long, Int>) {
+        // 行排列/删除唯一的映射重建出口 ⇒ 世代在此递增（§7：行排列即递增）。
+        generation++
         entityToChara.clear()
         charaToEntity.clear()
         for ((entity, row) in mapping) {

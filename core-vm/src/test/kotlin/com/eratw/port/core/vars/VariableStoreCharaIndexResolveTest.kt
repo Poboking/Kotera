@@ -5,6 +5,9 @@ import com.eratw.port.core.entity.VirtualCharaNoRegistry
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -239,5 +242,144 @@ class VariableStoreCharaIndexResolveTest {
         assertEquals(10_001, reg.allocate(entityId + 1))
         assertEquals(2, reg.size)
         assertEquals(3, s.characters.count, "分配不改角色表")
+    }
+
+    // ------------------------------------------------------------------
+    // 上报复现：CALLNAME 字符串读（4.981 ERB/DLC/自室描写.ERB:337）
+    //
+    // 求值链（4.981 语料 %CALLNAME:(L_SAMPLE_PARTNERS:LOCAL)%）：
+    //   PercentSubWord → VarRef("CALLNAME", [下标表达式], STR)（expr/FormStringTerm.kt:187-244）
+    //   → Expr.VarRef.getStrValue（expr/Expr.kt:185-203）→ VariableStore.readStr
+    //   （vars/VariableStore.kt:625-626）→ readStrEntry → checkFlat → resolveCharaPos。
+    // NAME/CALLNAME 同属 Storage.C_STR0（vars/SystemLayout.kt:86-89），checkFlat 的角色位
+    // 翻译不是 int 读路径专有：字符串读共用同一个 checkFlat（VariableStore.kt:1031）。
+    // ------------------------------------------------------------------
+
+    /** 同 [storeWithResolver]，但模板带非空 CALLNAME（读回值可区分「行 1」与空串旁路）。 */
+    private fun storeWithCallnames(
+        rowOf: (Long) -> Int = { if (it == entityId) 1 else -1 },
+    ): Pair<VariableStore, VirtualCharaNoRegistry> {
+        val reg = VirtualCharaNoRegistry()
+        val s = VariableStore(charaIndexResolver = VirtualCharaIndexResolver(reg, rowOf))
+        repeat(3) { i ->
+            val no = (i + 1).toLong()
+            s.registerTemplate(
+                CharacterTemplate(no = no, name = "角色$no", callname = "呼称$no", csvNo = no),
+            )
+            s.addCharacter(no)
+        }
+        return s to reg
+    }
+    @Test
+    fun `虚拟NO字符串读 CALLNAME 落投射行不抛`() {
+        val (s, reg) = storeWithCallnames()
+        reg.allocate(entityId)
+        assertEquals("呼称2", s.readStr("CALLNAME", longArrayOf(vno)))
+        assertEquals("呼称1", s.readStr("CALLNAME", longArrayOf(0)))
+        assertEquals("呼称3", s.readStr("CALLNAME", longArrayOf(2)))
+    }
+
+    @Test
+    fun `虚拟NO字符串读 CALLNAME 投射行0也走翻译`() {
+        val (s, reg) = storeWithCallnames(rowOf = { 0 })
+        reg.allocate(entityId)
+        assertEquals("呼称1", s.readStr("CALLNAME", longArrayOf(vno)))
+    }
+    @Test
+    fun `无 resolver CALLNAME 读数 168 报原文串且含原值`() {
+        val s = plainStore()
+        val e = assertFailsWith<CodeEE> { s.readStr("CALLNAME", longArrayOf(168)) }
+        assertEquals(
+            "角色数组变量\"CALLNAME\"的第1个变量(168)超出角色登记编号的最大范围",
+            e.message,
+        )
+        assertEquals("", s.readStr("CALLNAME", longArrayOf(1)))
+        assertEquals("角色2", s.readStr("NAME", longArrayOf(1)))
+    }
+
+    @Test
+    fun `168 落在虚拟NO域外 仍按原值 OOR`() {
+        val (s, reg) = storeWithCallnames()
+        reg.allocate(entityId)
+        assertEquals(VirtualCharaNoRegistry.VIRTUAL_NO_BASE, reg.virtualNoOf(entityId))
+        val e = assertFailsWith<CodeEE> { s.readStr("CALLNAME", longArrayOf(168)) }
+        assertEquals(
+            "角色数组变量\"CALLNAME\"的第1个变量(168)超出角色登记编号的最大范围",
+            e.message,
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // RT2 F 车（MR-2b-2）后期装配缝：生产 store 由 GameSession 在声明事务之前构造，
+    // 那时虚拟 NO 注册表与真投射桥都不存在，resolver 只能由宿主在装配期显式注入，
+    // 收口再按实例解绑。构造参数注入的既有 20 例逐字不动、语义零差。
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `后期装配缝 未注入零行为差且注入后虚拟NO落投射行`() {
+        val s = plainStore()
+        assertNull(s.charaIndexResolverOrNull, "前置：生产 store 构造期没有注册表，解析器必须为 null")
+        val before = assertFailsWith<CodeEE> { s.readInt("CFLAG", longArrayOf(vno, 0)) }
+        assertEquals(
+            "角色数组变量\"CFLAG\"的第1个变量($vno)超出角色登记编号的最大范围",
+            before.message,
+            "未注入时逐位旁路，报错文案第 3 实参保持脚本原值",
+        )
+
+        val reg = VirtualCharaNoRegistry()
+        val resolver = VirtualCharaIndexResolver(reg) { if (it == entityId) 1 else -1 }
+        s.bindCharaIndexResolver(resolver)
+        assertSame(resolver, s.charaIndexResolverOrNull)
+
+        reg.allocate(entityId)
+        s.writeInt("CFLAG", longArrayOf(1, 0), 777L)
+        assertEquals(777L, s.readInt("CFLAG", longArrayOf(vno, 0)), "装配后虚拟 NO 必须解析到当前投射行")
+        assertEquals(3, s.characters.count, "装配 resolver 不改角色表")
+    }
+
+    @Test
+    fun `后期装配缝 重复绑定被拒且既有解析器不被静默覆盖`() {
+        val (s, reg) = storeWithResolver()
+        val original = s.charaIndexResolverOrNull
+        assertNotNull(original, "构造参数注入的解析器必须仍在观察面上")
+        val other = VirtualCharaIndexResolver(VirtualCharaNoRegistry()) { 2 }
+        val ex = assertFailsWith<IllegalArgumentException> { s.bindCharaIndexResolver(other) }
+        assertTrue(ex.message!!.contains("重复绑定"), "拒绝理由要点名重复绑定：${ex.message}")
+        assertSame(original, s.charaIndexResolverOrNull, "被拒的重绑不得悄悄换掉原解析器")
+
+        reg.allocate(entityId)
+        s.writeInt("CFLAG", longArrayOf(1, 0), 888L)
+        assertEquals(888L, s.readInt("CFLAG", longArrayOf(vno, 0)), "被拒的重绑不得把解析改到行 2")
+        assertEquals(0L, s.readInt("CFLAG", longArrayOf(2, 0)))
+    }
+
+    @Test
+    fun `收口解绑 按实例幂等且解绑后回到逐位旁路`() {
+        val s = plainStore()
+        val reg = VirtualCharaNoRegistry()
+        val resolver = VirtualCharaIndexResolver(reg) { if (it == entityId) 1 else -1 }
+        s.bindCharaIndexResolver(resolver)
+        reg.allocate(entityId)
+        s.writeInt("CFLAG", longArrayOf(1, 0), 999L)
+        assertEquals(999L, s.readInt("CFLAG", longArrayOf(vno, 0)))
+
+        // 别人的实例不得解掉本会话绑定；本实例解绑后重复调用 no-op。
+        s.unbindCharaIndexResolver(VirtualCharaIndexResolver(reg) { 0 })
+        assertSame(resolver, s.charaIndexResolverOrNull)
+        s.unbindCharaIndexResolver(resolver)
+        assertNull(s.charaIndexResolverOrNull)
+        s.unbindCharaIndexResolver(resolver)
+        assertNull(s.charaIndexResolverOrNull)
+
+        val after = assertFailsWith<CodeEE> { s.readInt("CFLAG", longArrayOf(vno, 0)) }
+        assertEquals(
+            "角色数组变量\"CFLAG\"的第1个变量($vno)超出角色登记编号的最大范围",
+            after.message,
+            "解绑后回到原版逐位旁路，文案仍含脚本原值",
+        )
+        // 解绑后允许下一会话重绑（不把 store 变成一次性）。
+        val next = VirtualCharaIndexResolver(reg) { 2 }
+        s.bindCharaIndexResolver(next)
+        assertSame(next, s.charaIndexResolverOrNull)
     }
 }

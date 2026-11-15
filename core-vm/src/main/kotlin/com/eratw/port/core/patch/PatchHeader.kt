@@ -288,23 +288,24 @@ class PatchHeader(
         }
         // function-metas 写侧闸（I5 前移）：坏记录在构造期拒绝,不进产物。offset 是补丁
         // 窗口内的函数序（0 基）,必须落在 [0, patchFunctionCount) —— 越窗即「头与补丁体
-        // 对不上号」,装载期按损坏拒（写侧先拦,不留到读侧）。三个尺寸域与 FuncMeta 的
-        // 16 位域同源（构造期会再兜一遍,这里提前给字段名定位）;returnsFloat 只允许出现
-        // 在方法上（与侧车 function 行同一道闸,spec: BootMetadata 的 flags 位 2 判据）。
+        // 对不上号」,装载期按损坏拒（写侧先拦,不留到读侧）。三个尺寸域与 FuncMeta 同源：
+        // 官方合法域 0..int.MaxValue-1（spec: LogicalLineParser.cs:236-244，装载期会再兜一遍,
+        // 这里提前给字段名定位）;returnsFloat 只允许出现在方法上（与侧车 function 行同一道闸,
+        // spec: BootMetadata 的 flags 位 2 判据）。
         val seenMetaOffset = HashSet<Int>(functionMetas.size * 2)
         for (m in functionMetas) {
             require(m.offset in 0 until patchFunctionCount) {
                 "function-metas 的 offset 越出补丁函数窗口：${m.offset}（patch-functions = $patchFunctionCount）"
             }
             require(m.name.isNotEmpty()) { "function-metas 的函数名不能为空（offset = ${m.offset}）" }
-            require(m.floatLocalSize in 0..0xFFFF) {
-                "function-metas 的 floatLocalSize 越 16 位域：${m.floatLocalSize}（offset = ${m.offset}）"
+            require(m.floatLocalSize in 0 until Int.MAX_VALUE) {
+                "function-metas 的 floatLocalSize 越官方合法域(0..int.MaxValue-1)：${m.floatLocalSize}（offset = ${m.offset}）"
             }
-            require(m.localSize in 0..0xFFFF) {
-                "function-metas 的 localSize 越 16 位域：${m.localSize}（offset = ${m.offset}）"
+            require(m.localSize in 0 until Int.MAX_VALUE) {
+                "function-metas 的 localSize 越官方合法域(0..int.MaxValue-1)：${m.localSize}（offset = ${m.offset}）"
             }
-            require(m.localsSize in 0..0xFFFF) {
-                "function-metas 的 localsSize 越 16 位域：${m.localsSize}（offset = ${m.offset}）"
+            require(m.localsSize in 0 until Int.MAX_VALUE) {
+                "function-metas 的 localsSize 越官方合法域(0..int.MaxValue-1)：${m.localsSize}（offset = ${m.offset}）"
             }
             require(!m.returnsFloat || m.isMethod) {
                 "function-metas 的 returnsFloat 只允许出现在方法上（#FUNCTIONF）：${m.name}"
@@ -1094,7 +1095,7 @@ data class FunctionMetaRecord(
  * 三个布尔位用独立 0/1 原子（不复用侧车 flags 位表）：那 7 位 1..64 与侧车 v2 逐位绑定、
  * `returnsFloat` 在侧车走的是 function 行的**可选原子**而非位（`FuncMeta` 的旁路位不进
  * 侧车 flags）—— 这里照搬原子形态,两处各自的字段表由各自用例钉住,不造第三份位表。
- * 语义闸（offset 越窗、16 位域、returnsFloat 需方法位、offset 重复）在 [PatchHeader]
+ * 语义闸（offset 越窗、尺寸域越官方合法域、returnsFloat 需方法位、offset 重复）在 [PatchHeader]
  * 构造期统一兜;本类只做**结构**校验（记号形态、0/1 位、非负整数）,错误消息一律带
  * 「function-metas 第 k 条」前缀,与头层的「第 N 行」互补定位（PrivateDimsCodec 同款）。
  */

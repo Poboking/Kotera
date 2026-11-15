@@ -3,6 +3,7 @@ package com.eratw.port.boot
 import com.eratw.port.core.code.Program
 import com.eratw.port.core.compile.CallDefaultsCollector
 import com.eratw.port.core.compile.CompileException
+import com.eratw.port.core.compile.ConstantKeywordResolver
 import com.eratw.port.core.compile.DimSpecLayout
 import com.eratw.port.core.compile.ErbProgramCompiler
 import com.eratw.port.core.compile.FuncSig
@@ -215,6 +216,27 @@ object RealCorpusCompile {
         val exprCalls = buildExprCallTable(allDefs, pre.funcTypes)
         val renameDic = CorpusValidator.loadRenameDic(corpus.root)
 
+        // 常量关键字折叠的数据面（与生产 erbcc / 侧车同源），先于解析器取定：解析期
+        // 常量字符串下标要折成整数（原版装载期 Restructure，VariableStrArgTerm.cs:57-69），
+        // 否则本装置编出来的程序与出包 erbc 相位不一致（装置走运行期查表、产物走整数）。
+        // 装载时点 = `VariableSize.csv` 之后、ERH 之前（spec: Process.cs:292-293 → :300-301 → :309/:313）。
+        val csvDir = corpus.root.parent?.resolve("CSV") ?: corpus.root
+        val gameRoot = corpus.root.parent ?: corpus.root
+        val gameDataForFold = runCatching { GameDataLoader.load(csvDir) }.getOrNull()
+        val systemNames = gameDataForFold?.registry?.all()
+            ?.mapTo(HashSet()) { it.name.uppercase() } ?: emptySet()
+        val keywordTables: Map<String, Map<String, Int>> =
+            runCatching { UserKeywordTables.foldSnapshot(gameRoot, systemNames) }
+                .getOrDefault(emptyMap()) +
+                (gameDataForFold?.registry?.systemKeywordTables() ?: emptyMap())
+        val bootParserConfig = if (parserConfig.constantKeywordLookup == null) {
+            parserConfig.copy(
+                constantKeywordLookup = ConstantKeywordResolver(gameDataForFold?.registry, keywordTables)::resolve,
+            )
+        } else {
+            parserConfig
+        }
+
         // 3) 语句切片：整轮共用一个 LineParser/ScopedResolver（A13 口径）
         val slices = ArrayList<Slice>()
         // #DEFINE 宏与生产 erbcc / CorpusValidator 同一份词法层展开。
@@ -223,9 +245,9 @@ object RealCorpusCompile {
         val parser = sliceLineParser(
             CorpusValidator.ScopedResolver(pre),
             pre.macros,
-            parserConfig,
+            bootParserConfig,
         )
-        if (parserConfig != ParserConfig()) {
+        if (parserConfig.systemNoTarget || parserConfig.compatiRAND || parserConfig.systemIgnoreStringSet) {
             notes.add(
                 "解析期配置（ParserConfig）非出厂：CompatiRAND=${parserConfig.compatiRAND} " +
                     "SystemNoTarget=${parserConfig.systemNoTarget} " +
@@ -380,15 +402,7 @@ object RealCorpusCompile {
         // CMP-40/CMP-59 装置侧同口径：布局桥、`#DIM` 声明解析与生产 `CorpusCompile`
         // 用**同一份**折叠回调（VARSIZE 快照 + 内置名表 + ERD 表快照）。折叠器不进布局，
         // VARSIZE("RELATION") 一类私有声明会在布局面被静默丢，与侧车/运行期分叉。
-        val csvDir = corpus.root.parent?.resolve("CSV") ?: corpus.root
-        val gameRoot = corpus.root.parent ?: corpus.root
-        val gameDataForFold = runCatching { GameDataLoader.load(csvDir) }.getOrNull()
-        val systemNames = gameDataForFold?.registry?.all()
-            ?.mapTo(HashSet()) { it.name.uppercase() } ?: emptySet()
-        val keywordTables: Map<String, Map<String, Int>> =
-            runCatching { UserKeywordTables.foldSnapshot(gameRoot, systemNames) }
-                .getOrDefault(emptyMap()) +
-                (gameDataForFold?.registry?.systemKeywordTables() ?: emptyMap())
+        // 数据面在上文「常量关键字折叠的数据面」一并取定（解析器要用同一份），此处复用。
         // 数据面**只有一份**：快照用上面这份表（含 CMP-59 的 ERD 第二跳），不另建一份 ——
         // 否则 ERD 表在这条路上失效，装置与侧车的 GETNUM 折叠面再次分叉。
         // 折叠快照并入用户全局声明（mergedVarSizes 不动点，与 erbcc mergeGlobalUserDimSizes /
@@ -471,7 +485,15 @@ object RealCorpusCompile {
             )
         }
 
-        val compiler = ErbProgramCompiler(layout, callDefaults.build())
+        // E1（定向）：与 erbcc 的 CorpusCompile 同口径，把 `CHK_DATENOW` 的已解析体注入；
+        // 关态 `-Deratw.perf.noInlineChkDatenow=true` 下产物必须与注入前逐字节相同。
+        val inlineShapeBodies = LinkedHashMap<String, List<Statement>>()
+        for (u in units) {
+            val s = u.slice ?: continue
+            if (s.poisoned) continue
+            inlineShapeBodies[u.sigKey.uppercase()] = s.stmts
+        }
+        val compiler = ErbProgramCompiler(layout, callDefaults.build(), inlineShapeBodies = inlineShapeBodies)
         val metas = ArrayList<FuncMeta>()
         val labels = HashMap<String, Map<String, Int>>()
         val fileByKey = HashMap<String, String>()

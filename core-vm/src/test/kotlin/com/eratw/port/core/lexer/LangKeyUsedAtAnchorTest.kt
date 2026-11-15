@@ -27,6 +27,9 @@ import kotlin.test.assertTrue
  * **每个「」绑定到它左边最近的那个 `.kt`**。needle 三档取法：已走通道的键写调用式
  * （`LangKey.MissingArg`）、判「不改-同形」的键写屏上原文的静态前缀、尚未接线的键写
  * 将来落点的函数名（`private fun changeable`）。
+ * 路径例外只对 erbcc 面开口：`tools/` 开头的锚是 erbcc 编译面的抛点，**相对仓库根**
+ * 解析（见 [repoRoot]）—— erbcc 模块文件在结构上放不进 core-vm 的
+ * `com/eratw/port/core/` 相对路径里（MODERN-R12-PRE 补）。
  * 不含「」的条目 = 本条无可核锚点（无消费点 / 未移植 / 待接线），**跳过但在报告里点名**，
  * 让人一眼看到还有多少条核不了。
  */
@@ -49,6 +52,18 @@ class LangKeyUsedAtAnchorTest {
         )
         return candidates.firstOrNull { it.isDirectory }
             ?: error("找不到 core-vm main 源码根（工作目录 ${File(".").absolutePath}）")
+    }
+
+    /**
+     * 仓库根（eratw-android）：`tools/` 开头的 erbcc 面锚点相对它解析。
+     * 口径同 [coreRoot] 的候选探测，从当前工作目录逐级向上找 `specs/error-texts.yaml`。
+     * 只对 `tools/` 前缀开口（现在 specs 表里跨模块抛点只有 erbcc 编译面一处），
+     * 其余前缀仍按 [coreRoot] 相对 core 解析。
+     */
+    private fun repoRoot(): File {
+        val candidates = listOf(File("."), File(".."), File("../.."))
+        return candidates.firstOrNull { File(it, "specs/error-texts.yaml").isFile }
+            ?: error("找不到仓库根（specs/error-texts.yaml 的所在目录，工作目录 ${File(".").absolutePath}）")
     }
 
     /** 一条 `used_at` 解析出来的锚点：文件相对路径 + 该文件里必须逐字命中的 needle 清单。 */
@@ -139,7 +154,8 @@ class LangKeyUsedAtAnchorTest {
         val absent = parsed.anchors.filter { codeLines(it.rel, allowMissing = true).isEmpty() }
         assertTrue(
             absent.isEmpty(),
-            "used_at 指的产品文件不存在，或路径不是相对 core-vm 的 com/eratw/port/core/：" +
+            "used_at 指的产品文件不存在（core 面路径相对 core-vm 的 com/eratw/port/core/，" +
+                "tools/ 开头的 erbcc 面相对仓库根）：" +
                 absent.joinToString { "${it.id} -> ${it.rel}" },
         )
     }
@@ -227,25 +243,16 @@ class LangKeyUsedAtAnchorTest {
 
     private val cache = HashMap<String, List<String>>()
 
-    /** 非注释行；`allowMissing` 为真时文件缺失返回空表（给「文件必须存在」那个用例用）。 */
-    /** 仓根（含 `core-vm/` 与 `tools/` 的那层）；`used_at` 允许写仓根相对的产品路径。 */
-    private fun repoRoot(): File? =
-        listOf(File(".."), File("."), File("../.."))
-            .firstOrNull { File(it, "core-vm/src/main/kotlin").isDirectory }
-
     /**
-     * 解析 `used_at` 里的产品文件：先按 core-vm 的 `com/eratw/port/core/` 相对路径找，
-     * 找不到再按**仓根相对路径**找（`tools/erbcc/...` 这类跨模块产品文件走这一档）。
+     * 非注释行；`allowMissing` 为真时文件缺失返回空表（给「文件必须存在」那个用例用）。
+     * 根解析：`tools/` 开头的 erbcc 面锚点相对仓库根（[repoRoot]），其余相对 core 根
+     * （[coreRoot]，即 core-vm 的 com/eratw/port/core/）。
      */
-    private fun resolveCodeFile(rel: String): File? =
-        File(coreRoot(), rel).takeIf { it.isFile }
-            ?: repoRoot()?.resolve(rel)?.takeIf { it.isFile }
-
     private fun codeLines(rel: String, allowMissing: Boolean): List<String> =
         cache.getOrPut("$rel#$allowMissing") {
-            val f = resolveCodeFile(rel)
-            if (f == null) {
-                assertTrue(allowMissing, "used_at 指的文件不存在（core-vm 内与仓根两处都找过）：$rel")
+            val f = if (rel.startsWith("tools/")) File(repoRoot(), rel) else File(coreRoot(), rel)
+            if (!f.isFile) {
+                assertTrue(allowMissing, "used_at 指的文件不存在：$f")
                 return@getOrPut emptyList()
             }
             f.readText().split("\n").filterNot { ln ->

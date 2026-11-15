@@ -42,8 +42,9 @@ import kotlin.math.roundToInt
  * @property layoutWidthPx 客户区含右端预留的像素宽（设备 px）：窗口宽给定且窄于物理内容区时
  *   是 `min(窗口宽, 物理内容宽)`，否则是物理内容宽；未给物理内容宽时退回 [resolve] 的
  *   `widthPx` 实参（未接线 ⇒ 调用方的可绘制宽）。
- * @property contentInsetLeftPx 客户区在屏上的水平居中偏移（设备 px）：
- *   `(物理内容宽 − [layoutWidthPx]) / 2` 的整数除结果，余 1 px 归左；满宽/未接线 ⇒ 0。
+ * @property contentInsetLeftPx 客户区在屏上的水平偏移（设备 px）= **留白 + 居中**同一算式：
+ *   `contentMarginPx + (去留白宽 − [layoutWidthPx]) / 2` 的整数除结果，余 1 px 归左；
+ *   满宽/未接线且无留白 ⇒ 0。留白（壳层圆屏适配）收掉的部分露出宿主黑底，即玩家看到的黑边。
  */
 data class ScreenLayout(
     val fontPixelSize: Int,
@@ -136,9 +137,14 @@ data class ScreenLayout(
          *    （[minColumns] ≤ 0 或宽 ≤ 0 = 不守护）；
          * 4. `columns = floor(可绘制宽 / 半角格宽)`；`rows = floor(height / 行高)`；
          * 5. 客户区宽/高（原版窗口语义，spec: `MainWindow.cs:687-688` / `:726`）：
-         *    `layoutWidthPx = min(窗口宽, 物理内容宽)`（未给窗口宽 = 物理内容宽），
-         *    `contentInsetLeftPx = (物理内容宽 - layoutWidthPx) / 2`（整数除，余 1 px 归左），
-         *    列数按窗口宽内可绘制宽算，行数按客户区高算；三新参数全 ≤0 ⇒ 与本次改动前逐值相同。
+         *    先从物理内容宽扣掉每侧 `contentMarginPx` 的留白得**去留白宽**，
+         *    `layoutWidthPx = min(窗口宽, 去留白宽)`（未给窗口宽 = 去留白宽），
+         *    `contentInsetLeftPx = 留白 + (去留白宽 - layoutWidthPx) / 2`（整数除，余 1 px 归左），
+         *    列数按窗口宽内可绘制宽算，行数按客户区高算；新增参数全 ≤0 ⇒ 与本次改动前逐值相同。
+         *
+         *    留白（`contentMarginPx`，壳层圆屏适配）是给屏套上的**模拟边框**：收掉的部分露出
+         *    宿主黑底即玩家看到的黑边。它修正的是「物理内容宽」这个**输入**——守护、min、
+         *    居中、列数消费的是同一个修正后的输入，不另起第二把尺（2026-11-14 用户裁定）。
          *
          * 第 5 步**不推断窗口宽**：`windowWidthPx <= 0` 就是「未接线」，不许拿屏幕尺寸冒充客户区宽。
          *
@@ -146,7 +152,8 @@ data class ScreenLayout(
          * 只有屏宽足够（或列数守护调低）才会真正变大；被压小是「保地图」的显式取舍，
          * 不是设置失效。第 3 步用 floor 而非 round：round 会把 cap 抬高 1px，
          * 反而让实际列数比 [minColumns] 少一列（2400px 屏上实测 136 → 135）。
-         * 列数守护只看**物理可绘制宽** `widthPx`：窗口宽只决定客户区有多宽，不反过来压字号。
+         * 列数守护只看**去留白后的可绘制宽**：留白修正「屏有多宽」这个输入（见第 5 步），
+         * 守护随之在可见区域里保 N 列；窗口宽只决定客户区有多宽，不反过来压字号。
          *
          * @param widthPx 可绘制宽（像素；调用方传**已扣 shift** 的绘制宽，≤0 = 未布局）
          * @param heightPx 可见高（像素，≤0 = 未布局）
@@ -160,6 +167,8 @@ data class ScreenLayout(
          * @param windowWidthPx 客户区容宽（设备 px，已按 [CellMetrics.scriptPixels] 折算）；
          *   ≤0 = 未接线 ⇒ 满宽，**不得**自行推断窗口宽
          * @param windowHeightPx 客户区容高（设备 px，已折算）；≤0 = 未接线 ⇒ 沿用物理内容高
+         * @param contentMarginPx 每侧留白（设备 px）；≤0 = 未开 ⇒ 全部读数与未传时逐值相同。
+         *   只修正「物理内容宽/可绘制宽」这两个输入，不引入新的几何真相源
          */
         fun resolve(
             widthPx: Int,
@@ -172,6 +181,7 @@ data class ScreenLayout(
             contentWidthPx: Int = 0,
             windowWidthPx: Int = 0,
             windowHeightPx: Int = 0,
+            contentMarginPx: Int = 0,
         ): ScreenLayout {
             val density = densityDpi.toFloat() / DENSITY_BASE_DPI
             val ratio = if (configLineHeightPx > 0 && configFontPx > 0) {
@@ -183,14 +193,21 @@ data class ScreenLayout(
             var font = (configFontPx.coerceAtLeast(CellMetrics.MIN_FONT_PIXEL_SIZE) *
                 density * PC_PIXEL_TO_DP * scale).roundToInt()
                 .coerceAtLeast(CellMetrics.MIN_FONT_PIXEL_SIZE)
-            if (minColumns > 0 && widthPx > 0) {
+            // 守护看**去留白宽**：留白是屏的模拟边框，玩家可见的屏 = 去留白区域
+            // （2026-11-14 用户裁定）。不是第二把尺——只修正守护的输入宽，守护逻辑本身不变。
+            val guardWidth = if (contentMarginPx > 0) {
+                (widthPx - 2 * contentMarginPx).coerceAtLeast(0)
+            } else {
+                widthPx
+            }
+            if (minColumns > 0 && guardWidth > 0) {
                 // floor 反推：`0.52 × font ≤ width / N` 才保证 floor(width / (0.52 × font)) ≥ N。
                 // 再用与实际列数**完全相同**的算式复核，防浮点边界少一列。
-                var capFont = (widthPx /
+                var capFont = (guardWidth /
                     (minColumns * CellMetrics.CELL_PIXEL_FACTOR / 2f)).toInt()
                     .coerceAtLeast(CellMetrics.MIN_FONT_PIXEL_SIZE)
                 while (capFont > CellMetrics.MIN_FONT_PIXEL_SIZE &&
-                    columnsFor(widthPx, capFont) < minColumns
+                    columnsFor(guardWidth, capFont) < minColumns
                 ) {
                     capFont--
                 }
@@ -203,26 +220,37 @@ data class ScreenLayout(
             val hasContentWidth = contentWidthPx > 0
             // 1) 右端预留 = 调用方扣掉的 shift（`widthPx` 已是可绘制宽）；未给物理宽 ⇒ 0。
             val reservedPx = if (hasContentWidth) (contentWidthPx - widthPx).coerceAtLeast(0) else 0
-            // 2) 版面客户区宽（含预留）：夹到物理内容宽；未给物理宽 ⇒ 退回调用方的可绘制宽。
+            // 2) 去留白宽：每侧扣 contentMarginPx 的模拟边框；未开（≤0）= 物理内容宽原值。
+            //    留白与窗口宽是同一算式里的两个独立输入：min 显式合成，谁也不覆写谁。
+            val availableWidthPx = if (hasContentWidth && contentMarginPx > 0) {
+                (contentWidthPx - 2 * contentMarginPx).coerceAtLeast(0)
+            } else {
+                contentWidthPx
+            }
+            // 3) 版面客户区宽（含预留）：夹到去留白宽；未给物理宽 ⇒ 退回调用方的可绘制宽。
             val layoutWidthPx = when {
                 !hasContentWidth -> widthPx
-                windowWidthPx > 0 -> windowWidthPx.coerceAtMost(contentWidthPx)
-                else -> contentWidthPx
+                windowWidthPx > 0 -> windowWidthPx.coerceAtMost(availableWidthPx)
+                else -> availableWidthPx
             }
-            // 3) 水平居中偏移：左右均分、整数除的余 1 px 归左（只由 layoutWidthPx 派生）。
+            // 4) 水平偏移 = 留白 + 居中，同一算式：左右均分、整数除的余 1 px 归左
+            //    （只由 availableWidthPx/layoutWidthPx 派生，是 contentLeftPx 的唯一来源）。
             val contentInsetLeftPx = if (hasContentWidth) {
-                ((contentWidthPx - layoutWidthPx) / 2).coerceAtLeast(0)
+                (contentMarginPx.coerceAtLeast(0) + (availableWidthPx - layoutWidthPx) / 2)
+                    .coerceAtLeast(0)
             } else {
                 0
             }
-            // 4) 版面内可绘制宽（去掉右端预留）⇒ 列数；未布局（可绘宽 ≤0）的分支与旧实现同形。
+            // 5) 版面内可绘制宽（去掉右端预留）⇒ 列数；未布局（可绘宽 ≤0）的分支与旧实现同形。
+            //    未接窗口宽时 layoutWidthPx = 去留白宽，drawablePx = widthPx − 2×留白 = 守护宽
+            //    ⇒ 守护保住的列数就是这里的列数，两处同尺。
             val drawablePx = (layoutWidthPx - reservedPx).coerceAtLeast(0)
             val columns = when {
                 drawablePx > 0 -> (drawablePx / metrics.cellPixelWidth).toInt().coerceAtLeast(1)
                 widthPx > 0 -> 1
                 else -> minColumns.coerceAtLeast(1)
             }
-            // 5) 可见行数：客户区高（`WindowY - LineHeight`，调用方算好传入）决定可见行；未接线沿用旧式。
+            // 6) 可见行数：客户区高（`WindowY - LineHeight`，调用方算好传入）决定可见行；未接线沿用旧式。
             val rows = if (windowHeightPx > 0) {
                 (windowHeightPx.coerceAtMost(heightPx) / metrics.lineHeight).coerceAtLeast(1)
             } else if (heightPx > 0) {
@@ -242,8 +270,8 @@ data class ScreenLayout(
         }
 
         /**
-         * 列数守护复核用的列数读数：按**物理可绘制宽** `widthPx` 算（守护只保「屏宽铺得下 N 列」，
-         * 不随客户区窗口宽压字号，见 [resolve] 第 3 步与类文档）。
+         * 列数守护复核用的列数读数：按传入的**守护宽**算（已含留白修正；守护只保
+         * 「可见屏宽铺得下 N 列」，不随客户区窗口宽压字号，见 [resolve] 第 3 步与类文档）。
          */
         private fun columnsFor(widthPx: Int, fontPx: Int): Int {
             val cellPx = fontPx / 2f * CellMetrics.CELL_PIXEL_FACTOR

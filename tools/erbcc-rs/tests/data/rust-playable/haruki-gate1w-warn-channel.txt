@@ -1,6 +1,6 @@
 # erbcc-rs / rust-playable 车道登记：Rust 腿产物装进引擎后的实测读数（Haruki 机）
 # 产法：python devtools/verify_rust_erbc_playable.py all --register（或单独 gate1 / gate1w / gate2 / gate3）
-# 时间：2026-11-01 13:18:39　语料：C:\DSH\eratw-android-fixbug-haruki\eratw-android\tools\erbcc-rs\build\rust-playable\gate1w\warn-corpus
+# 时间：2026-11-01 13:18:39　语料：<erbcc-rs>\build\rust-playable\gate1w\warn-corpus
 # 机相关：读数含产出机绝对路径与 vm 版本；换机（或改 core-vm 源码树/编译器指纹）后重跑刷新，判据不放宽。
 
 ## 自造小语料（重复 @FUNCTION + INPUTS/BINPUTS 参数过多）的引擎读回告警
@@ -13,7 +13,7 @@
 两腿告警文本逐字相等：True
 load_warnings_count 4　sha256 8c1ad5ae22b22668ff45e319a36f9b67b374b172dbaaf0cb7d9959d1bde1ef9b
 
-## 基准（.workbuddy/golden-pc-loadwarnings.txt）的第二列，逐行原样
+## 基准（<基准表 golden-pc-loadwarnings>）的第二列，逐行原样
 基准 函数"@G12_FUNC"已经被定义过(GOLDEN_12_SYMBOLS.ERB的39行)
 基准 函数"@G12_PLAIN"已经被定义过(GOLDEN_12_SYMBOLS.ERB的48行)
 基准 函数"@G12_PLAIN"已经被定义过(GOLDEN_12_SYMBOLS.ERB的48行)

@@ -136,7 +136,7 @@ class StatementFamilyErrorTextDriftTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `入表键的产品行逐字在位且行上是 CodeEE 抛点`() {
+    fun `入表键的产品行逐字在位且抛点可证`() {
         val misses = ArrayList<String>()
         for (w in wired) {
             val hits = codeLines(w.rel).filter { it.text.contains(w.needle) }
@@ -144,13 +144,23 @@ class StatementFamilyErrorTextDriftTest {
                 misses += "${w.rel} 找不到生产代码行字面量「${w.needle}」（LangKey.${w.key.name} 同形漂走）"
             }
             // 接线枚（UserVariables/VarDef）的 needle 是调用式而非字符串字面量，允许不带引号形态；
-            // 其余 needle 必须出现在 CodeEE 构造行上。
-            if (w.rel != F_USERVAR && w.rel != F_VARDEF) {
+            // data/save/CharaFileIO.kt 自 a2def11cf（存档写路流式直写）起把 SAVECHARA 四段校验
+            // 收进 badCharaArgMessage 以满足 detekt ThrowsCount：文案留在 when 分支、抛点收敛为
+            // :88 的一处 `throw CodeEE(it)`。故这三处不再要求字面量与 CodeEE 同行，改由本测试
+            // 末尾单独核「helper 返回值确实进 throw CodeEE」——抛点仍被钉住，只放开行级位置。
+            if (w.rel != F_USERVAR && w.rel != F_VARDEF && w.rel != F_CHARA) {
                 val notThrow = hits.filterNot { it.text.contains("CodeEE") }
                 assertTrue(notThrow.isEmpty(), "${w.rel} 的 needle 命中了非 CodeEE 行：${notThrow.map { it.no to it.text.trim() } }")
             }
         }
         assertTrue(misses.isEmpty(), misses.joinToString("\n"))
+        // SAVECHARA 两枚的单一抛点形态：badCharaArgMessage(nos, count)?.let { throw CodeEE(it) }
+        assertTrue(
+            codeLines(F_CHARA).any {
+                it.text.contains("badCharaArgMessage(") && it.text.contains("throw CodeEE")
+            },
+            "data/save/CharaFileIO.kt 缺 SAVECHARA 单一 throw CodeEE 接线（文案没有可证的抛点）",
+        )
     }
 
     @Test

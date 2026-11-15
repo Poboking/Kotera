@@ -1,3 +1,5 @@
+import com.eratw.port.buildlogic.corpus
+
 plugins {
     alias(libs.plugins.kotlin.jvm)
 }
@@ -8,6 +10,11 @@ kotlin {
 }
 
 dependencies {
+    // RT2 Kotlin Mod SDK（路 A，era-arch-v61u.md §18）：facade 契约在 :mod-api（零 core 依赖），
+    // 适配器（wrap IEntityKernel/NativeMethodRegistry/DeclarationRegistry）落在本模块
+    // com.eratw.port.core.mod。方向单向 :core-vm -> :mod-api；用 api 因为适配器公开签名暴露
+    // :mod-api 类型（mod 作者只依赖 :mod-api，引擎侧消费适配器时需要它进编译面）。
+    api(project(":mod-api"))
     testImplementation(kotlin("test"))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
@@ -16,6 +23,9 @@ dependencies {
     // 「桌面 JDK 有、ART 编译面没有」的调用（Java 9+ 的 Field.trySetAccessible，真机
     // 死循环根因）在桌面闸当场闸红，不再等真机炸三轮。只扫签名不跑方法体（SKIP_CODE）。
     testImplementation(libs.asm)
+    // P1 真实 SQLite 闸：core-vm 主源集仍零 AndroidX；只在 test 源集接 JVM 版 bundled 驱动，
+    // 让新增 SQL 内建走真实 SQLite（与 Android 侧同版本 3.46.0），而不是 fake 端口回放。
+    testImplementation(libs.androidx.sqlite.bundled.jvm)
     // A6 e2e 装置专用：符号表扫描（装载序/dimSpecs）+ 桥接映射器 com.erbcc.bridge.buildFuncDims。
     // 方向安全：erbcc(main) → core-vm(main)；core-vm(test) → erbcc(main) 无环（测试源集独立）。
     testImplementation(project(":tools:erbcc"))
@@ -133,7 +143,13 @@ tasks.withType<Test>().configureEach {
     // 缺省不传 ⇒ maxHeapSize 仍是 3g，与改前逐字一致（其余 40 余条断言用例的堆口径不变）。
     providers.gradleProperty("testXmx").orNull?.let { maxHeapSize = it }
     // 语料冒烟开关（ERATW_CORPUS 等）显式透传给 test JVM（Windows 下 worker 不总继承）
-    System.getenv().filterKeys { it.startsWith("ERATW_") }.forEach { (k, v) -> environment(k, v) }
+    val eratwEnv: Map<String, String> = System.getenv().filterKeys { it.startsWith("ERATW_") }.toSortedMap()
+    eratwEnv.forEach { (k, v) -> environment(k, v) }
+    // AGENTS §5 的「UP-TO-DATE 假绿」：test 任务的 inputs 原先不含这批环境变量 ⇒ 换 corpus 根、
+    // 或从「未设」到「已设」，任务照样直接 UP-TO-DATE；而语料依赖的动态用例在变量缺失时
+    // **不生成也不计 skipped**，看着仍是全绿（2026-11-12 实测丢过一轮）。
+    // 这里把 ERATW_* 整体登记为输入：内容变了必须重跑，内容没变仍允许 UP-TO-DATE。
+    inputs.property("eratwEnv", eratwEnv.entries.joinToString("\n") { "${it.key}=${it.value}" })
     // 跨环境取证旋钮：ERATW_TEST_TZ=America/New_York 一类 → test JVM 的 user.timezone。
     // 用于验证 L3 链常量对系统时区的免疫性（修复前用它抓时区泄漏簇，修复后用它验收）。
     System.getenv("ERATW_TEST_TZ")?.let { systemProperty("user.timezone", it) }
@@ -141,6 +157,10 @@ tasks.withType<Test>().configureEach {
     // 让 `LockWatch` 的六处探针在桌面闸里真的打开（缺省不传 ⇒ enabled 仍是 false，
     // 挂载点连 nanoTime 都不取，与挂载前逐字同行为）。口径照上面 `testXmx` 的 gradleProperty 透传。
     providers.gradleProperty("lockwatch").orNull?.let { systemProperty("eratw.lockwatch", it) }
+    // MODERN-T1 融合开关透传（R12-PRE 接线）：`-Deratw.perf.noEvalJumpFuse=true` → test JVM，
+    // 让「关态档」用例能真跑旧形状（此前命令行 -D 进不了 test worker，关态只能靠构造参数钉）。
+    // 逐个点名透传，保持「只传点名属性」口径；缺省不传 ⇒ 与改前逐字一致（融合开）。
+    System.getProperty("eratw.perf.noEvalJumpFuse")?.let { systemProperty("eratw.perf.noEvalJumpFuse", it) }
     // CMP-69：默认关闭；开启时只多导出真产物变量（+ 显式门 ERATW_REAL_ERBC_REQUIRE=1），其余口径不变。
     if (withRealArtifacts.get()) wireRealArtifacts()
     // savepin 波（2026-11-05）：真存档只有几十 KB、没有堆成本 ⇒ **无条件**接，
@@ -304,14 +324,28 @@ tasks.register<Test>("gateRealArtifacts") {
 // 这正是它的存在意义）；4.980 口径的读数照旧由 §5 标准闸产出，两边对照就是「按根两列」。
 // ---------------------------------------------------------------------------
 
-/** 4.981 打包根目录名（与测试装置 `GameRoot981.DIR` 同源；换根两处一起改）。 */
-private val CORPUS_981_DIR = "eraTW4.981-261017-EAGLOV3"
+/**
+ * 4.981 语料身份：**不在这里写字面量**（CONTRACT-ENGCPL E7）。
+ *
+ * 单源 = 手写的 `specs/engine-profiles.input.yaml`，经 `devtools/gen_engine_profiles.py`
+ * 投影成 `specs/engine-profiles.yaml`；本脚本经 [CorpusIdentity] 窄解析生成物的
+ * `corpora.V4_981` 取 `rootDir` / `markerFile`。换根 = 改 input yaml + 重生成，
+ * 本脚本与测试装置 `GameRoot981` 一个字节都不用动。生成物缺条目/坏形状在**配置期**判红。
+ */
+private val CORPUS_981 = corpus(rootProject.file("specs/engine-profiles.yaml"), "V4_981")
+
+/** 4.981 打包根目录名（= 生成物 `corpora.V4_981.root_dir`）。 */
+private val CORPUS_981_DIR = CORPUS_981.rootDir
 
 /**
- * 4.981 标记文件：4.980 根**无**此文件（全树差集实测），命中即认 4.981。
- * 与 `GameRoot981` 的 MARKER 同一文件 —— 任务侧与测试侧认同一个根，不许出现两个真相。
+ * 4.981 标记文件（= 生成物 `corpora.V4_981.marker_file`）：4.980 根**无**此文件
+ * （全树差集实测），命中即认 4.981。测试装置 `GameRoot981.MARKER` 吃同一份生成物
+ * 投影（`EngineProfileData.CORPORA`），任务侧与测试侧认同一个根。
  */
-private val CORPUS_981_MARKER = "ERB/DLC/AI对话补丁/对话调用.erb"
+private val CORPUS_981_MARKER: String = CORPUS_981.markerFile ?: throw GradleException(
+    "生成物 specs/engine-profiles.yaml 的 corpora.V4_981 没有 marker_file：" +
+        "4.981 打包根失去认根标记，gate981 的候选链无法验明正身（换语料请同步给 marker_file）",
+)
 
 /** 标记命中判定（取证面：既进构建日志也进判红文案）。 */
 fun corpus981MarkerHit(dir: File): Boolean =

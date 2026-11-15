@@ -2,6 +2,9 @@ package com.eratw.port.core.code
 
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.host.MemoryTier
+import com.eratw.port.core.loader.RUNTIME_INTERN_FORM_BUDGET
+import com.eratw.port.core.loader.RUNTIME_INTERN_STRING_BUDGET
+import com.eratw.port.core.loader.RUNTIME_NODE_ENTRY_BUDGET
 import com.eratw.port.core.sem.FlatStmtSource
 import com.eratw.port.core.stmt.ArgInterner
 import com.eratw.port.core.stmt.ExpressionArrayArgument
@@ -230,17 +233,50 @@ internal interface LazyStatementPool {
      * CALLSHARP 装载趟扫描（CSHARP-WIRE C2）：返回本池里「语句记录标签 = CALL_SHARP」的
      * **池内下标**（升序；调用方按 `index + 池基线` 折回绝对下标）。
      *
-     * 实现要求：**不物化语句** —— 惰性档逐条读记录首字节判标签（语句记录布局
+     * 要求：**不物化语句** —— 惰性档逐条读记录首字节判标签（语句记录布局
      * `u8 StmtTag + i32 line + u32 raw + u32 codeName + …`，ErbcWriter.stmtHead 的写序与
-     * `RecordSource.readStatement` 的读序逐字同源），命中 CALLSHARP 标签的条目才交给
+     * RecordSource.readStatement 的读序逐字同源），命中 CALLSHARP 标签的条目才交给
      * 调用方走 [statementAt] 物化（那里才是身份/规范化的权威路径）。全量语料 1,716,636 条
      * 记录的一趟标签字节扫 ≈ 一次顺序映射读，语句对象零常驻。
      *
      * 缺省空表 = 供给方不认识本扫描时**宁可漏报**：漏报的行退回「首执行裁决」的旧路
-     * （`SharpLinkTable` 未命中时在执行期记行错），不会误报；误报（把普通语句当 CALLSHARP
+     * （`SharpLinkTable` 未命中时首执行记行级错误态、提示后跳过，见
+     * `StatementExecutor.resolveSharpMethod`），不会误报；误报（把普通语句当 CALLSHARP
      * 物化出来）才是要防的方向。
      */
     fun sharpStatementIndices(): IntArray = IntArray(0)
+
+    /**
+     * 装载收尾武装：给本池的三件运行期缓存（节点表 / 规范化代表表 / 内建串池）接上界。
+     * 缺省 no-op = 非惰性池（缓存随 Program 存亡，无需界）；惰性档由实现覆写。
+     * 预算取值与语义见 `RUNTIME_NODE_ENTRY_BUDGET` / `RUNTIME_INTERN_FORM_BUDGET` /
+     * `RUNTIME_INTERN_STRING_BUDGET`（ErbcStream.kt）。
+     */
+    fun armRuntimeBudgets(
+        nodeEntries: Int = RUNTIME_NODE_ENTRY_BUDGET,
+        internForms: Int = RUNTIME_INTERN_FORM_BUDGET,
+        internStrings: Int = RUNTIME_INTERN_STRING_BUDGET,
+    ) {
+    }
+
+    /**
+     * 运行期代码缓存读数（census 取数面）：本池的三件缓存水位一次取齐。
+     * 缺省 null = 非惰性池（缓存随 Program 存亡，无独立上界读数）。
+     */
+    fun codeCacheCensus(): CodeCacheCensus? = null
+
+    /**
+     * 命令面审计扫描（ENGC-3 B4）：逐条读语句**身份**（`Statement.code.name`）与源行号，
+     * **不物化语句、不写缓存**。
+     *
+     * 记录布局 `u8 StmtTag + i32 line + u32 raw + u32 codeName + …`（`ErbcWriter.stmtHead`
+     * 写序 / `RecordSource.readStatement` 读序逐字同源），实现只需读前 13 字节 + 串表解析，
+     * 语句对象零常驻。
+     *
+     * **不设缺省实现**：静默回落 [statementAt] 会把全量 171.7 万条语句一次物化进堆
+     * （M10-MEM 的全部意义），审计宁可让新供给方在编译期被强制实现。
+     */
+    fun scanStatementHeaders(visit: (codeName: String, line: Int) -> Unit)
 }
 
 /**
@@ -326,7 +362,15 @@ internal interface LazyExprSource {
     /** 池根条数（= 段头声明的表达式池长度）。 */
     val nodeCount: Int
 
-    /** 第 [index] 个池根（按需物化；同一下标恒同一实例由实现保证）。 */
+    /**
+     * 第 [index] 个池根（按需物化）。
+     *
+     * 实例稳定口径（2026-11-14 OOM 根修起）：**同一缓存代内**同一下标恒同一实例；
+     * 运行期上界重置（`armRuntimeBudgets` 接的节点缓存界）之后，同一下标重放解出的是
+     * **逐字段相同的新实例**（同一批记录字节）。跨代身份依赖在 core 层不存在 ——
+     * 运行期消费全部按值/按结构（求值、再编码按 data class 相等），身份键只在编译期与
+     * 每-build 的 encode 表里；语句侧实例稳定不受影响（语句缓存不重置，数据节契约 C2 照旧）。
+     */
     fun node(index: Int): Expr
 
     /**
@@ -337,7 +381,42 @@ internal interface LazyExprSource {
      * （堆内表达式池 / 测试桩）本来就不碰产物文件。
      */
     val channelFreeForRuntime: Boolean get() = true
+
+    /**
+     * 装载收尾武装：给本池的节点缓存接上界（语义同 `LazyStatementPool.armRuntimeBudgets`，
+     * 只盖表达式侧这一张节点表）。缺省 no-op = 非惰性档。
+     */
+    fun armRuntimeBudgets(nodeEntries: Int = RUNTIME_NODE_ENTRY_BUDGET) {
+    }
+
+    /**
+     * 运行期代码缓存读数（census 取数面）；缺省 null = 非惰性池（缓存随 Program 存亡，
+     * 无独立上界读数）。只读标量与 O(块位表) 计数，不解码、不物化（LiveSetCensus 禁物化铁律）。
+     */
+    fun codeCacheCensus(): CodeCacheCensus? = null
 }
+
+/**
+ * 运行期代码缓存三件套的读数快照（2026-11-15 census 补账；2026-11-14 OOM 根修的取证面）。
+ *
+ * 背景：`RecordSource.nodes`（节点表）/ `ArgInterner` 规范表 / `StringPool` 去重表运行期
+ * 只进不出，曾把 512 MiB 堆吃满（玩家 OOM 根因）；上界化之后这份读数进 `LiveSetCensus`
+ * 账面，下次同类 OOM 不再依赖桌面直方图就能从报告行直接看到三簇的水位。
+ *
+ * @property nodeBlocks 两张记录源（段2 表达式 / 段3 语句）**已分配块数合计**；
+ *   每块 4,096 槽 = 结点缓存的上界信号（entries 全表扫描太贵，块数恒廉价且成正比）。
+ *   -1 = 无读数。
+ * @property nodeEvictions 两表运行期块逐出累计合计；-1 = 无读数。
+ * @property internForms 规范化代表表当前形态数（语句池那张；重置后从 0 重新累计）；
+ *   -1 = 无读数。
+ * @property internStrings 内建串池当前不同内容数（同上口径）；-1 = 无读数。
+ */
+data class CodeCacheCensus(
+    val nodeBlocks: Int,
+    val nodeEvictions: Int,
+    val internForms: Int,
+    val internStrings: Int,
+)
 
 class ConstantPool(
     /**
@@ -505,6 +584,36 @@ class ConstantPool(
 
     /** 表达式池是否走惰性供给（装载侧据此决定要不要留住宿主文件）。 */
     internal val hasLazyExpressions: Boolean get() = lazyExprs != null
+
+    /**
+     * 装载收尾武装（`Program.armRuntimeCodeCacheBudgets` 委托到这里）：给两张惰性池的
+     * 运行期缓存接上界。非惰性池（两字段皆 null）是无操作。
+     */
+    internal fun armRuntimeCodeCacheBudgets(
+        nodeEntries: Int,
+        internForms: Int,
+        internStrings: Int,
+    ) {
+        lazyStatements?.armRuntimeBudgets(nodeEntries, internForms, internStrings)
+        lazyExprs?.armRuntimeBudgets(nodeEntries)
+    }
+
+    /**
+     * 运行期代码缓存读数（[Program.codeCacheCensus] 委托）：两池读数合并——
+     * 节点块/逐出取**合计**，规范表/串池只有语句池有（读不到给 -1）。
+     * 两池皆非惰性（eager 编译器/测试档）⇒ null。
+     */
+    internal fun codeCacheCensus(): CodeCacheCensus? {
+        val stmt = lazyStatements?.codeCacheCensus()
+        val expr = lazyExprs?.codeCacheCensus()
+        if (stmt == null && expr == null) return null
+        return CodeCacheCensus(
+            nodeBlocks = (stmt?.nodeBlocks ?: 0) + (expr?.nodeBlocks ?: 0),
+            nodeEvictions = (stmt?.nodeEvictions ?: 0) + (expr?.nodeEvictions ?: 0),
+            internForms = stmt?.internForms ?: -1,
+            internStrings = stmt?.internStrings ?: -1,
+        )
+    }
 
     /**
      * 接上一份惰性表达式供给（只由 `core/loader` 的装载链调用）。
@@ -678,6 +787,18 @@ class ConstantPool(
     internal fun statementView(): List<Statement> {
         check(lazyStatements == null) { "惰性语句池没有整池视图；去重请走 seedInterning" }
         return statements
+    }
+
+    /**
+     * 命令面审计扫描（ENGC-3 B4）：按**绝对下标升序**回调每条语句的 code 名与源行号，
+     * 不物化、不建快照（成本见 [LazyStatementPool.scanStatementHeaders]）。
+     *
+     * 组合池先走 base（[basePool]），再走本池续段：与 [statementAt] 的分派次序同一口径。
+     */
+    internal fun scanStatementHeaders(visit: (codeName: String, line: Int) -> Unit) {
+        basePool?.scanStatementHeaders(visit)
+        val lazy = lazyStatements
+        if (lazy != null) lazy.scanStatementHeaders(visit) else for (s in statements) visit(s.code.name, s.line)
     }
 
     /**
@@ -1183,6 +1304,13 @@ class Program private constructor(
     internal fun sharpStatementIndices(): IntArray = pool.sharpStatementIndices()
 
     /**
+     * 命令面审计扫描（ENGC-3 B4）：池转发，语义与成本见
+     * [ConstantPool.scanStatementHeaders]。取用方 = `core/proc` 的 `CompatCommandAudit`。
+     */
+    internal fun scanStatementHeaders(visit: (codeName: String, line: Int) -> Unit) =
+        pool.scanStatementHeaders(visit)
+
+    /**
      * 语句池是否还是**惰性**的（M10-MEM）：装载侧据此决定产物文件要不要留在进程里 ——
      * 惰性池要在第一次取指时才回读段 3 的字节，通道必须还开着。
      */
@@ -1411,7 +1539,7 @@ class Program private constructor(
     /**
      * 函数表的**只要名字**取用面（M13-MEM5 刀 1）：按 [FunctionInfo.name] 的**值**取名字，
      * 但**不构造 [FunctionInfo]**、不写惰性表缓存。存在理由：屏蔽表装配
-     * （`EngineFunctionPolicy` / `StubTable.of`）每开一次「更精简的游戏选项」就要对
+     * （`EngineFunctionPolicy` / `StubTable.of`）每装配一次会话就要对
      * 110,072 个函数逐个查名，走 `functions[i].name` 会把段 4 整池物化并**永久驻留**
      * （mem3 实测 15.6 MiB 常驻、真机标题页同样付）。
      *
@@ -1572,6 +1700,29 @@ class Program private constructor(
         argsInternedSlot = stats
         return stats
     }
+
+    /**
+     * 装载收尾武装：给惰性语句池 / 惰性表达式池的三件运行期缓存（节点表 / 规范化代表表 /
+     * 内建串池）接上界 —— 见 [LazyStatementPool.armRuntimeBudgets] 与
+     * [LazyExprSource.armRuntimeBudgets]。预算取常量缺省；测试用注入形参压小触发线。
+     *
+     * 只许装载趟结束后调（`ProgramLoader` 的两处装载收尾）；幂等（重复武装同值无害）。
+     * 非惰性 Program 上是无操作（两个接口缺省 no-op），与改造前逐字同行为。
+     */
+    internal fun armRuntimeCodeCacheBudgets(
+        nodeEntries: Int = RUNTIME_NODE_ENTRY_BUDGET,
+        internForms: Int = RUNTIME_INTERN_FORM_BUDGET,
+        internStrings: Int = RUNTIME_INTERN_STRING_BUDGET,
+    ) {
+        pool.armRuntimeCodeCacheBudgets(nodeEntries, internForms, internStrings)
+    }
+
+    /**
+     * 运行期代码缓存读数（`LiveSetCensus` 的「代码缓存」段取数面）：
+     * 三件运行期缓存（节点表 / 规范化代表表 / 内建串池）的水位一次取齐。
+     * 非惰性 Program（编译器/内存装置档）⇒ null，账面按无读数成文。
+     */
+    internal fun codeCacheCensus(): CodeCacheCensus? = pool.codeCacheCensus()
 
     /** 种子行：参数整段 = 表达式池（[ConstantPool.exprRootsView]），装载期临时对象。 */
     private fun expressionPoolSeed(): Statement = InstructionStmt(
@@ -2187,16 +2338,32 @@ class CodeBuilder(
     }
 
     /** 追加常量，返回**绝对**下标（`longBase + 段内序号`）；见 [ConstantPool.addLong]。 */
-    fun constant(value: Long): Int = pool.addLong(value)
+    fun constant(value: Long): Int {
+        val index = pool.addLong(value)
+        sliceRec?.poolOps?.add(PoolOp(PoolOp.KIND_CONSTANT, value, null, null, null, index))
+        return index
+    }
 
     /** 追加字符串，返回**绝对**下标（`stringBase + 段内序号`）。 */
-    fun string(value: String): Int = pool.addString(value)
+    fun string(value: String): Int {
+        val index = pool.addString(value)
+        sliceRec?.poolOps?.add(PoolOp(PoolOp.KIND_STRING, 0L, value, null, null, index))
+        return index
+    }
 
     /** 追加表达式，返回**绝对**下标（`exprBase + 段内序号`）。 */
-    fun expr(value: Expr): Int = pool.addExpr(value)
+    fun expr(value: Expr): Int {
+        val index = pool.addExpr(value)
+        sliceRec?.poolOps?.add(PoolOp(PoolOp.KIND_EXPR, 0L, null, value, null, index))
+        return index
+    }
 
     /** 语句池追加转发（契约 C2；语义见 ConstantPool.addStatement —— 按身份追加、严禁去重）。 */
-    fun statement(s: Statement): Int = pool.addStatement(s)
+    fun statement(s: Statement): Int {
+        val index = pool.addStatement(s)
+        sliceRec?.poolOps?.add(PoolOp(PoolOp.KIND_STATEMENT, 0L, null, null, s, index))
+        return index
+    }
 
     /** 名字 → 下标（10 万级函数表的声明/链接都必须 O(1)，线性扫会变成 O(n²)）。 */
     private val nameToIndex = HashMap<String, Int>()
@@ -2224,6 +2391,7 @@ class CodeBuilder(
 
     /** 登记某个调用点的逐位实参元数据（同一 pc 只会有一条调用指令，后者覆盖前者；[pc] 为绝对 pc）。 */
     fun declareCallArgs(pc: Int, args: List<CallArg>) {
+        sliceRec?.callArgs?.add(CallArgsEntry(pc, args))
         if (args.isNotEmpty()) callArgs[pc] = args
     }
 
@@ -2264,10 +2432,161 @@ class CodeBuilder(
         require(slot in 0..SlotAddr.MAX_GLOBAL_SLOT) {
             "全局槽号越界: $slot（合法范围 0..${SlotAddr.MAX_GLOBAL_SLOT}；0x7FFFFFFF 编码后等于 NONE 哨兵）"
         }
+        sliceRec?.globalSlots?.add(slot)
         if (slot + 1 > globalSlots) globalSlots = slot + 1
     }
 
     val globalSlotCount: Int get() = globalSlots
+
+    // ------------------------------------------------------------------
+    // 函数字节切片：录制 / 捕获 / 重放（MODERN-R11-R4B2）
+    // ------------------------------------------------------------------
+
+    /**
+     * 正在录制的函数切片（null = 未录制）。缺省 null ⇒ 每个 `add*` / `declareCallArgs` /
+     * `noteGlobalSlot` 只多一次空判，既有路径行为与开销逐位不变（关态「一行缓存代码都不
+     * 执行」这条口径同样落在这里：不调 [beginSliceCapture] 就没有任何记录动作）。
+     */
+    private var sliceRec: SliceRecorder? = null
+
+    /** 一次录制的累积面（[FunctionSlice] 的原料；顺序即调用序）。 */
+    private class SliceRecorder {
+        val poolOps = ArrayList<PoolOp>()
+        val callArgs = ArrayList<CallArgsEntry>()
+        val globalSlots = ArrayList<Int>()
+    }
+
+    /**
+     * 开始录制本函数对共享构建器的全部可重放副作用（[captureSlice] 前必须调一次）。
+     *
+     * 不录制的面：[emit] 的指令字与行号 —— 它们在 [captureSlice] 里按 `[startPc, here())`
+     * 一次性从本体拷出（patch 早已生效），不需要逐条记账。
+     */
+    fun beginSliceCapture() {
+        check(sliceRec == null) { "已有录制中的函数切片：[captureSlice] 或 [abortSliceCapture] 必须先收尾" }
+        sliceRec = SliceRecorder()
+    }
+
+    /** 放弃本次录制（正式发射抛错时由调用方调；已发射的残段按 CMP-26 的口径留在原处不可达）。 */
+    fun abortSliceCapture() {
+        sliceRec = null
+    }
+
+    /**
+     * 结束录制并折成 [FunctionSlice]。
+     *
+     * @param startPc 函数入口 pc（[beginSliceCapture] 之后 [here] 的首个读数）
+     * @param labels 函数内 `$标签` → **绝对** pc（序 = 当初 `declareLabel` 的序，本方法是
+     *   唯一知道入口基址的地方，故相对化在这里做）
+     * @param callRefs 待链接 `_CALL` 引用（pc 为**绝对** pc；同上在这里相对化）
+     * @param varArgSites REF 位回填点（`evalPc` 为**绝对** pc；同上在这里相对化）
+     * @throws IllegalStateException 没有录制中 / [startPc] 越出本段 / 录制期间出现过
+     *   [noteGlobalSlot]（[FunctionSlice] 不承载全局槽读数，静默丢弃会让重放少一项副作用）
+     */
+    fun captureSlice(
+        startPc: Int,
+        sig: com.eratw.port.core.compile.FuncSig,
+        slotCount: Int,
+        labels: Map<String, Int>,
+        callRefs: List<com.eratw.port.core.compile.CallRef>,
+        varArgSites: List<SliceVarArgSite>,
+    ): FunctionSlice {
+        val rec = checkNotNull(sliceRec) { "captureSlice 之前没有 beginSliceCapture" }
+        sliceRec = null
+        val from = startPc - instructionBase
+        require(from in 0..count) {
+            "切片入口 pc 越界: $startPc（本段绝对区间 [$instructionBase, ${instructionBase + count})）"
+        }
+        check(rec.globalSlots.isEmpty()) {
+            "录制期间出现过 noteGlobalSlot（${rec.globalSlots.size} 次）：本切片类型不承载全局槽读数，" +
+                "重放会少一项副作用 —— 需要先扩 FunctionSlice 再启用录制"
+        }
+        return FunctionSlice(
+            sig = sig,
+            slotCount = slotCount,
+            entryPc = startPc,
+            wordCount = count - from,
+            words = code.copyOfRange(from * Instruction.WORDS, count * Instruction.WORDS),
+            lines = lines.copyOfRange(from, count),
+            poolOps = rec.poolOps,
+            callArgs = rec.callArgs,
+            labels = labels.map { LabelPc(it.key, it.value - startPc) },
+            callRefs = callRefs.map { SliceCallRef(it.target, it.pc - startPc, it.line) },
+            varArgSites = varArgSites.map { RelVarArgSite(it.target, it.position, it.evalPc - startPc, it.isStr) },
+        )
+    }
+
+    /**
+     * 把切片**原样重放**进本构建器，返回新的入口 pc。
+     *
+     * 两步（顺序不能换）：
+     * 1. 池追加项按**原序**重新追加（`statement` 是身份追加、不参与去重），同时建
+     *    「旧绝对下标 → 新绝对下标」映射 —— 去重命中也要重放：同一值在新池里未必还落在
+     *    同一下标（前面的函数可能少追加/多追加过条目）；
+     * 2. 指令字逐条发射，三槽按 [OpcodeRelocation] 的表重写池下标；跳转偏移是 pc 相对量，
+     *    一个字都不动。
+     *
+     * 之后才登记调用点实参表（pc 加 delta）；`declareFunction` / `declareLabel` /
+     * `setFunctionSlots` / REF 回填点登记归调用方（[com.eratw.port.core.compile.ErbProgramCompiler.adoptFunction]），
+     * 与 [ErbProgramCompiler.compileFunction] 的登记序逐条对齐。
+     *
+     * @throws IllegalStateException 录制中重放 / 切片里的池下标在重放时找不到对应条目
+     *   （切片不完整：漏记了某次池追加）
+     */
+    fun adoptSlice(slice: FunctionSlice): Int {
+        check(sliceRec == null) { "录制中不许重放切片（会污染录制日志）" }
+        val entry = here()
+        val remap = HashMap<Int, Int>(slice.poolOps.size * 2 + 8)
+        for (op in slice.poolOps) {
+            val fresh = when (op.kind) {
+                PoolOp.KIND_CONSTANT -> constant(op.longValue)
+                PoolOp.KIND_STRING -> string(checkNotNull(op.stringValue) { "字符串池追加项缺值" })
+                PoolOp.KIND_EXPR -> expr(checkNotNull(op.exprValue) { "表达式池追加项缺值" })
+                PoolOp.KIND_STATEMENT -> statement(checkNotNull(op.stmtValue) { "语句池追加项缺值" })
+                else -> error("未知池追加类型: ${op.kind}")
+            }
+            val prev = remap.put(op.oldIndex, fresh)
+            check(prev == null || prev == fresh) {
+                "池下标 ${op.oldIndex} 重放后落到 $prev 与 $fresh 两个不同条目：池状态与捕获时不同源"
+            }
+        }
+        for (i in 0 until slice.wordCount) {
+            val w = i * Instruction.WORDS
+            val op = slice.words[w]
+            val reloc = OpcodeRelocation.of(op)
+            emit(
+                op,
+                remapOperand(reloc.a, slice.words[w + 1], remap, entry + i, 0),
+                remapOperand(reloc.b, slice.words[w + 2], remap, entry + i, 1),
+                remapOperand(reloc.c, slice.words[w + 3], remap, entry + i, 2),
+                slice.lines[i],
+            )
+        }
+        val delta = entry - slice.entryPc
+        for (ca in slice.callArgs) declareCallArgs(ca.pc + delta, ca.args)
+        return entry
+    }
+
+    /**
+     * 按 [PoolRef] 改写一个操作数槽。
+     *
+     * 三支放行：[PoolRef.NONE]（槽号/跳转偏移/标志位）、[PoolRef.FUNCTION]（`_CALL.a`
+     * 在 emit 期恒 0，`build()` 按 [CallRef] 回填 —— 重放时照原值带过去）、
+     * [PoolRef.EXPR_NULLABLE] 的 [ErbcFormat.NONE_REF] 哨兵（-1 不是池下标，平移会读到
+     * 别人池里的最后一条）。其余一律**必须**在映射表里，查不到即切片不完整。
+     */
+    private fun remapOperand(ref: PoolRef, value: Int, remap: Map<Int, Int>, pc: Int, slot: Int): Int =
+        when (ref) {
+            PoolRef.NONE, PoolRef.FUNCTION -> value
+            PoolRef.EXPR_NULLABLE -> if (value == ErbcFormat.NONE_REF) value else mapped(ref, value, remap, pc, slot)
+            else -> mapped(ref, value, remap, pc, slot)
+        }
+
+    private fun mapped(ref: PoolRef, value: Int, remap: Map<Int, Int>, pc: Int, slot: Int): Int =
+        remap[value] ?: throw IllegalStateException(
+            "pc=$pc 的操作数槽 $slot 是${ref.poolName}下标 $value，但切片里没有对应的追加记录：" +
+                "切片不完整（漏记池追加会把指令指到别人的池条目上）",
+        )
 
     /**
      * 收尾成 [Program]。[entryFunction] 是**绝对**函数下标（[declareFunction] / [functionIndex]

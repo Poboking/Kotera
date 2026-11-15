@@ -13,8 +13,11 @@ import kotlin.test.assertTrue
 /**
  * [LeanOptionFilter] 的口径钉子（2026-10-27 立，2026-10-31 按玩家反馈补「编号在开头」那一形）：
  *
- * 开关打开时，右侧栏只留**屏上自带编号**的常用指令；关闭时调用方根本不走这里，
- * 所以本用例只钉过滤本身：正例必须逐条保留、反例必须逐条剔除。
+ * 本类只回答「这枚候选在屏上印了自己的编号吗」。消费点是右栏的两条规则
+ * （`RailOptionRules.filterOptions` 的「隐藏无编号」与历史候选判据 `pinnableMaskOf`；
+ * 长按菜单的置顶入口**不**走这条 —— 那条收全部非色块 `pinMenuMaskOf`），
+ * 所以这里逐条钉判据本身：正例必须认得出、反例必须剔除。
+ * 「调色板豁免」不在本类 —— 那是 `paletteSwatchMask` 在调用侧单独判的，见 `RailOptionRulesTest`。
  *
  * 两种形态都要认（真语料实测）：
  * - 编号在末尾 `移动[400]`：标签原文带着走，纯文本规则就认得出；
@@ -100,45 +103,17 @@ class LeanOptionFilterTest {
     }
 
     /**
-     * 布娃娃调色板：`■` 既没有名字也没有编号，但它是真实选项。精简开关若按普通
-     * 「无编号按钮」裁掉，128 色右栏会整片消失；判据与密集色格入口同源（[ConsoleOption.isColorSwatch]）。
+     * 布娃娃调色板的色块既没有名字也没有编号 ⇒ 判据判它**不是**常用指令。
+     * 「真调色板不许被整片裁掉」是调用侧另一件事（`paletteSwatchMask` 豁免），
+     * 那里另有钉子，见 `RailOptionRulesTest`。
      */
     @Test
-    fun keepsDollPaletteColorSwatchesEvenWithoutPrintedNumber() {
+    fun colorSwatchesAreNotCommonCommands() {
         val palette = (0 until 128).map { i ->
             option("■", 80000L + i, colorRgb = (0x010203 * i) and 0xFFFFFF, visual = OptionVisual.COLOR_SWATCH)
         }
         assertTrue(palette.all { it.isColorSwatch })
         assertFalse(palette.any { LeanOptionFilter.isCommonCommand(it) }, "色块不是常用指令")
-        assertEquals(palette, LeanOptionFilter.keepCommon(palette))
-
-        val mixed = palette + option("退出", "exit")
-        assertEquals(palette, LeanOptionFilter.keepCommon(mixed), "同屏其它无编号按钮照旧被裁，只保色调色板")
-    }
-
-    @Test
-    fun keepCommonPreservesOrderAndObjects() {
-        val commands = listOf(
-            option("会话[31]", 31L),
-            option("[CONFIG]", 809L),
-            option("移动[400]", 400L),
-            option("- 睁开眼睛", 100L, printsOwnNumber = true),
-            option("退出", "exit"),
-        )
-        val kept = LeanOptionFilter.keepCommon(commands)
-        assertEquals(listOf(commands[0], commands[2], commands[3]), kept)
-    }
-
-    @Test
-    fun keepCommonDoesNotMutateInput() {
-        val input = listOf(option("会话[31]"), option("退出"))
-        LeanOptionFilter.keepCommon(input)
-        assertEquals(2, input.size)
-    }
-
-    @Test
-    fun emptyListStaysEmpty() {
-        assertTrue(LeanOptionFilter.keepCommon(emptyList()).isEmpty())
     }
 
     /**
@@ -169,34 +144,18 @@ class LeanOptionFilterTest {
             recognized.map { it.label },
             "行首编号已剥给徽标（徽标口径不变），本句要的是这件事别让右栏整屏空",
         )
-        assertEquals(
-            listOf<Any>(0L, 123L, 400L),
-            LeanOptionFilter.keepCommon(recognized).map { it.value },
-            "精简档下三枚目的地都该进栏",
-        )
-    }
-    @Test
-    fun singleColorSwatchIsNotKeptAsAPalette() {
-        val one = option("■", 1L, colorRgb = 0x112233, visual = OptionVisual.COLOR_SWATCH)
-        assertTrue(LeanOptionFilter.keepCommon(listOf(one)).isEmpty(), "单个色块不是调色板")
+        recognized.forEach { option ->
+            assertTrue(
+                LeanOptionFilter.isCommonCommand(option),
+                "三枚目的地都该认成常用指令：${option.label}",
+            )
+        }
     }
 
     @Test
-    fun paletteRunMustStayOnOneGameLine() {
-        val lineOne = (0 until 4).map {
-            option("■", it.toLong(), colorRgb = 0x112233, lineSerial = 1L, visual = OptionVisual.COLOR_SWATCH)
-        }
-        val lineTwo = (0 until 4).map {
-            option("■", 10L + it, colorRgb = 0x445566, lineSerial = 2L, visual = OptionVisual.COLOR_SWATCH)
-        }
-        assertTrue(LeanOptionFilter.keepCommon(lineOne + lineTwo).isEmpty(), "跨行拼不成 8 枚调色板")
-    }
-
-    @Test
-    fun ordinaryColoredButtonIsNotKeptJustBecauseItHasColor() {
+    fun ordinaryColoredButtonIsNotCommonJustBecauseItHasColor() {
         val colored = option("普通选项", colorRgb = 0x112233)
         assertFalse(LeanOptionFilter.isCommonCommand(colored))
-        assertTrue(LeanOptionFilter.keepCommon(listOf(colored)).isEmpty())
     }
 
 }

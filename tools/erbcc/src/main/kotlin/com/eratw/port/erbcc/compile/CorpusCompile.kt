@@ -4,6 +4,7 @@ import com.eratw.port.core.code.Program
 import com.eratw.port.core.data.csv.GameDataLoader
 import com.eratw.port.core.data.csv.UserKeywordTables
 import com.eratw.port.core.compile.CallDefaultsCollector
+import com.eratw.port.core.compile.ConstantKeywordResolver
 import com.eratw.port.core.compile.CompileException
 import com.eratw.port.core.compile.DimSpecLayout
 import com.eratw.port.core.compile.ErbProgramCompiler
@@ -14,17 +15,26 @@ import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.err.erbDisplayLine
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.OperandType
+import com.eratw.port.core.expr.ParserConfig
 import com.eratw.port.core.expr.StrLiteral
 import com.eratw.port.core.lexer.LexError
+import com.eratw.port.core.lexer.LexAnalyzeFlag
+import com.eratw.port.core.lexer.LexEndWith
 import com.eratw.port.core.lexer.LangKey
+import com.eratw.port.core.lexer.CharStream
+import com.eratw.port.core.lexer.ErbLexer
+import com.eratw.port.core.lexer.LineKind
 import com.eratw.port.core.lexer.LexerConfig
 import com.eratw.port.core.lexer.LogicalLine
 import com.eratw.port.core.lexer.LogicalLineReader
+import com.eratw.port.core.fn.FullRegistryView
 import com.eratw.port.core.loader.BootMetadata
 import com.eratw.port.core.config.ConfigKey
 import com.eratw.port.core.config.ConfigStore
 import com.eratw.port.core.config.EffectiveConfig
 import com.eratw.port.core.config.EmueraConfigParser
+import com.eratw.port.core.policy.DisabledErbPatchCatalog
+import com.eratw.port.core.policy.ErbPatchPolicy
 import com.eratw.port.core.proc.FuncMeta
 import com.eratw.port.core.proc.RootedBuiltinHost
 import com.eratw.port.core.proc.SystemVariableBootstrap
@@ -42,6 +52,10 @@ import com.eratw.port.core.stmt.ParamDefault
 import com.eratw.port.core.stmt.PrintDataStmt
 import com.eratw.port.core.stmt.SharpStmt
 import com.eratw.port.core.stmt.Statement
+import com.eratw.port.core.stmt.IntAsignArgument
+import com.eratw.port.core.stmt.StrAsignArgument
+import com.eratw.port.core.stmt.VarDeclStmt
+import com.eratw.port.core.vars.DimSpec
 import com.eratw.port.core.vars.DimFoldSnapshot
 import com.eratw.port.core.vars.DimFunctionFolders
 import com.eratw.port.core.vars.DimVarSizes
@@ -52,6 +66,8 @@ import com.eratw.port.core.vars.VariableStore
 import com.eratw.port.core.vars.withPureStaticDimFolders
 import com.eratw.port.erbcc.LabelDef
 import com.eratw.port.erbcc.LoadWarning
+import com.eratw.port.erbcc.EngineProfileView
+import com.eratw.port.erbcc.EngineReportRow
 import com.eratw.port.erbcc.LabelTable
 import com.eratw.port.erbcc.Symbols
 import com.erbcc.bridge.DimDrop
@@ -265,6 +281,14 @@ class CompileStats(
      * `continue`，既不留痕也不计数）。
      */
     val binarySkipped: Int = 0,
+    /**
+     * 被 [ErbPatchPolicy] 整体禁载的 `.ERB` 脚本数（PLUGIN-POLICY 第二轮）。
+     *
+     * 这些文件**仍进** `sourceFiles`（清单口径 = 登记但不解析，同 [binarySkipped]），
+     * 但不产生任何切片 ⇒ 一个函数体、一条语句都不进产物。读数单源给 manifest 的
+     * `disabled-erb` 段，让「产物里没有这些脚本」这件事可被出包闸与事后取证读到。
+     */
+    val disabledErbFiles: Int = 0,
 )
 
 /** 全量语料编译产物。 */
@@ -332,6 +356,43 @@ class CompileResult(
      * 同量级），不复制任何 Program 数据。
      */
     val dimLayout: com.eratw.port.core.compile.DimSpecLayout? = null,
+    /**
+     * 本次编译被整体禁载的 `.ERB` 相对路径（[ErbPatchPolicy] 判定命中的文件，按语料清单序）。
+     *
+     * 与 [stats] 的 `disabledErbFiles` 计数同源；逐条路径交 `ErbcArtifacts.manifestText`
+     * 写进 `disabled-erb` 段。空表 ⇒ 清单字节不变（老对拍用例不受影响）。
+     */
+    val disabledErbFiles: List<String> = emptyList(),
+    /**
+     * M2-5 签名导出：函数键（大写）→ 完整调用签名规范串（[SignatureExport.export] 产出）。
+     *
+     * 与 [bootMetadata] 同级、由同一批编译期模型派生，但**不进** `program.meta` 的
+     * BootMetaCodec 记录流（那是只读文件）：由 [BootMetaWriter.text] 的可选参数决定
+     * 是否落成尾部旁路段。生产落盘当前不传 ⇒ 标准全量编译侧车零变化（缺省关）。
+     * 本字段只把导出结果挂到产物上，供接线方（需组长接线）与定向单测消费。
+     */
+    val signatures: Map<String, String> = emptyMap(),
+    /**
+     * 函数级编译缓存读数（MODERN-R11-R4B2 §3.5）：仅开关开态非 null，形如
+     * funcCache: hits=N misses=M。只进本字段与 stderr，不进 manifest / 四件产物，
+     * 故开态与关态产物逐字节相同不受它影响。
+     */
+    val funcCacheStats: String? = null,
+    /** 开态命中数（防空转闸断言 > 0）；关态恒 0。 */
+    val funcCacheHits: Int = 0,
+    /** 开态未命中数；关态恒 0。 */
+    val funcCacheMisses: Int = 0,
+    /**
+     * B6 ENGC-3b：目标档不认的**行首命令**命中（`--engine-report` 的 unknownCommands；
+     * 名字大写 + 相对路径 + 1 基行号）。只由 [compile] 的 `engineProfile` 参数非空时填充，
+     * 不带 profile 恒空表（零干扰）。不进 manifest / 四件产物字节。
+     */
+    val unknownCommands: List<EngineReportRow> = emptyList(),
+    /**
+     * B6 ENGC-3b：目标档不可见且非用户函数的**内建函数调用**命中（unknownFunctions；
+     * sink 无源文件维度 ⇒ file 恒空串，行号 1 基、池折叠节点为 0）。同上只带 profile 填充。
+     */
+    val unknownFunctions: List<EngineReportRow> = emptyList(),
 ) {
     val ok: Boolean get() = program != null && failures.isEmpty()
 }
@@ -429,16 +490,48 @@ object CorpusCompile {
      *   （原版是「装载期标错误行、执行到才抛」，这里提前到函数入口，调用时立刻可见、
      *   可被 TRYC 捕获）。缺省 false = 严格档，失败切片只留空体桩且调用方必须拒落盘
      *   （`cmdCompile` 的严格档判据）。
+     * @param patchPolicy ERB 补丁整体禁载清单（引擎侧通用能力 [ErbPatchPolicy]）。缺省 =
+     *   [DisabledErbPatchCatalog.all]；传空表 = 完全关闭禁载（老语料/对拍装置用），
+     *   传自定义表 = 换一批补丁而不必改引擎代码。命中文件不生成任何切片，标签仍由
+     *   `LabelTable` 登记为空体函数，`.ERH` 一律不排除（详见 `ErbPatchPolicy` KDoc）。
      */
     fun compile(
         corpusRoot: Path,
         fileLimit: Int? = null,
         uses: SymbolUses? = null,
         degradedStub: Boolean = false,
+        patchPolicy: List<ErbPatchPolicy.Entry> = DisabledErbPatchCatalog.all,
+        /**
+         * 正式产物口径：要求常量关键字折叠的数据面完整（CSV/系统名表/ERD 表都在）。
+         * 数据面掉了时折叠数会静默归零、产物悄悄退回「运行期按名查表」——正是
+         * M_CFLAG 那类真机报错的形态；故正式编译档在这里判红，测试装置不传。
+         */
+        requireConstantFolding: Boolean = false,
+        /**
+         * `--foreign-corpus`：本语料根不是 eraTW（第三方游戏，与 buildSrc
+         * `planCorpusPatches` 的 foreignCorpus 同一身份）。只影响 `--require-fold` 的
+         * ERD 分档：第三方语料没有用户 ERD 表是合法形态（见下方闸的注释与官方锚点）。
+         */
+        foreignCorpus: Boolean = false,
+        /**
+         * B6 ENGC-3b：目标引擎档位视图（`--engine-profile` 通道）。`null` = 零过滤
+         * （无 flag，行为与产物和不带时逐字节一致，I7）。非空时三处生效：
+         * ① 切片段行首预识别用 [EngineProfileView.statementAllowedNames]，不命中的行首名
+         * 记 [unknownCommands] 并走既有解析失败路径（poisoned 切片 → strict 拒绝，I4）；
+         * ② [ErbProgramCompiler] 注入 [EngineProfileView.surface]（函数面查表，被裁名走
+         * 既有「未定义的函数」路径，D7）；③ [EngineProfileView.surface] 的
+         * `builtinUnknownSink` 收集函数面缺口进 [unknownFunctions]。
+         */
+        engineProfile: EngineProfileView? = null,
     ): CompileResult {
         val notes = ArrayList<String>()
         val failures = ArrayList<CompileFailure>()
         val parseFailures = ArrayList<CompileFailure>()
+        // B6 ENGC-3b：目标档缺口收集（--engine-report 的数据面；不带 profile 恒空表）。
+        val unknownCommands = ArrayList<EngineReportRow>()
+        val unknownFunctions = ArrayList<EngineReportRow>()
+        /** 本次被整体禁载的脚本相对路径（manifest 留痕 + stats 读数同源）。 */
+        val disabledErbFiles = ArrayList<String>()
         /** 函数外（全局）`#DIM/#DIMS` 原文：装载期交 SystemVariableBootstrap.install。 */
         val globalDimDecls = ArrayList<BootMetadata.RawDim>()
 
@@ -479,7 +572,19 @@ object CorpusCompile {
             notes.add("预扫描告警: ${w.file}:${w.line} ${w.message}")
         }
         val methodNames = scan.funcTypes.keys.mapTo(HashSet()) { it.uppercase(Locale.ROOT) }
-        val exprCalls = buildExprCallTable(allDefs, scan.funcTypes)
+        // ENGC-3b：classify 的 BUILTIN 判定走目标档视图（被裁名不再判内建）；无 profile =
+        // FullRegistryView 直通（逐位不变）。
+        val exprCalls = buildExprCallTable(
+            allDefs, scan.funcTypes, engineProfile?.surface ?: FullRegistryView,
+        )
+        // ENGC-3b：行首预识别的合法集。与 LineParser.parseCodeLine 的分派同构：
+        // 命令 ∪ 函数 ∪ PORT_EXTENSIONS ∪ 结构码 ∪ 语料内自定义方法名（裸调用行首，
+        // spec: LogicalLineParser.cs:4140-4148 的 isUserMethod 分支）。赋值行行首是
+        // 变量名，不进本集 —— 由下面的预识别处按赋值两段式放行。
+        val allowedHead: Set<String>? = engineProfile?.let { profile ->
+            val base = profile.statementAllowedNames
+            if (methodNames.isEmpty()) base else HashSet(base).also { it.addAll(methodNames) }
+        }
         // CMP-36 接线（L06 交付项）：编译期词法开关必须吃本游戏的 `emuera.config`，
         // 不能停在 [LexerConfig] 的出厂默认（原版 `LexicalAnalyzer.cs:748-752`/`:681`
         // 的 SystemAllowFullSpace / SystemIgnoreTripleSymbol 都取配置值；本作两键为 NO）。
@@ -534,6 +639,57 @@ object CorpusCompile {
         // A1（2026-10-26 fixcore 波）：同一份 LexerConfig 同时喂下方 LineParser 与
         // LogicalLineReader —— reader 此前漏接 config，SystemAllowFullSpace=NO 时
         // 行首全角空格的口径会与 LineParser 分叉。
+        // ---- 编译期关键字表（解析期 Restructure 的数据面）----
+        // 原版在装载期就把常量字符串下标折成整数（`VariableStrArgTerm.cs:57-69`），
+        // 故这张表必须在 [LineParser] 之前就位；下方步骤 8 的 `dimVarSizes` / 侧车折叠
+        // 与 GETNUM 第二跳（CMP-59）直接复用同一份，不重算、不漂移。
+        // CSV 目录口径与 core-vm 装置 RealCorpusCompile 逐字一致（`<ERB>.parent/CSV`）。
+        val csvDir = root.parent?.resolve("CSV") ?: root
+        val gameRoot = root.parent ?: root
+        val gameDataForFold = runCatching { GameDataLoader.load(csvDir) }.getOrNull()
+        val systemKeywordTables = gameDataForFold?.registry?.systemKeywordTables() ?: emptyMap()
+        // ERD 用户表（`CSV/*.csv` + `ERB/**/*.erd`，键 `NAME` / `NAME@n`）；`Config.UseERD`
+        // 门与运行期 GameSession 同源。系统变量名不是 ERD 用户变量 ⇒ 排除，避免给
+        // `GETNUM(TIME, …)` 一类折出原版没有的表（见 foldSnapshot KDoc）。
+        val erdEnabled = compileConfig.itemOf(ConfigKey.UseERD).bool()
+        val systemVariableNames = gameDataForFold?.registry?.all()
+            ?.mapTo(HashSet()) { it.name.uppercase(Locale.ROOT) } ?: emptySet()
+        val erdKeywordTables: Map<String, Map<String, Int>> =
+            if (erdEnabled) {
+                runCatching { UserKeywordTables.foldSnapshot(gameRoot, systemVariableNames) }
+                    .getOrDefault(emptyMap())
+            } else {
+                emptyMap()
+            }
+        // 键冲突时内置表优先（= 原版第一跳 `GetKeywordDictionary`，ConstantData.cs:857-861）。
+        val foldKeywordTables: Map<String, Map<String, Int>> = erdKeywordTables + systemKeywordTables
+        val constantKeywordResolver = ConstantKeywordResolver(gameDataForFold?.registry, foldKeywordTables)
+
+        // 静默降级闸：折叠数据面缺一项 ⇒ 常量下标一个都折不出来（或只折一半），
+        // 产物退回运行期按名查表，而这在 manifest 里只有一行折叠数读数、出包闸看不见。
+        // 正式编译档（gradle compileCorpus 带 --require-fold）直接判红。
+        //
+        // ERD 一项按语料身份分档（官方口径见 `ErhLoader.cs:274-283`：只在
+        // `erdFileNames` 命中时挂表，`TryKeywordToInteger` 查不到表返回 false
+        // `ConstantData.cs:849-872`；重键表抛 CodeEE 后由 `ErhLoader.cs:328-332` 降级成
+        // level 2 告警继续装载）：
+        // - eraTW 语料（打包口径）：ERD 表是随包资产，0 张 = 数据面掉了 ⇒ 判红；
+        // - foreign-corpus（第三方游戏）：没有用户 ERD 表是合法形态（eraAV / eraAkumaMaid
+        //   的 CSV 全是系统变量名表，eraAkumaMaid 的 TRAIN.csv 还带官方容忍的重键
+        //   `～予備～`），与官方同语义 ⇒ 不判红；折叠面照旧吃系统名表，未折的键运行期查表。
+        if (requireConstantFolding) {
+            val missing = ArrayList<String>()
+            if (gameDataForFold == null) missing += "CSV 目录装载失败：$csvDir"
+            if (systemKeywordTables.isEmpty()) missing += "内置关键字名表为空"
+            if (erdEnabled && erdKeywordTables.isEmpty() && !foreignCorpus) {
+                missing += "ERD 关键字表为空：$gameRoot"
+            }
+            check(missing.isEmpty()) {
+                "常量关键字解析期折叠的数据面缺失（${missing.joinToString("；")}）：" +
+                    "折叠为 0 会让产物退回运行期按名查表（真机即「…csv 中未定义关键字」）"
+            }
+        }
+
         val lexerConfig = LexerConfig.fromConfigStore(
             compileConfig,
             macros = symbolTable.config.macros,
@@ -541,6 +697,7 @@ object CorpusCompile {
         )
         val parser = LineParser(
             CompileResolver(scan),
+            config = ParserConfig(constantKeywordLookup = constantKeywordResolver::resolve),
             lexerConfig = lexerConfig,
             // T5（挖虫波第三批）：`#LOCALSIZE 常量名` 形态的折叠表 —— 与 LabelTable
             // evalSharpInt（符号层 #LOCALSIZE→FuncMeta.localSize）吃同一份 constValues，
@@ -548,6 +705,9 @@ object CorpusCompile {
             // （fromEN/MISC.ERB:1246、M_KOJO_K63_独自関数.ERB:46）静默折成 0。
             dimConsts = symbolTable.config.constValues,
         )
+        // ENGC-3b：行首预识别的词法器（与 LineParser 内部同款配置；与 parseCodeLine 的分派
+        // 同构：trimStart + readSingleIdentifier，识别失败交给 parser 自身既有错误路径）。
+        val headLexer = if (engineProfile != null) ErbLexer(lexerConfig) else null
         var binarySkipped = 0
         // ---- 第 3 层：文件级并行预取（双路 E5-2696v4 / 44 物理核）----
         // 解析侧必须整轮共用 LineParser + CompileResolver 且严格按原文件序串行；
@@ -587,6 +747,20 @@ object CorpusCompile {
                 }
                 for (pf in batch) {
             val rel = pf.rel
+            // PLUGIN-POLICY 第二轮（引擎侧通用能力）：命中禁载清单的 .ERB 脚本整体不装载。
+            // 这里直接 continue ⇒ 不回放逻辑行、不生成任何切片，该文件一个函数体、一条语句
+            // 都不进产物（含 CALLSHARP 与 @EVENTCOMEND 成员）。标签仍由 LabelTable 独立登记，
+            // 编译成零语句空体函数，目录外的静态 CALL 才不会撞「未定义函数」；.ERH 与源文件
+            // 清单按通用例外照常登记。三条边界的语料证据见 core-vm `ErbPatchPolicy` KDoc。
+            val excludedBy = ErbPatchPolicy.ownerOf(rel, patchPolicy)
+            if (excludedBy != null) {
+                disabledErbFiles.add(rel)
+                notes.add(
+                    "ERB 补丁整体禁载（${excludedBy.id}）：$rel —— 标签保留为空体函数，" +
+                        "脚本零切片（ERH 变量头与源文件清单均照常登记）",
+                )
+                continue
+            }
             if (pf.readError != null) {
                 parseFailures.add(
                     CompileFailure(rel, -1, pf.readError, FailLineSource.FILE_READ),
@@ -654,6 +828,46 @@ object CorpusCompile {
                     )
                     poisoned = true
                     continue
+                }
+                // B6 ENGC-3b：带目标档时对代码行做行首预识别（与 parseCodeLine 的分派同构）。
+                // 行首名不在合法集时先按 parseCodeLine 的第 4 分支试赋值两段式
+                // （spec: LogicalLineParser.cs:530-556：非命令/非方法行首一律先按赋值尝试，
+                // 官方引擎没有「行首白名单拒绝赋值行」）：读得出赋值运算符 ⇒ 合法赋值行，
+                // 交给 parser；读不出 ⇒ 记 unknownCommands（--engine-report 数据面）并按
+                // 既有解析失败路径处置（毒化切片 → strict 拒绝），不新增文案（I4）。
+                // 识别本身抛错交给 parser 走既有词法错误路径。
+                if (allowedHead != null && line.kind == LineKind.CODE) {
+                    val trimmed = line.content.trimStart(' ', '\t')
+                    val head = try {
+                        headLexer!!.readSingleIdentifier(CharStream(trimmed))
+                    } catch (_: Exception) {
+                        ""
+                    }
+                    if (head.isNotEmpty() && head.uppercase(Locale.ROOT) !in allowedHead) {
+                        val assignmentHead = try {
+                            val rest = CharStream(trimmed.substring(head.length))
+                            headLexer!!.analyse(rest, LexEndWith.Operator, LexAnalyzeFlag.NONE, line.lineNo)
+                            headLexer.readAssignmentOperator(rest, line.lineNo)
+                            true
+                        } catch (_: Exception) {
+                            false
+                        }
+                        if (!assignmentHead) {
+                            unknownCommands.add(
+                                EngineReportRow(head.uppercase(Locale.ROOT), rel, line.lineNo + 1),
+                            )
+                            parseFailures.add(
+                                CompileFailure(
+                                    rel,
+                                    line.lineNo,
+                                    "解析失败 | ${line.content.take(120)}",
+                                    FailLineSource.LOGICAL_LINE,
+                                ),
+                            )
+                            poisoned = true
+                            continue
+                        }
+                    }
                 }
                 val stmt = try {
                     parser.parseLogicalLine(line)
@@ -741,6 +955,11 @@ object CorpusCompile {
                 "→ ${slices.size} 切片 / ${parseFailures.size} 解析失败 / $binarySkipped 二进制跳过",
         )
         notes.add("切片完成：${files.size} 文件 → ${slices.size} 个 @函数切片；解析失败切片 ${parseFailures.size} 个")
+        notes.add(
+            "常量关键字下标解析期折叠：${constantKeywordResolver.foldedCount} 处" +
+                "（spec: VariableStrArgTerm.cs:57-69；产物自带整数下标，运行期不查盘上 CSV/ERD 表；" +
+                "未绑定项保持 KeywordIndexArg，报错语义不变）",
+        )
 
         // 4) 切片 ↔ 符号定义对齐（(文件,键) 内出现序；行号口径漂移不影响）
         val queues = LinkedHashMap<Pair<String, String>, ArrayDeque<LabelDef>>()
@@ -866,8 +1085,9 @@ object CorpusCompile {
         // 「erbcc 拿不到游戏 CSV 尺寸表、VARSIZE 只能维持不折叠」的旧论断已被证伪：语料根旁
         // 就有 `CSV/VariableSize.csv`，挂上快照后全局 #DIM 缺口 5→0、私有 7→3。
         // **前移原因（CMP-40）**：生产布局就在下面，必须用这张快照折 `#DIM` 尺寸，不能等到步骤 8。
-        val csvDir = root.parent?.resolve("CSV") ?: root
-        val gameRoot = root.parent ?: root
+        // `csvDir` / `gameRoot` 与 `foldKeywordTables`（含 CMP-59 的 ERD 第二跳）已在
+        // [LineParser] 之前构造好 —— 解析期常量下标折叠要先吃这张表；这里直接复用同一份，
+        // 不重算（重算会把 `UserKeywordTables.foldSnapshot` 的 ERD 表漏掉，CMP-59 白做）。
         // `USE THE BINARY FORMAT FOR SAVING DATA` 必须与运行期同一把尺（语料
         // `emuera.config:60` = YES）：它是 `#DIM ... SAVEDATA` 的登记闸
         // （spec: UserDefinedVariableData.cs:465-475）。编译期漏读会让 66 条
@@ -878,28 +1098,6 @@ object CorpusCompile {
             SystemVariableBootstrap.systemSaveInBinaryFrom(RootedBuiltinHost(gameRoot).configOverrides)
         }.getOrDefault(false)
         val systemDimVarSizes = DimVarSizes.systemSnapshot(csvDir)
-        // GETNUM(...) 的装载期折叠表（spec: FunctionMethodCreator.cs:4814-4832）：
-        // 与运行期 GameSession 同一份 CSV 名字表；缺 CSV 时保持「不折叠」的失败方向。
-        val gameDataForFold = runCatching { GameDataLoader.load(csvDir) }.getOrNull()
-        val systemKeywordTables = gameDataForFold?.registry?.systemKeywordTables() ?: emptyMap()
-        // CMP-59 数据面：ERD 用户表（`CSV/*.csv` + `ERB/**/*.erd`，键 `NAME` / `NAME@n`）。
-        // 原版 `TryKeywordToInteger`（ConstantData.cs:849-871）在内置表未命中后还要查
-        // `erdNameToIntDics`（:866-870）；不喂这张快照，第二跳在装载期折叠面永远没有数据。
-        // `Config.UseERD` 门与运行期 GameSession 同源（语料 `emuera.config:69` = YES）。
-        val erdKeywordTables: Map<String, Map<String, Int>> =
-            if (compileConfig.itemOf(ConfigKey.UseERD).bool()) {
-                // 系统变量名不是 ERD 用户变量（原版 `#DIM` 重名会被拒）⇒ 排除，
-                // 避免给 `GETNUM(TIME, …)` 一类折出原版没有的表（见 foldSnapshot KDoc）。
-                val systemNames = gameDataForFold?.registry?.all()
-                    ?.mapTo(HashSet()) { it.name.uppercase(Locale.ROOT) } ?: emptySet()
-                runCatching { UserKeywordTables.foldSnapshot(gameRoot, systemNames) }
-                    .getOrDefault(emptyMap())
-            } else {
-                emptyMap()
-            }
-        // 键冲突时内置表优先（= 原版第一跳 `GetKeywordDictionary` 的口径，ConstantData.cs:857-861）。
-        // 当前语料两套表零交集（`EI_FLAG` / `COLUMNDIV@2` 都不是内置名表）。
-        val foldKeywordTables: Map<String, Map<String, Int>> = erdKeywordTables + systemKeywordTables
         // GETLINESTR 的填充宽度取 PC 基准的可绘制宽（199 半角格，见 [FOLD_CONSOLE_WIDTH_CELLS]）。
         // 侧车里的私有 #DIM 初值在编译期固定，设备传入的宽度不同时仅影响这一个布局变量。
         val dimConsoleWidth = FOLD_CONSOLE_WIDTH_CELLS
@@ -950,7 +1148,75 @@ object CorpusCompile {
                 "${dimVarSizes.size - systemDimVarSizes.size} 条 + 内置名表 ${systemKeywordTables.size} 张" +
                 " + ERD 表 ${erdKeywordTables.size} 张）；丢弃 ${layoutDrops.size} 条",
         )
-        val compiler = ErbProgramCompiler(layout, callDefaults.build())
+        // E1（定向）：把 `CHK_DATENOW` 的已解析体交给编译器，只内联这一个函数；
+        // `-Deratw.perf.noInlineChkDatenow=true` 为关态。取**最后**一个定义（与 FunctionTable
+        // `nonEvent` 的「后装载者生效」同口径；本语料只有 1 个定义）。
+        // 形状内联：把所有有切片的函数体按 `uppercase(名)` 注入；名字只用于查体，
+        // 形状判定在编译器里只看 AST（`last` 写覆盖 = FunctionTable `nonEvent` 后装载者生效）。
+        val inlineShapeBodies = LinkedHashMap<String, List<Statement>>()
+        for (u in units) {
+            val s = u.slice ?: continue
+            if (s.poisoned) continue
+            inlineShapeBodies[u.sigKey.uppercase(Locale.ROOT)] = s.stmts
+        }
+        notes.add("inline shape bodies=${inlineShapeBodies.size}")
+
+        // ---- 函数级编译缓存（MODERN-R11-R4B2）：开关缺省关，关态一行缓存逻辑都不执行 ----
+        // 关态：funcCache / envFingerprint 都是 null，不建缓存实例、不算环境指纹、不查缓存，
+        // 产物与改动前逐字节相同。开态：本次 compile 新建一个缓存实例（不跨编译共享）。
+        val funcCacheEnabled = System.getProperty("eratw.erbcc.funcCache", "false") == "true"
+        val funcCache = if (funcCacheEnabled) FunctionCompileCache() else null
+        val envFingerprint = if (funcCache != null) {
+            val repoRoot = ErbcCompilerDigest.locateRepoRoot(root)
+            val compilerDigest = if (repoRoot != null) {
+                ErbcCompilerDigest.compute(repoRoot).digest
+            } else {
+                "<no-repo-root>"
+            }
+            CompileEnvFingerprint(
+                lexerConfig = CompileEnvFingerprint.canonicalMap(symbolTable.config.macros) +
+                    "|" + symbolTable.config.ignoreCase +
+                    "|" + CompileEnvFingerprint.canonicalMap(symbolTable.config.constValues),
+                consts = CompileEnvFingerprint.canonicalMap(consts),
+                dimLayout = CompileEnvFingerprint.canonicalMap(dimVarSizes) + "|" +
+                    CompileEnvFingerprint.canonicalMap(foldKeywordTables) + "|" + dimConsoleWidth,
+                compileConfig = listOf(
+                    useRenameFile, saveInBinary, displayWarningLevel, warnBackCompatibility,
+                    fnfFlagOrdinal, fncFlagOrdinal, renameDic?.size,
+                ).joinToString("|"),
+                symbolTables = listOf(
+                    CompileEnvFingerprint.canonicalSet(known),
+                    CompileEnvFingerprint.canonicalSet(exprCalls.intMethods),
+                    CompileEnvFingerprint.canonicalSet(exprCalls.strMethods),
+                    CompileEnvFingerprint.canonicalSet(exprCalls.nonMethodLabels),
+                    CompileEnvFingerprint.canonicalSet(exprCalls.unknownMethods),
+                    CompileEnvFingerprint.canonicalMap(callDefaults.build().mapValues { (_, v) -> v.size }),
+                    CompileEnvFingerprint.canonicalMap(funcDims.mapValues { (_, v) -> v.size }),
+                ).joinToString("\u0001"),
+                compilerDigest = compilerDigest,
+            )
+        } else null
+        // ENGC-3b：目标档函数面注入（被裁名走既有「未定义的函数」路径，D7）+ 缺口收集钩。
+        // sink 只有 (名字, 行)：编译期函数池统一编译，FuncCall 节点无源文件维度，报告的
+        // file 字段如实留空串（组长接线说明允许「降级为文件级」的消费方取舍）。
+        // false-positive 面（非内建也非用户的调用名）按接线说明用用户定义键集过滤。
+        val userDefKeys: Set<String> =
+            if (engineProfile != null) allDefs.mapTo(HashSet()) { it.key.uppercase(Locale.ROOT) }
+            else emptySet()
+        val compiler = ErbProgramCompiler(
+            layout, callDefaults.build(), inlineShapeBodies = inlineShapeBodies,
+            builtinView = engineProfile?.surface ?: FullRegistryView,
+            builtinUnknownSink = if (engineProfile != null) {
+                { name, line ->
+                    val key = name.uppercase(Locale.ROOT)
+                    if (key !in userDefKeys) {
+                        unknownFunctions.add(EngineReportRow(key, "", line + 1))
+                    }
+                }
+            } else {
+                null
+            },
+        )
         var compiled = 0
         var compileFailures = 0
 
@@ -991,6 +1257,26 @@ object CorpusCompile {
             params: List<String>,
             paramRefs: List<String> = emptyList(),
         ) {
+            // ---- 函数级缓存查/存（只在 compileOne 体首；命中仍执行下方 metas/labelPcs/fileByKey 登记）----
+            // 键不含函数名字：函数体原文 + 非名字 FuncSig 相同、仅名字不同的两个函数共享同一片
+            // 切片，命中时 adoptFunction 用当前函数的 sig 声明（见 adoptFunction 的 sig 参数）。
+            val cacheKey = if (funcCache != null && envFingerprint != null) {
+                val bodyText = body.joinToString("\u0001") { it.raw }
+                // 行号入键（R11-R4B2 缺陷修正）：.erbc 的 SECTION_LINES 与段 3 语句记录
+                // 都编码 Statement.line 的绝对行号；切片重放复用源函数的 Statement 实例，
+                // 故「函数体原文相同、但源码行号不同」的两个函数不能共享同一片切片，
+                // 否则命中会重放出源函数行号、产物字节漂移。键仍不含函数名字。
+                val sigText = listOf(
+                    def.isMethod,
+                    scan.funcTypes[def.key.uppercase(Locale.ROOT)]?.toString(),
+                    def.argCount, def.argIntCount, def.argStrCount,
+                    params.joinToString(","), paramRefs.joinToString(","),
+                    body.joinToString(",") { it.line.toString() },
+                ).joinToString("\u0002")
+                funcCache.key(envFingerprint, bodyText, sigText)
+            } else null
+            val cachedSlice = if (cacheKey != null) funcCache!!.lookup(cacheKey) else null
+            // ---- 缓存查/存结束；以下 funcType / arity / 真编译 / 登记顺序一格未动 ----
             val funcType = scan.funcTypes[def.key.uppercase(Locale.ROOT)]
             val returnsStr = funcType == OperandType.STR
             // 4.981 fork 的第三种 MethodType（#FUNCTIONF）；RETURNF 由此编 `_RETF`（路次 g7）。
@@ -1003,10 +1289,20 @@ object CorpusCompile {
             val argStr = if (def.argCount > 0) def.argStrCount else strParam
             var fb: FunctionBytecode? = null
             try {
-                fb = compiler.compileFunction(
-                    FuncSig(sigKey, arity, def.isMethod, returnsStr, paramRefs, returnsFloat = returnsFloat),
-                    body, known, exprCalls,
-                )
+                val sig = FuncSig(sigKey, arity, def.isMethod, returnsStr, paramRefs, returnsFloat = returnsFloat)
+                fb = if (cachedSlice != null) {
+                    // 命中：重放字节 + 复刻登记（登记在下方共用，一格不跳）。
+                    compiler.adoptFunction(cachedSlice, sig)
+                } else if (cacheKey != null) {
+                    // 开态未命中：真编译并录制切片，供后续同键函数重放。
+                    val slice = compiler.compileFunctionRecorded(sig, body, known, exprCalls)
+                    funcCache!!.store(cacheKey, slice)
+                    compiler.functions.last()
+                } else {
+                    // 关态：走原 compileFunction，不录制、不查存 —— 与改动前逐位相同
+                    // （录制路径的 captureSlice 有 globalSlots 判据，关态绝不能触发）。
+                    compiler.compileFunction(sig, body, known, exprCalls)
+                }
                 compiled++
             } catch (e: CompileException) {
                 compileFailures++
@@ -1078,6 +1374,16 @@ object CorpusCompile {
 
         for (u in units) {
             val s = u.slice
+            // PLUGIN-POLICY：禁载脚本的标签**无条件空体**，不许吃兼容档的 degradedStub。
+            // degradedBody(...) 在 compat 档会编一条 THROW「函数在装载时出错，无法使用」，
+            // 那是给「解析失败切片」用的降级桩；套到禁载标签上会把「补丁整体不生效」
+            // 变成「玩家一碰残留按钮就弹新报错」，比原缺插件形态更糟。
+            // 判定用 u.def.file（LabelTable 登记的相对路径，'/' 分隔），与切片阶段的
+            // pf.rel 同一口径；ERH 定义的标签不受影响。
+            if (s == null && ErbPatchPolicy.isExcluded(u.def.file, patchPolicy)) {
+                compileOne(u.sigKey, u.def, emptyList(), stubParams(u.def))
+                continue
+            }
             if (s == null) {
                 // 无切片 / 毒化切片：只有合成占位形参（stubParams），它们不是源码头部形参项，
                 // 不能落进 PARAM_NAMES（否则 ProcessRuntime 会把实参绑给一个不存在的形参）。
@@ -1091,6 +1397,8 @@ object CorpusCompile {
             }
         }
 
+        notes.add("E1 inlined=${compiler.inlineChkDatenowInlined}")
+        notes.add("MAPID inlined=${compiler.inlineGetMapIdInlined}")
         // 6) 事件入口（同名多定义；装载序 = ONLY→PRI→NORMAL→LATER）
         var eventEntries = 0
         // 合成入口的 defIndex 必须排在全部真实定义之后（FunctionTable 按 defIndex 排序，
@@ -1178,6 +1486,7 @@ object CorpusCompile {
             entryFunction = p?.entryFunction ?: -1,
             fileLimit = effectiveLimit,
             binarySkipped = binarySkipped,
+            disabledErbFiles = disabledErbFiles.size,
         )
         val sourceFiles = allFiles.mapNotNull { path ->
             val rel = runCatching { root.relativize(path).toString().replace('\\', '/') }
@@ -1379,6 +1688,30 @@ object CorpusCompile {
             paramDefaults = paramDefaults,
             methodTypes = methodTypes,
         )
+        // M2-5 签名导出接线：从同一批编译期模型抽五要素 → 稳定规范串（缺省不落段）。
+        // 只取有真实切片的 unit（毒化/无切片走合成占位形参，不该进签名表）；
+        // 键与 FuncMeta.key 同口径（u.sigKey 已归一，这里再 uppercase 兜底）。
+        val signatures = SignatureExport.export(
+            units.mapNotNull { u ->
+                val s = u.slice ?: return@mapNotNull null
+                val params = s.params.mapIndexed { i, name ->
+                    SignatureExport.paramOf(
+                        name,
+                        s.paramRefs.getOrElse(i) { name },
+                        s.paramDefaults.getOrNull(i),
+                    )
+                }
+                SignatureExport.Source(
+                    key = u.sigKey,
+                    signature = SignatureExport.FunctionSignature(
+                        params = params,
+                        returnChannel = SignatureExport.returnChannelOf(
+                            scan.funcTypes[u.sigKey.uppercase(Locale.ROOT)],
+                        ),
+                    ),
+                )
+            },
+        )
         // CMP-65：notes 的消费面。这条管线是 CLI/Gradle `compileCorpus` 的生产入口，
         // 但 notes（合成定义、未定义 CALL 空体桩、源文件读失败、预扫描告警、二进制跳过）
         // 此前全 main 源 0 引用 —— 生产出来就丢了。这里在收尾统一打印计数 + 样例到 stderr
@@ -1389,9 +1722,17 @@ object CorpusCompile {
             System.err.println("notes ${notes.size} 条（留痕，不参与成败判定；至多列 20 条）:")
             notes.take(20).forEach { System.err.println("  $it") }
         }
+        // 命中计数只进 stderr 与 CompileResult，不进 notes / manifest ⇒ 不碰四件产物字节。
+        if (funcCache != null) System.err.println(funcCache.stats())
         return CompileResult(
             program, symbolTable, sourceFiles, failures + parseFailures, notes, dimWarnings, stats,
-            bootMetadata, emittedWarnings, dimLayout = layout,
+            bootMetadata, emittedWarnings, dimLayout = layout, signatures = signatures,
+            funcCacheStats = funcCache?.stats(),
+            funcCacheHits = funcCache?.hits ?: 0,
+            funcCacheMisses = funcCache?.misses ?: 0,
+            disabledErbFiles = disabledErbFiles,
+            unknownCommands = unknownCommands,
+            unknownFunctions = unknownFunctions,
         )
     }
 
@@ -1631,6 +1972,10 @@ object CorpusCompile {
             if (s.poisoned) continue
             // 被遮蔽的非事件重名定义不会被 CALL 到，它的私有变量也不该注册（否则同名键冲突）
             if (!u.def.isEvent && u.sigKey != u.def.key) continue
+            // 同名私有变量在运行期 `declareUserVar` 会抛「重复定义」（VariableStore.kt:2501），
+            // 而原版 AddPrivateVariable 是先到者胜（spec: FunctionLabelLine.cs:98-111）——
+            // 侧车必须自己去重，且 #DIM 先于 VARI/VARS 收取（跨类重名属病态声明，取先登记的）。
+            val seen = HashSet<String>()
             for (raw in s.dimLines) {
                 val spec = try {
                     parseDim(raw, cfg)
@@ -1656,6 +2001,46 @@ object CorpusCompile {
                     continue
                 } ?: continue
                 out.add(BootMetadata.PrivateDim(u.def.key, spec))
+                seen.add(spec.name.uppercase(Locale.ROOT))
+            }
+            // VARI/VARS：原版装载期同样走 `parentLine.AddPrivateVariable`（spec:
+            // LogicalLineParser.cs:463-471 / 500-508），`Static=false` ⇒ 每次进函数都由
+            // ScopeIn 重新压栈（FunctionLabelLine.cs:98-135）。侧车必须带上同名同维度的
+            // 声明，否则运行期 `ctx.variables.userVar(name)` 查不到（execVarDeclFlat 直接
+            // Normal、初值赋值与后续引用全部落空）。长度 = 声明头的逗号分段，原版逐项
+            // `int.Parse`（cs:440-447 / :480-486）；无分段默认 `[1]`（cs:427-433）。
+            for (stmt in s.stmts) {
+                if (stmt !is VarDeclStmt) continue
+                val arg = stmt.args
+                val name: String
+                val isStr: Boolean
+                val lengths: IntArray
+                when (arg) {
+                    is IntAsignArgument -> {
+                        name = arg.name
+                        isStr = false
+                        lengths = arg.lengths
+                    }
+                    is StrAsignArgument -> {
+                        name = arg.name
+                        isStr = true
+                        lengths = arg.lengths
+                    }
+                    else -> continue
+                }
+                if (!seen.add(name.uppercase(Locale.ROOT))) continue
+                out.add(
+                    BootMetadata.PrivateDim(
+                        u.def.key,
+                        DimSpec(
+                            name = name,
+                            isStr = isStr,
+                            dims = lengths.copyOf(),
+                            isStatic = false,
+                            isPrivate = true,
+                        ),
+                    ),
+                )
             }
         }
         return out

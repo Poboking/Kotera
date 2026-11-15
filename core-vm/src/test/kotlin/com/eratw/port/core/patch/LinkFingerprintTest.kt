@@ -34,6 +34,10 @@ class LinkFingerprintTest {
         artifactSha256 = "sha-$pkg",
     )
 
+    /** 既有六参助手零改签（LongParameterList 阈值口径）：路由行经 data class copy 注入。 */
+    private fun manifestWithRoutes(routes: List<CharaRouteDeclaration>): ModuleDescriptor =
+        manifest().copy(charaRoutes = routes)
+
     private fun inputs(
         base: String = "base-sha",
         modules: List<String> = listOf("m1", "m2"),
@@ -95,5 +99,91 @@ class LinkFingerprintTest {
         val f1 = LinkFingerprint.compute(inputs(manifests = listOf(manifest(external = listOf("A", "B")))))
         val f2 = LinkFingerprint.compute(inputs(manifests = listOf(manifest(external = listOf("B", "A")))))
         assertNotEquals(f1, f2)
+    }
+
+    // ------------------------------------------------------------------
+    // P1-3：requires 版本约束自动参与指纹（LinkFingerprint 零代码改动的证明）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `requires 加版本约束则指纹变`() {
+        // 约束内嵌字符串经既有「大写 + 排序」通道自动进指纹：加约束 ⇒ 指纹变（期望行为）。
+        val bare = LinkFingerprint.compute(inputs(manifests = listOf(manifest(requires = listOf("mod.core")))))
+        val constrained = LinkFingerprint.compute(
+            inputs(manifests = listOf(manifest(requires = listOf("mod.core@[1.2.0,2.0.0]")))),
+        )
+        assertNotEquals(bare, constrained, "版本约束改变链接语义，指纹必须改变")
+    }
+
+    @Test
+    fun `无约束 requires 指纹与今日逐字节零漂移`() {
+        // 逐字节漂移锁：本输入的全部十因子在此用例内固定；B 案对 LinkFingerprint
+        // 零代码改动 ⇒ 哈希必须与改造前逐字节一致。若未来指纹算法显式换版，
+        // 应由独立波次更新本值，而不是悄悄漂移。
+        assertEquals(
+            "a76133beb75fce4fb490824c74ba4d904dbd9107696f68d0bf0d92dbf9e88ce1",
+            LinkFingerprint.compute(inputs(manifests = listOf(manifest(requires = listOf("mod.core"))))),
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // M5-4 刀 2：charaRoutes 渲染行（CONTRACT-RT2-M54IMPL2 判据 4：路由参与指纹；
+    // 无路由 = 不落渲染行，既有无路由 manifest 指纹逐字节不变——上一条字节锁即其证）
+    // ------------------------------------------------------------------
+
+    private fun routedManifest(routes: List<CharaRouteDeclaration>): ModuleDescriptor =
+        manifestWithRoutes(routes)
+
+    @Test
+    fun `charaRoutes 参与指纹 路由变则指纹变`() {
+        val bare = LinkFingerprint.compute(inputs())
+        val withRoutes = LinkFingerprint.compute(
+            inputs(manifests = listOf(routedManifest(listOf(CharaRouteDeclaration("CFLAG", listOf(0, 1)))))),
+        )
+        assertNotEquals(bare, withRoutes, "路由改变脱水面，指纹必须参与")
+        assertNotEquals(
+            withRoutes,
+            LinkFingerprint.compute(
+                inputs(manifests = listOf(routedManifest(listOf(CharaRouteDeclaration("CFLAG", listOf(0, 2)))))),
+            ),
+            "路由内容变化必须改变指纹",
+        )
+        assertNotEquals(
+            withRoutes,
+            LinkFingerprint.compute(
+                inputs(manifests = listOf(routedManifest(listOf(CharaRouteDeclaration("TALENT", listOf(0, 1)))))),
+            ),
+            "路由族名变化必须改变指纹",
+        )
+    }
+
+    @Test
+    fun `charaRoutes 声明序与格序归一`() {
+        // 行序 + 行内格号集合均无语义（freeze 派生对显式格同序排序）：声明序/格序漂移同指纹。
+        val a = LinkFingerprint.compute(
+            inputs(
+                manifests = listOf(
+                    routedManifest(
+                        listOf(
+                            CharaRouteDeclaration("CFLAG", listOf(2, 0, 1)),
+                            CharaRouteDeclaration("TALENT", listOf(9)),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val b = LinkFingerprint.compute(
+            inputs(
+                manifests = listOf(
+                    routedManifest(
+                        listOf(
+                            CharaRouteDeclaration("talent", listOf(9)),
+                            CharaRouteDeclaration("cflag", listOf(1, 2, 0)),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        assertEquals(a, b)
     }
 }

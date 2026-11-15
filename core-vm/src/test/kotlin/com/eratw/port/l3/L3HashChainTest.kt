@@ -12,12 +12,15 @@ import com.eratw.port.e2e.GoldenModel
 import com.eratw.port.e2e.GoldenPipeline
 import com.eratw.port.e2e.LineConsoleSink
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.Locale
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import kotlin.test.fail
 import org.junit.jupiter.api.Assumptions
 
 /**
@@ -52,6 +55,41 @@ private class ChainRun(
     val renderErrors: List<String>,
     val probe: ForkProbe?,
     val rawPool: List<String>,
+)
+
+/**
+ * 语料档位（CONTRACT-RT2-L3-PROFILE §1）：决定 (b) 判据用哪一组链头/链尾登记常量。
+ *
+ * 档位由 `L3HashChainTest.detectCorpusProfile` 从**实际语料**读出来（`GameBase.csv` →
+ * `_Replace.csv` → `ERB/DIM.ERH` 的 `eraTW_Version` → 语料根路径名兜底），不读机器名/环境变量；
+ * 判不出档位 ⇒ (b) 显式失败并给出登记流程，**不** assumeTrue/skip。
+ *
+ * 每个档位的两枚登记值都是该档语料上 `ERATW_L3_UPDATE=1` 的实测快照（装置自产，非 PC 基准）。
+ * [constantSuffix] 只用于 (b) 报告打印可粘贴的常量名（`REGISTERED_HEAD` / `REGISTERED_HEAD_4_980`）。
+ */
+private enum class CorpusProfile(
+    /** 语料自述版本串（与 `GameBase.csv` / `ERB/DIM.ERH` 里的写法一致）。 */
+    val version: String,
+    /** 报告与失败信息里的口径名。 */
+    val label: String,
+    /** 该档登记常量在源码里的名字后缀。 */
+    val constantSuffix: String,
+) {
+    /** 画蛇添足版 4.980：`ERATW_GAMEDIR` 未设时 GoldenPipeline 的缺省回落档。 */
+    ERA_TW_4_980("4.980", "画蛇添足版 4.980（缺省回落档）", "_4_980"),
+
+    /** 官方 4.981 闸口径（BOARD「E2E golden 语料版本口径」）。 */
+    ERA_TW_4_981("4.981", "官方 4.981 闸口径", ""),
+}
+
+/**
+ * 档位判定的完整读数：语料自述版本 + **判定依据**（`文件:行号` 或兜底说明）+ 解析出的档位。
+ * 报告与失败信息都带 [source]，换语料时能一眼看出「判定读了哪个文件的哪个字段」。
+ */
+private class ProfileProbe(
+    val version: String?,
+    val source: String,
+    val profile: CorpusProfile?,
 )
 
 /**
@@ -107,14 +145,18 @@ private class ChainRun(
  * `eratw-android/specs` 下的 yaml 规约 + 反编译 C# + L2 逐字节对拍。登记常量要改动时，必须连带说明
  * 是哪一层的语义推进，并复核 L2（610/610 行）不回退。
  *
- * ## 首跑落定流程（本轮 worker 不跑测试，AGENTS §2 铁律 7）
+ * ## 落定 / 重落流程（每条语料档位各自一套常量）
  *
- * 1. 组长跑 `./gradlew :core-vm:test --tests "*L3HashChainTest*"`。此时 [REGISTRY_READY] 为 false，
- *    (b) 判据按 JUnit assumption 报 **SKIPPED**（不通过、也不写恒真断言），(a)(c)(d)(e) 照常拦截。
- * 2. 落定常量用环境变量 `ERATW_L3_UPDATE=1`（`core-vm/build.gradle.kts` 已把 `ERATW_*` 透传给 test JVM）。
- *    该模式下 (b) 只落值不拦截，并把可直接粘贴的三行写进 `core-vm/build/l3-report.md`
- *    的「(b) 登记常量」一节。
- * 3. 把那三行粘进本文件的 [REGISTRY_READY] / [REGISTERED_HEAD] / [REGISTERED_TAIL]，(b) 从此是硬闸。
+ * 1. 组长跑 `./gradlew --configure-on-demand :core-vm:test --tests "*L3HashChainTest*"`。
+ *    [REGISTRY_READY] 为 false 时 (b) 判据按 JUnit assumption 报 **SKIPPED**（不通过、也不写恒真断言），
+ *    (a)(c)(d)(e)(f) 照常拦截。
+ * 2. 落定/重落常量用环境变量 `ERATW_L3_UPDATE=1`（`core-vm/build.gradle.kts` 已把 `ERATW_*` 透传给
+ *    test JVM）。该模式下 (b) 只落值不拦截，并把可粘贴的两行写进 `core-vm/build/l3-report.md`
+ *    的「(b) 登记常量」一节（同时打印档位与判定依据）。
+ * 3. 把两行粘进**该档位**的常量组（4.981 → [REGISTERED_HEAD] / [REGISTERED_TAIL]；
+ *    4.980 → `REGISTERED_HEAD_4_980` / `REGISTERED_TAIL_4_980`），(b) 从此是硬闸。
+ *    新档位还要在 [CorpusProfile] 里加条目并在 [registeredValues] 接线；判不出档位时 (b)
+ *    **显式失败**（报「未登记档位 + 判定依据 + 登记命令」），不允许 assumeTrue/skip 掩盖。
  *    **禁止**只把 [REGISTRY_READY] 改 true 却不换两个常量（必红），也禁止反过来把常量写成
  *    「永不校验」的形式还留着 true —— 占位态就是 false + SKIPPED，一目了然。
  * 4. **本轮（时钟收口）之后必须重落一次常量**：引擎侧 GETTIME 语句改吃宿主注入点、装置侧钉钟，
@@ -300,11 +342,19 @@ class L3HashChainTest {
     }
 
     /**
-     * (b) 链头 / 链尾等于登记常量。
+     * (b) 链头 / 链尾等于**当前语料档位**的登记常量。
      *
      * **登记值是装置自产快照，不是 PC 基准**（契约 §3.2(b) 的原文口径；PC 上没有状态哈希可比）。
-     * 首跑时 [REGISTRY_READY] 为 false，这里用 JUnit assumption 明确报 SKIPPED ——
-     * 不写恒真断言、不静默通过；落定方法见类 KDoc「首跑落定流程」。
+     * 登记面自 CONTRACT-RT2-L3-PROFILE 起**按语料档位分组**：4.980 与 4.981 各一组，档位由
+     * [detectCorpusProfile] 从实际语料判定（`GameBase.csv` → `_Replace.csv` → `ERB/DIM.ERH` 的
+     * `eraTW_Version` → 语料根路径名兜底）。换语料根不再是「预期口径错位」：跑在哪个档位，就比
+     * 哪个档位的钉值。
+     *
+     * 判不出档位 ⇒ **显式失败**（信息含「未登记档位 + 判定依据 + 用 `ERATW_L3_UPDATE=1` 登记的
+     * 命令」），不 assumeTrue/skip、不降断言强度（AGENTS §5 假绿纪律）。
+     *
+     * [REGISTRY_READY] 为 false 时按 JUnit assumption 明确报 SKIPPED —— 不写恒真断言、不静默通过；
+     * 落定方法见类 KDoc「落定 / 重落流程」。
      */
     @Test
     fun `链头与链尾等于登记常量`() {
@@ -313,29 +363,52 @@ class L3HashChainTest {
         val head = run.head()
         val tail = run.tail()
         val update = System.getenv("ERATW_L3_UPDATE") == "1"
+        val probe = profileProbe
+        val headName = "REGISTERED_HEAD" + (probe.profile?.constantSuffix ?: "_<档位后缀>")
+        val tailName = "REGISTERED_TAIL" + (probe.profile?.constantSuffix ?: "_<档位后缀>")
         val block = StringBuilder()
-        block.append("\n## (b) 登记常量（自产快照，非 PC 基准）\n\n")
+        block.append("\n## (b) 登记常量（自产快照，非 PC 基准；按语料档位分组）\n\n")
+        block.append("- 档位: ").append(profileLabel).append('\n')
+        block.append("- 档位判定依据: ").append(probe.source).append('\n')
+        block.append("- 语料根: ").append(corpusRoot).append('\n')
         block.append("- 链头 = ").append(StateHash.hex(head)).append('\n')
         block.append("- 链尾 = ").append(StateHash.hex(tail)).append('\n')
-        block.append("- 可粘贴文本（替换 L3HashChainTest 里的三个常量）：\n")
-        block.append("    private const val REGISTRY_READY = true\n")
-        block.append("    private const val REGISTERED_HEAD = ").append(head).append("L\n")
-        block.append("    private const val REGISTERED_TAIL = ").append(tail).append("L\n")
-        block.append("- 当前源码: REGISTRY_READY=").append(REGISTRY_READY)
-            .append(" HEAD=").append(REGISTERED_HEAD)
-            .append(" TAIL=").append(REGISTERED_TAIL)
-            .append('\n')
-        block.append("- ERATW_L3_UPDATE=").append(update).append("（=1 时本判据只落值不拦截）\n")
+        block.append("- 可粘贴文本（登记/重落本档常量组）：\n")
+        block.append("    private const val ").append(headName).append(" = ").append(head).append("L\n")
+        block.append("    private const val ").append(tailName).append(" = ").append(tail).append("L\n")
+        val profile = probe.profile
+        if (profile != null) {
+            val registered = registeredValues(profile)
+            block.append("- 当前档位登记值: HEAD=").append(registered.first)
+                .append(" TAIL=").append(registered.second).append('\n')
+        } else {
+            block.append("- 未登记档位: ").append(unregisteredProfileMessage(probe)).append('\n')
+        }
+        block.append("- ERATW_L3_UPDATE=").append(update)
+            .append("（=1 时本判据只落值不拦截，供登记新档位）\n")
         appendReport(block.toString())
         if (update) return
         Assumptions.assumeTrue(
             REGISTRY_READY,
-            "L3 链头/链尾登记常量仍是占位（首跑未落定）。跑一次 ERATW_L3_UPDATE=1 " +
-                "./gradlew :core-vm:test --tests \"*L3HashChainTest*\"，把 build/l3-report.md 的「(b) 登记常量」" +
-                "三行粘进 L3HashChainTest。(a)(c)(d)(e) 判据不受影响，照常拦截。",
+            "L3 链头/链尾登记常量仍是占位（首跑未落定）。在该语料根上跑一次 ERATW_L3_UPDATE=1 " +
+                "./gradlew --configure-on-demand :core-vm:test --tests \"*L3HashChainTest*\"，" +
+                "把 build/l3-report.md 的「(b) 登记常量」两行粘进对应档位的常量组。" +
+                "(a)(c)(d)(e)(f) 判据不受影响，照常拦截。",
         )
-        assertEquals(REGISTERED_HEAD, head, "链头与登记常量不符（首轮状态演化变了；查 (a) 与报告 (b) 节）")
-        assertEquals(REGISTERED_TAIL, tail, "链尾与登记常量不符（末节状态变了；查 (a) 与报告 (b) 节）")
+        val active = profile ?: fail(unregisteredProfileMessage(probe))
+        val registered = registeredValues(active)
+        assertEquals(
+            registered.first,
+            head,
+            "链头与 " + active.version + " 档登记常量不符（首轮状态演化变了；查 (a) 与报告 (b) 节）。" +
+                corpusProfileNote,
+        )
+        assertEquals(
+            registered.second,
+            tail,
+            "链尾与 " + active.version + " 档登记常量不符（末节状态变了；查 (a) 与报告 (b) 节）。" +
+                corpusProfileNote,
+        )
     }
 
     /**
@@ -637,6 +710,150 @@ class L3HashChainTest {
         /** 报告落在 build 目录（契约 §3.3），不进 git。 */
         private val reportFile: File = File("build/l3-report.md")
 
+        /**
+         * (b) 判据失败消息共用的档位/语料根注记（CONTRACT-RT2-L3-PROFILE 起按档位分组）。
+         *
+         * 归因顺序写进消息：先看**档位判定**（[profileProbe] 的 source）与语料根，再看状态演化（(a) 节）。
+         * 判据逻辑、常量、哈希输入零改动。
+         */
+        private val corpusProfileNote: String
+            get() = "档位=" + profileLabel + "（判定依据: " + profileProbe.source + "；语料根=" +
+                corpusRoot + "）；链值只对同档语料可比 ⇒ 先查档位与语料根，再查状态演化（(a) 节）"
+
+        /** 档位在报告/消息里的写法；判不出时如实写自述版本，不留空白。 */
+        private val profileLabel: String
+            get() = profileProbe.profile?.let { p: CorpusProfile -> p.version + " " + p.label }
+                ?: ("未登记（语料自述版本=" + (profileProbe.version ?: "未知") + "）")
+
+        /**
+         * 当前语料根 = GoldenPipeline 已解析 CSV 目录的上级 —— 与装置实际装载的语料同源
+         * （`ERATW_GAMEDIR` 设置值，或 GoldenPipeline 自己的缺省回落，两档都在 [CorpusProfile] 显式列出）。
+         */
+        private val corpusRoot: String
+            get() = GoldenPipeline.gameCsvDir().parent?.toString() ?: "<CSV 目录无父目录>"
+
+        /**
+         * 语料档位判定（CONTRACT-RT2-L3-PROFILE §1.2）。判定面按契约优先级：
+         * 1. `CSV/GameBase.csv` 的**值列** —— 游戏自述的版本/标识（今天两档该字段都是 `proto`，
+         *    命中为空属现实，不是判定失败）；
+         * 2. `CSV/_Replace.csv` 的**值列** —— 同上（契约点名的第二优先面）；
+         * 3. `ERB/DIM.ERH` 的 `#DIMS CONST eraTW_Version = "4.98x"` —— 语料唯一的显式版本号（两档各不同）；
+         * 4. 语料根**路径名** —— 契约允许的最后兜底，只认 [CorpusProfile] 已登记两档的写法。
+         * 判不出 ⇒ `profile = null`，由 (b) 显式失败（**不** assumeTrue/skip）。
+         */
+        private val profileProbe: ProfileProbe by lazy { detectCorpusProfile(GoldenPipeline.gameCsvDir()) }
+
+        /** 版本串 → 档位；未登记版本（如未来 4.982）返回 null，由 (b) 报「未登记档位」。 */
+        private fun profileOf(version: String): CorpusProfile? {
+            for (p in CorpusProfile.entries) {
+                if (p.version == version) return p
+            }
+            return null
+        }
+
+        /** 档位 → 该档的登记（链头, 链尾）。`when` 穷举：新增档位不补值编译不过（有意的闸）。 */
+        private fun registeredValues(profile: CorpusProfile): Pair<Long, Long> = when (profile) {
+            CorpusProfile.ERA_TW_4_980 -> Pair(REGISTERED_HEAD_4_980, REGISTERED_TAIL_4_980)
+            CorpusProfile.ERA_TW_4_981 -> Pair(REGISTERED_HEAD, REGISTERED_TAIL)
+        }
+
+        /** 契约里的版本串形状（`4.980` / `4.981`；前后不接数字，避免吃掉 14.980 之类的长串）。 */
+        private val CORPUS_VERSION_TOKEN = Regex("""(?<!\d)(4\.\d{3})(?!\d)""")
+
+        /** 语料自述版本常量（`ERB/DIM.ERH` 首部；`#DIMS CONST eraTW_Version = "..."`）。 */
+        private val ERA_TW_VERSION_CONST = Regex("""eraTW_Version\s*=\s*"([^"]+)"""")
+
+        /**
+         * 按契约优先级判定档位：GameBase.csv → _Replace.csv → ERB/DIM.ERH → 路径名兜底。
+         * 每个候选都带**判定依据**（文件:行号 / 兜底说明），报告与失败信息原样引用。
+         */
+        private fun detectCorpusProfile(csvDir: Path): ProfileProbe {
+            val candidates = ArrayList<Pair<String, String>>()
+            versionInCsv(csvDir.resolve("GameBase.csv"))?.let { hit ->
+                candidates.add(Pair(hit.first, "GameBase.csv:" + hit.second))
+            }
+            versionInCsv(csvDir.resolve("_Replace.csv"))?.let { hit ->
+                candidates.add(Pair(hit.first, "_Replace.csv:" + hit.second))
+            }
+            versionInErh(csvDir)?.let { hit -> candidates.add(hit) }
+            val hit = candidates.firstOrNull()
+            val byPath = if (hit == null) {
+                val root = (csvDir.parent ?: csvDir).toString()
+                CorpusProfile.entries.firstOrNull { p: CorpusProfile -> root.contains(p.version) }
+            } else {
+                null
+            }
+            return when {
+                hit != null -> ProfileProbe(hit.first, hit.second, profileOf(hit.first))
+                byPath != null -> ProfileProbe(byPath.version, "语料根路径名含「" + byPath.version + "」（兜底）", byPath)
+                else -> ProfileProbe(
+                    null,
+                    "GameBase.csv / _Replace.csv 值列无版本串；ERB/DIM.ERH 无 eraTW_Version；" +
+                        "语料根路径名不含 " +
+                        CorpusProfile.entries.joinToString("/") { p: CorpusProfile -> p.version },
+                    null,
+                )
+            }
+        }
+
+        /**
+         * 在语料 CSV 里找版本串。只看**值列**（第 2 列起）：键列是 `バージョン` 这类固定词，
+         * 值列才是游戏自述的标识；返回（版本串, 行号）。BOM/Shift-JIS 不影响 ASCII 版本串。
+         */
+        private fun versionInCsv(file: Path): Pair<String, Int>? {
+            val lines = readSmallText(file)?.lines() ?: return null
+            return lines.withIndex().firstNotNullOfOrNull { iv: IndexedValue<String> ->
+                val line = iv.value
+                if (line.isBlank() || line.startsWith(";")) {
+                    null
+                } else {
+                    line.split(',').drop(1).firstNotNullOfOrNull { cell: String ->
+                        CORPUS_VERSION_TOKEN.find(cell)?.let { m: MatchResult ->
+                            Pair(m.groupValues[1], iv.index + 1)
+                        }
+                    }
+                }
+            }
+        }
+
+        /** 读 `ERB/DIM.ERH` 的 `eraTW_Version` 常量；返回（版本串, `ERB/DIM.ERH:行号`）。 */
+        private fun versionInErh(csvDir: Path): Pair<String, String>? =
+            csvDir.parent?.resolve("ERB")?.resolve("DIM.ERH")
+                ?.let { file: Path -> readSmallText(file) }
+                ?.let { text: String -> ERA_TW_VERSION_CONST.find(text)?.let { m: MatchResult -> Pair(text, m) } }
+                ?.let { found: Pair<String, MatchResult> ->
+                    val line = found.first.substring(0, found.second.range.first)
+                        .count { c: Char -> c == '\n' } + 1
+                    Pair(found.second.groupValues[1], "ERB/DIM.ERH:" + line + "（#DIMS CONST eraTW_Version）")
+                }
+
+        /** 读语料元数据小文件（>1 MiB 不读：只判定档位，不把语料正文拖进装置）；缺失/读失败返回 null。 */
+        private fun readSmallText(file: Path): String? {
+            if (!Files.isRegularFile(file)) return null
+            return try {
+                if (Files.size(file) > 1024L * 1024L) {
+                    null
+                } else {
+                    String(Files.readAllBytes(file), Charsets.UTF_8)
+                }
+            } catch (_: java.io.IOException) {
+                null
+            }
+        }
+
+        /**
+         * 未登记档位的失败信息（契约 §1.2 要求写明「未登记档位 + 如何用 ERATW_L3_UPDATE=1 登记」）。
+         * 刻意不用 assumeTrue/skip：未知档位必须红，否则新的假绿面会从这里长出来。
+         */
+        private fun unregisteredProfileMessage(probe: ProfileProbe): String =
+            "未登记档位：语料自述版本=" + (probe.version ?: "未知") + "（判定依据: " + probe.source +
+                "；语料根=" + corpusRoot + "）。登记流程：" +
+                "① 在 L3HashChainTest 的 CorpusProfile 里加条目（version/label/常量名后缀），" +
+                "并在 registeredValues 的 when 里接线；" +
+                "② 用该语料根跑 ERATW_GAMEDIR=<根> ERATW_CORPUS=<根>/ERB ERATW_L3_UPDATE=1 " +
+                "./gradlew --configure-on-demand cleanTest :core-vm:test --tests \"*L3HashChainTest*\"；" +
+                "③ 把 core-vm/build/l3-report.md「(b) 登记常量」的可粘贴两行粘回对应常量组。"
+
         /** 分节步数闸与 E2E 的 `runSections` 同值。 */
         private const val STEP_CAP = 2_000_000L
 
@@ -657,10 +874,10 @@ class L3HashChainTest {
          */
         private const val FORK_LINEAGE = 1L
 
-        // ---- 登记常量（自产快照，非 PC 基准；首跑落定流程见类 KDoc）----
+        // ---- 登记常量（自产快照，非 PC 基准；按语料档位分组；落定流程见类 KDoc）----
         //
         // 落定于 2026-10-20，链公式 v2（叠 lineage）+ 时钟注入点收口之后。
-        // 这两个值只回答「装置自己有没有变」；语义权威仍是 specs 下的 yaml 规约、反编译 C# 与 L2 逐字节对拍。
+        // 这些值只回答「装置自己有没有变」；语义权威仍是 specs 下的 yaml 规约、反编译 C# 与 L2 逐字节对拍。
         // 口径注：装置侧时区由 GoldenPipeline 钉 UTC（BuiltinHost.zoneId() 注入点，与 clockMillis
         // 同协议），链常量不再带机器/时区印记。
         // 2026-10-20 g-als 重落：.als 别名装载后 Chara0.csv 的 基礎,情緒,1500 / 基礎,憤怒,1000 生效
@@ -788,9 +1005,36 @@ class L3HashChainTest {
         // （ROOT-INFO 无图形写 ⇒ 7732844912907504206 与修复前 4.981 实测逐值同源），链尾重落。
         // 装置自洽背书：ERATW_L3_UPDATE=1 两遍复跑报告 md5 逐位相同（e4c2a8c315514f01…），
         // (a)(c)(d)(e)(f) 全绿；语义面另有 E2EGoldenTest 4.981 口径背书。非装置回归、非引擎回归。
+        // 2026-11-11 R13-L3H 口径裁定（本次，lane wave/r13-l3h）：这三个常量自 HOST-02 重落起钉的是
+        // **官方 4.981 闸口径**（ERATW_GAMEDIR = eraTW4.981-261017-EAGLOV3，与 BOARD「E2E golden 语料
+        // 版本口径」对齐），本日两口径实测坐实：4.981 口径 (a)-(f) 全绿，(b) 实测链头/链尾
+        // 6b50957a5909ca4e / 277b9ad9822d4372 与登记值逐位一致；4.980 口径（eratw-画蛇添足版eratw4.980）
+        // 仅 (b) 红 —— 链头实测 2243317918395005452（hex 1f21ddc2dc33fa0c，与上面 11-05 条目的
+        // 4.980 口径落定值逐位复现），其余 8 条用例全绿 0 skipped。⇒ **4.980 语料根下 (b) 红
+        // 属预期口径错位、非装置回归、非引擎回归**；BOARD「预红基线」行 ⑥「4.980 口径，4.981 下绿」
+        // 的记法在此勘误：不是常量钉在 4.980，而是常量钉 4.981、那次判读用了 4.980 语料根。
+        // 首差簇面（两份 l3-report.md「每节簇表」逐节点 diff 实测）：#0 ROOT-INFO 起
+        // meta / string-pool / sys-csv-const / sys-int-global / sys-str-global 五簇逐值不同且 16 节一致；
+        // roster / sys-chara 在这两套语料间逐值相同（11-01 条目归因面中此二簇本次对照未命中，如实记录）。
+        // 反向证明：REGISTERED_HEAD 临时 +1 ⇒ (b) 红；逐字节恢复（文件 sha 同值）⇒ 复绿。
+        // 2026-11-14 CONTRACT-RT2-L3-PROFILE（lane-l3-profile）分档：上面这一组自本笔起明确为
+        // **4.981 档**（[CorpusProfile] 的 constantSuffix 为空，两值逐字节未动）。新增 4.980 档常量组 ——
+        // 4.980 根是 ERATW_GAMEDIR 缺省回落档（GoldenPipeline.GAME_DIR_NAME），此前在该根上跑全量 Gate
+        // 必假红 1。两组值均由测试自带 ERATW_L3_UPDATE=1 在各自语料根上实测（build/l3-report.md「(b)」节粘回）：
+        //   4.981（eraTW4.981-261017-EAGLOV3）：HEAD 6b50957a5909ca4e / TAIL 277b9ad9822d4372
+        //   4.980（eratw-画蛇添足版eratw4.980）  ：HEAD 1f21ddc2dc33fa0c / TAIL a9f288b733ba362a
+        // 4.980 链头与 11-05/11-11 两条记录逐位一致（首节输入面未动）；链尾相对 11-05 落定值
+        // -5121219222006767564 已随 origin/main 收编的语义推进重落（末节驻留/图形读数面，口径同
+        // 10-30/audit-w2 条目）。本次 (a)/(f) 全绿 ⇒ 装置自洽，非装置回归。
         private const val REGISTRY_READY = true
+
+        /** 4.981 档（官方闸口径）链头/链尾登记值。 */
         private const val REGISTERED_HEAD = 7732844912907504206L
         private const val REGISTERED_TAIL = 2845037848597185394L
+
+        /** 4.980 档（画蛇添足版，ERATW_GAMEDIR 缺省回落档）链头/链尾登记值。 */
+        private const val REGISTERED_HEAD_4_980 = 2243317918395005452L
+        private const val REGISTERED_TAIL_4_980 = -6200743416507517398L
 
         /** 私有 `#DIM` 的归属函数键（`FuncMeta.key` 大写去重排序），喂给 [StateHash] 的 user-private 簇。 */
         private val functionKeys: List<String> =

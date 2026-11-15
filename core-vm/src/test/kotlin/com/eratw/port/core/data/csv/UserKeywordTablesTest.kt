@@ -277,6 +277,10 @@ class UserKeywordTablesTest {
             snap.keys.sorted(),
             "${profile.name} 语料实测 ${profile.erdSnapshotKeys.size} 张；变多/变少都要写出处",
         )
-        assertEquals(0, snap["EI_FLAG"]?.get("栄養"), "EI_FLAG 的下标 0 = 栄養（CSV/EI_FLAG.csv:1，两根未变）")
+        assertEquals(
+            0,
+            snap["EI_FLAG"]?.get("营养"),
+            "EI_FLAG 下标 0 = 营养（261111 CSV 简体化，261017=栄養；繁体旧名进 261111 新增的 EI_FLAG.als 别名）",
+        )
     }
 }

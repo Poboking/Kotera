@@ -2,10 +2,11 @@
 // flow -> display -> variable -> call -> input -> io -> data -> debug -> other 分段，段内按语句名升序连续编号。
 // 校验：OpcodeTableTest 直接解析 specs/isa.yaml，断言名字/数量/别名一一对应。
 //
-// 198..245 是**手维护扩展区**（isa.yaml 不覆盖，OpcodeTableTest 逐条锁死名字与顺序）：
+// 198..248 是**手维护扩展区**（isa.yaml 不覆盖，OpcodeTableTest 逐条锁死名字与顺序）：
 // 198..201 编译器扩展（CALLFORM/GOTOFORM/#FUNCTIONS 等运行期名字解析），
 // 202..243 栈码组（T2-21：表达式降级的落地目标），244 浮点返回（_RETF，4.981 升版），
-// 245 运行期字符串调用（_CALL_STR，WIRE-1/WIRE-2）。全部进 NAMES/BY_NAME，
+// 245 运行期字符串调用（_CALL_STR，WIRE-1/WIRE-2），246 条件位融合（_EVAL_INT_JZ，MODERN-T1），
+// 247/248 循环条件融合（_LT_JZ/_GT_JZ，PERF-LOOP）。全部进 NAMES/BY_NAME，
 // 保证反汇编可读、文本汇编可写回（asm(disasm(p)) 往返）。
 // 逐操作数的池引用分类（拼接平移/装载判界共用）在 OpcodeRelocation，不在本文件。
 package com.eratw.port.core.code
@@ -769,8 +770,25 @@ object Opcode {
      */
     const val _EVAL_INT_JZ = 246
 
+    /**
+     * `a`=左槽、`b`=右槽、`c`=相对跳转偏移（相对**下一条**指令，单位=指令条数）——
+     * `_LT` + `_JUMP_IF_FALSE` 的循环条件融合（PERF-LOOP，缺省开；
+     * `-Deratw.perf.noCompareJumpFuse=true` 回到未融合序列，产物逐字节不变）。
+     *
+     * 仅用于 FOR 的入口/回边判定（`compileFor` 的常量/非常量步长分支）：左 < 右 继续，
+     * 否则跳到 `pc+1+c`。不写条件临时槽；比较是同一套 i64 `getInt` 语义。
+     * 与 `_EVAL_INT_JZ` 同族，但省的是「比较 + 跳假」两条指令，不是表达式求值。
+     *
+     * 编号说明：PERF-ASSIGN 判死路线（`_SET_VAR_*`/`_EVAL_SET_*`）**不占用编号**，本条
+     * 紧接 `_EVAL_INT_JZ` 追加在 247 位；[NAMES]/[OpcodeRelocation] 同步。
+     */
+    const val _LT_JZ = 247
+
+    /** 同 [_LT_JZ]：左 > 右继续，否则跳转（负步长 FOR 用）。 */
+    const val _GT_JZ = 248
+
     /** 最后一条已定义的操作码（= 编译器扩展追加段末条；栈码组末条是 [_STK_POP_SLOT_S]）。 */
-    const val MAX_OPCODE = _EVAL_INT_JZ
+    const val MAX_OPCODE = _GT_JZ
 
     /** 最后一条 ERB 语句的操作码（isa.yaml 的 169 条语句占 29..197）。 */
     const val MAX_STATEMENT_OPCODE = 197
@@ -787,15 +805,15 @@ object Opcode {
     val STACK_OPS: IntRange = _STK_PUSH_IMM.._STK_POP_SLOT_S
 
     /**
-     * 全部**非 isa.yaml 语句**的操作码区间（198..246 = 编译器扩展 + 栈码组 + 浮点返回追加段
-     * + 运行期字符串调用追加段 + 条件位融合附加段）。
+     * 全部**非 isa.yaml 语句**的操作码区间（198..248 = 编译器扩展 + 栈码组 + 浮点返回追加段
+     * + 运行期字符串调用追加段 + 条件位融合附加段 + 循环条件融合附加段）。
      *
      * 语义与改造前一致：`isExtension` 回答「这不是 169 条 ERB 语句之一，操作数语义由
      * [Opcode] 各常量的 KDoc 单独定义」。需要区分两类时用 [isStackOp]。
      *
      * 末位随「只许末尾追加」的新扩展码一起后移（[_RETF]、[_CALL_STR]、[_EVAL_INT_JZ]），栈码组区间 [STACK_OPS] 不动。
      */
-    val EXTENSION_OPS: IntRange = _CALL_BY_NAME.._EVAL_INT_JZ
+    val EXTENSION_OPS: IntRange = _CALL_BY_NAME.._GT_JZ
 
     // ------------------------------------------------------------------
     // 调用指令 b 操作数的标志位（CMP-57：单一真源）
@@ -891,14 +909,16 @@ object Opcode {
         "_STK_CONCAT", "_STK_SREPEAT", "_STK_I2S",
         "_STK_JZ_POP", "_STK_JNZ_POP", "_STK_JZ_KEEP",
         "_STK_POP_SLOT_I", "_STK_POP_SLOT_S",
-        // 末尾追加段（244 `_RETF`、245 `_CALL_STR`、246 `_EVAL_INT_JZ`）：新扩展码只许加在这里，
-        // 栈码组的编号与顺序不动。
+        // 末尾追加段（244 `_RETF`、245 `_CALL_STR`、246 `_EVAL_INT_JZ`、247 `_LT_JZ`、
+        // 248 `_GT_JZ`）：新扩展码只许加在这里，栈码组的编号与顺序不动。
         "_RETF",
         "_CALL_STR",
         "_EVAL_INT_JZ",
+        "_LT_JZ",
+        "_GT_JZ",
     )
 
-    /** 名字 -> 操作码（内部指令 + 169 条语句的规范名 + 4 条编译器扩展 + 42 条栈码 + 1 条浮点返回 + 1 条运行期字符串调用 + 1 条条件位融合）。 */
+    /** 名字 -> 操作码（内部指令 + 169 条语句的规范名 + 4 条编译器扩展 + 42 条栈码 + 1 条浮点返回 + 1 条运行期字符串调用 + 1 条条件位融合 + 2 条循环条件融合）。 */
     val BY_NAME: Map<String, Int> = buildMap {
         for ((i, n) in NAMES.withIndex()) put(n, i)
     }

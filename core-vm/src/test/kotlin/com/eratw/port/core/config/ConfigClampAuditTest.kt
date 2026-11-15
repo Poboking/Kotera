@@ -126,6 +126,13 @@ class ConfigClampAuditTest {
     /** 一行 = 一个 `NumericUpDown`：控件界限（`:433-464`）+ 绑定的条目（`:760-772`、`:916-919`）。 */
     private data class GuiRow(val key: ConfigKey, val range: IntRange, val minLine: Int, val maxLine: Int, val bindLine: Int)
 
+    /** 唯一登记放宽的 GUI 值域（ADR-005 平台标定例外，不是漏抄）：官方 numericUpDown10
+     *  是 0..100000（ConfigDialog.cs:451-452），安卓出厂阈值 360000 必须落在设置页可调
+     *  范围内。放宽理由与证据见 ConfigSpec.kt:132-138；其余 16 条必须与官方逐字一致。 */
+    private val registeredGuiRangeDivergences: Map<ConfigKey, IntRange> = mapOf(
+        ConfigKey.InfiniteLoopAlertTime to 0..600000,
+    )
+
     private val guiRows: List<GuiRow> = listOf(
         GuiRow(ConfigKey.PrintCPerLine, 1..100, 433, 434, 763), // numericUpDown1
         GuiRow(ConfigKey.WindowX, 128..5000, 435, 436, 760), // numericUpDown2
@@ -157,11 +164,26 @@ class ConfigClampAuditTest {
                 mismatches += "${row.key} 在移植侧表里查不到（ConfigDialog.cs:${row.bindLine} 绑的条目）"
                 continue
             }
-            if (spec.guiIntRange != row.range) {
-                mismatches += "${row.key} 值域 期望 ${row.range} 实际 ${spec.guiIntRange}（ConfigDialog.cs:${row.minLine}-${row.maxLine}）"
+            val expected = registeredGuiRangeDivergences[row.key] ?: row.range
+            if (spec.guiIntRange != expected) {
+                mismatches += "${row.key} 值域 期望 $expected 实际 ${spec.guiIntRange}" +
+                    "（ConfigDialog.cs:${row.minLine}-${row.maxLine}）"
             }
         }
-        assertEquals(emptyList<String>(), mismatches, "GUI 值域分歧清单（空 = 17/17 全对）")
+        assertEquals(emptyList<String>(), mismatches, "GUI 值域分歧清单（空 = 16 条官方逐字 + 1 条登记放宽）")
+
+        // 反向：实际代码里与官方 C# 值域不同的条目，必须恰好等于登记表，不能有第二处静默放宽。
+        val actualDivergences = guiRows
+            .mapNotNull { row ->
+                val actual = ConfigSpecTable.specOf(row.key)?.guiIntRange
+                if (actual != null && actual != row.range) row.key to actual else null
+            }
+            .toMap()
+        assertEquals(
+            registeredGuiRangeDivergences,
+            actualDivergences,
+            "GUI 值域与官方不同的条目必须与登记表逐项一致（ConfigSpec.kt:132-138）",
+        )
 
         // 反向：表里凡是给了 guiIntRange 的条目，必须都能在这份绑定名单里找到。
         val withRange = ConfigSpecTable.all.filter { it.guiIntRange != null }.map { it.key }.toSet()

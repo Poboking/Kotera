@@ -1,6 +1,7 @@
 package com.eratw.port.render.glyph
 
 import com.eratw.port.core.host.CellWidth
+import com.eratw.port.core.host.Cp932Encodable
 import com.eratw.port.core.host.FontDisplayWidth
 import com.eratw.port.render.Grid
 import com.eratw.port.render.font.BundledFontFamilies
@@ -37,7 +38,12 @@ import kotlin.math.round
  * 3. **缺表 / 缺行一律退化到静态网格**：`CellMetrics.cellsOf` 给回原来的 1 / 2 / 4 格，
  *    不猜系统字体宽度（GFX-12 的确定性口径），也不把退化值当真实度量。
  *    所以 headless、黄金基准以及所有未接表的装置**逐值不变**。
- * 4. **整格吸附**：严格 1:2 的等宽族，半角 9px / 全角 18px 落在
+ * 4. **替身正文族的 CP932 已知码位直接走静态网格**（2026-11-10 增补）：Sarasa Mono SC
+ *    等替身族顶替的是 CP932 系统字体，语料字符画/地图按原版字体的全角口径排布，
+ *    替身 hmtx 的半角 500（等宽拉丁习惯）对这批码位不忠实 —— `Cp932Encodable`
+ *    命中的码位不进 sidecar 链；表外字（▉▂ / 组合记号）保持真实 advance。
+ *    Saitamaar 是 PC 上本尊参与度量的字符画字体，整体豁免（见 `compute` 内注）。
+ * 5. **整格吸附**：严格 1:2 的等宽族，半角 9px / 全角 18px 落在
  *    0.9615 / 1.923 格（半格宽 = 字号 / 2 × 1.04，见 `StringMeasure.cs:37`）。
  *    距最近整数不超过 [SNAP_TOLERANCE] 时吸附成整数，既保住既有「按格推进 +
  *    textScaleX 1.04 填满格」的观感，也让折行 / 命中 / 列区间仍是整数格。
@@ -139,6 +145,28 @@ class FontWidthRuler(
     }
 
     private fun compute(codePoint: Int, family: String): Float {
+        // 替身正文族的 CP932 已知码位 → 静态 CP932 网格（2026-11-10 地灵殿地图碎裂修复）。
+        //
+        // 字符画/地图语料是按 PC 原版用段字体本尊（ＭＳ ゴシック/黑体 = CP932 系统字体）
+        // 量宽排出来的：`StringMeasure.cs:42-72` 的 GetDisplayLength 走
+        // `ConsoleStyledString.cs:25,82` GetFont(style.Fontname) 拿到的字体，JIS 双字节记号
+        // （制表符 ━┃┼、希腊 Ψψρ、数学 ∵∥≡、罗马数字 Ⅲ…）一律全角 2 格 —— 黄金基准
+        // `pc-golden-root.txt:61`（99 个 ━ 填满 1797px）也把 Ambiguous 符号钉成全角。
+        // 而随包替身字体的 hmtx 把这一批设计成半角 500（Sarasa Mono SC 的等宽拉丁习惯），
+        // sidecar 如实抄了它 ⇒ 对 `COLOREDMAPS/DRAW_COLOREDMAP.ERB:125` 的
+        // `<font face='ＭＳ ゴシック'>` 地图逐字推进时，一行 68 格的画布只剩 45 格、
+        // 且各行压缩量随行内记号数浮动，边框竖带碎成几条错位带（真机截图实证）。
+        // 所以替身正文族下，凡 CP932 自己有字形（本表命中）的码位，宽度必须回到
+        // 原版字体的静态网格模型；sidecar 真实 advance 只替 PC 上没有的表外字说话
+        // ——块元素 ▉ U+2589（老虎机字符画，随包半角 1 格 = GDI+ 回退的最好模型）与
+        // 组合记号（零推进）两条既有读数都靠这条保住，[Cp932Encodable] KDoc 有全链锚。
+        //
+        // [ASCII_ART_FAMILY] 例外：PC 原版对 `SETFONT "Saitamaar"` 量的是随包字体本尊
+        // （玩家机上真装了它），真实比例 advance（发丝空格 0.12 格）才是忠实读数，
+        // 静态网格 1 格反而把觉 AA 画推回 2026-11-08 之前的错位。
+        if (family != BundledFontFamilies.ASCII_ART_FAMILY && Cp932Encodable.encodable(codePoint)) {
+            return cellMetrics.cellsOf(codePoint).toFloat()
+        }
         // 与真机 CanvasConsoleView.effectiveFamily 的缺字回落**同源**（都走 GlyphFallback）：
         // 请求族 → Sarasa → Unifont。链的成员与顺序只由 GlyphFallback.chainFor 定义，
         // 两处不再各写一遍（判据仍各自不同：这里问 sidecar 有没有行，那边问 Paint.hasGlyph）。

@@ -204,9 +204,15 @@ class FloatDeclFaceTest {
         }
     }
 
-    /** `#LOCALFSIZE 16`：LOCALF / ARGF 都长到 16，15 号可读写、16 号越界，VARSIZE=16。 */
+    /**
+     * `#LOCALFSIZE 16`：LOCALF 长到 16（15 号可读写、16 号越界，VARSIZE=16）。
+     *
+     * ARGF 与 `#LOCALFSIZE` **不互相抬界**（严格照抄裁决，CONTRACT-RT2-M32A 判据 2 口径差 1）：
+     * fork 的 ARGF 支只读 `func.ArgFloatLength`（`VariableLocal.cs:48-49`），`#LOCALFSIZE`
+     * 记在 `func.LocalFloatLength` 上 ⇒ ARGF 仍出厂 10。
+     */
     @Test
-    fun `LOCALFSIZE十六生效于LOCALF与ARGF`() {
+    fun `LOCALFSIZE十六生效于LOCALF而不牵动ARGF`() {
         val store = VariableStore()
         store.defineLocalLengths("T", VariableStore.LocalLengths(floatLocal = 16))
         store.enterFunction("T")
@@ -215,25 +221,34 @@ class FloatDeclFaceTest {
             assertEquals(2.5, store.readFloat("LOCALF", longArrayOf(15)), "LOCALF:15 必须可写")
             assertEquals(16, store.getLength("LOCALF"), "VARSIZE(\"LOCALF\") 必须跟随 #LOCALFSIZE")
 
-            store.writeFloat("ARGF", longArrayOf(15), 0.5)
-            assertEquals(0.5, store.readFloat("ARGF", longArrayOf(15)), "ARGF:15 必须可写")
-            assertEquals(16, store.getLength("ARGF"), "VARSIZE(\"ARGF\") 必须跟随 #LOCALFSIZE")
+            store.writeFloat("ARGF", longArrayOf(9), 0.5)
+            assertEquals(0.5, store.readFloat("ARGF", longArrayOf(9)), "ARGF 出厂 10：9 号可写")
+            assertEquals(
+                10,
+                store.getLength("ARGF"),
+                "ARGF 不吃 #LOCALFSIZE（fork VariableLocal.cs:48-49 只读 ArgFloatLength）",
+            )
 
             assertFailsWith<CodeEE> { store.readFloat("LOCALF", longArrayOf(16)) }
-            assertFailsWith<CodeEE> { store.writeFloat("ARGF", longArrayOf(16), 1.0) }
+            assertFailsWith<CodeEE> { store.writeFloat("ARGF", longArrayOf(10), 1.0) }
         } finally {
             store.leaveFunction()
         }
     }
 
-    /** 声明只增不减：`#LOCALFSIZE 4` 不缩到 4（max(默认 10, 声明)）；ARGF 的声明长取上界。 */
+    /**
+     * 非事件函数的 LOCALF **不做档位下限钳制**（严格照抄裁决，CONTRACT-RT2-M32A 判据 2
+     * 口径差 2）：fork `VariableLocal.cs:52` 的钳制名单里没有 LOCALF ⇒ `#LOCALFSIZE 4`
+     * 缩到 4；档位下限只由事件组聚合抬（`SortLabel` 事件支）。
+     * ARGF 的声明长仍取上界（`max(档位 10, 声明 20)`，钳制名单里有 ARGF）。
+     */
     @Test
-    fun `LOCALFSIZE小于默认不缩短且ARG声明只增`() {
+    fun `LOCALFSIZE小于档位可缩且ARGF声明只增`() {
         val store = VariableStore()
         store.defineLocalLengths("T", VariableStore.LocalLengths(floatLocal = 4, floatArg = 20))
         store.enterFunction("T")
         try {
-            assertEquals(10, store.getLength("LOCALF"), "#LOCALFSIZE 4 < 默认 10 ⇒ 仍 10")
+            assertEquals(4, store.getLength("LOCALF"), "#LOCALFSIZE 4 < 档位 10 ⇒ 缩到 4（非事件不钳制）")
             assertEquals(20, store.getLength("ARGF"), "形参声明长出的浮点局部长度取上界")
             store.writeFloat("ARGF", longArrayOf(19), 3.0)
             assertEquals(3.0, store.readFloat("ARGF", longArrayOf(19)))
@@ -286,13 +301,24 @@ class FloatDeclFaceTest {
         assertTrue(a != c, "floatLocalSize 不同的两条 meta 不得相等")
     }
 
-    /** 16 位域上界：越界在构造期炸（与 #LOCALSIZE/#LOCALSSIZE 同口径）。 */
+    /**
+     * 上界口径：`floatLocalSize` 与 localSize/localsSize 同一条官方合法域
+     * `0..int.MaxValue-1`（spec: LogicalLineParser.cs:236-244 / :259 / :272；域放宽见
+     * `1c22c7334` 的 FuncMeta 全 32 位改造，本用例随之从「越 16 位域被拒」校准）。
+     */
     @Test
-    fun `FuncMeta浮点局部长度越16位域被拒`() {
+    fun `FuncMeta浮点局部长度取官方合法域`() {
+        // 越官方上界（>= int.MaxValue）在构造期炸
         assertFailsWith<IllegalArgumentException> {
-            FuncMeta(index = 0, key = "T", floatLocalSize = 0x1_0000)
+            FuncMeta(index = 0, key = "T", floatLocalSize = Int.MAX_VALUE)
         }
-        // 边界值本身合法
+        assertFailsWith<IllegalArgumentException> {
+            FuncMeta(index = 0, key = "T", floatLocalSize = -1)
+        }
+        // 16 位边界与官方合法大值都放行（真第三方语料 CHARA_LIST.ERB:26 是 #LOCALSIZE
+        // 3000000，同族 #LOCALFSIZE 同口径）
         assertEquals(0xFFFF, FuncMeta(index = 0, key = "T", floatLocalSize = 0xFFFF).floatLocalSize)
+        assertEquals(0x1_0000, FuncMeta(index = 0, key = "T", floatLocalSize = 0x1_0000).floatLocalSize)
+        assertEquals(3_000_000, FuncMeta(index = 0, key = "T", floatLocalSize = 3_000_000).floatLocalSize)
     }
 }

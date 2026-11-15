@@ -350,7 +350,7 @@ fn 同一语料_两侧明细逐字节相同_报告同文_退出码都是0() {
         checks.iter().find(|c| c.name == n).unwrap().in_memory.clone()
     };
     assert_eq!(cell("runtime.private-vars"), "4", "小语料的 4 条私有 #DIM 都进了运行期");
-    assert_eq!(cell("runtime.system-vars"), "158", "系统变量表真的装起来了（不是空会话）");
+    assert_eq!(cell("runtime.system-vars"), "161", "系统变量表真的装起来了（不是空会话）");
     assert_eq!(cell("meta.private-dims"), "4 条", "侧车模型那条私有 #DIM 有 4 条");
     assert_eq!(cell("meta.program-sha256").len(), 64, "侧车头部摘要 = 容器 SHA-256（真装载链读到的）");
     assert!(cell("usages.names").starts_with("19 个名字 sha256="), "名字集合读数：{}", cell("usages.names"));

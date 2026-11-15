@@ -3,6 +3,7 @@ package com.eratw.port.core.data.save
 import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.fn.SaveFileKind
 import com.eratw.port.core.vars.GameBaseData
+import com.eratw.port.core.vars.VarDef
 import com.eratw.port.core.vars.VarType
 import com.eratw.port.core.vars.VariableStore
 
@@ -180,9 +181,92 @@ class SaveData(
     val compressed: Boolean = true,
     /** 读入时容器头的版本字段（只认 1808）；写侧恒按常量 1808 落盘，与本值无关（EraBinaryDataWriter.cs:45）。 */
     val version: Int = SaveFormat.VERSION,
+    /**
+     * 二进制读侧按 `keepKey` 丢弃的**顶层变量键**（M1-2）：值没留下、不建数组，
+     * 键名留在这里供 `applyTo` 的「未声明键」报告使用（域由 [fileType] 定）。
+     * 文本格式不筛键，恒为空（未知条目会作为普通条目进 [variables]）。
+     */
+    val droppedVariables: List<String> = emptyList(),
+    /** 同 [droppedVariables]，角色块内被丢弃的键。 */
+    val droppedCharacterVariables: List<String> = emptyList(),
     internal val sourceFile: ByteArray? = null,
     internal val sourcePayload: ByteArray? = null,
 ) {
+    /**
+     * 顶层**未认领**条目（`keepKey` 判 false）的原始编码切片，保持读入原序（L15 / ADR-005 例外）。
+     *
+     * - 读侧 [SaveFormat.read] 在丢弃未知键时截下「类型字节 + 键名 + 值」的原始字节，
+     *   不解析、不重编码（见 [UnclaimedSaveEntry]）；
+     * - 写侧 [SaveFormat.writePayload] 在已知变量之后、`EOF` 之前逐条原样回写；
+     * - 缺省空表 ⇒ 无未知键的档逐字节不变；**顶层之外**的域不进本字段：角色块走
+     *   [unclaimedCharacterVariables]（L17），EM 段仍按原版丢弃。
+     *
+     * 为什么不进构造参数：构造参数表已触发 `LongParameterList`（见 detekt baseline 的
+     * 既有登记），再添一参会让「加一个缺省空字段」去改写整条 baseline；这里用类体属性 +
+     * `internal set`，读侧装载后一次性赋值，对外仍是只读视图。
+     */
+    var unclaimedVariables: List<UnclaimedSaveEntry> = emptyList()
+        internal set
+
+    /**
+     * **角色块**内未认领条目的原始编码切片（L17 / L23，ADR-005 例外第二波），按该块内 `NO`
+     * 条目的数值分桶，桶内保持读入原序；每条切片自带块内相位 [UnclaimedCharaEntry.phase]。
+     *
+     * - 读侧 [SaveFormat.read] 在普通存档（`SaveFileKind.NORMAL`）的角色块里截取被 `keepKey`
+     *   拒绝的条目，相位以块内 `Separator` 为界（之前 = 系统项、之后 = 用户项）；`CHARVAR`
+     *   角色档与 EM 段不捕获（见 [SaveUnclaimedPassthrough] 类 KDoc）；
+     * - 写侧 [SaveFormat.writePayload] 在**同一 `NO` 的角色块**里按相位放回：SYSTEM 落
+     *   `Separator` 之前、USER 落 `Separator` 之后（块里没有 `Separator` 而存在 USER 切片时
+     *   补一个）；当前档里没有这个 `NO` 的块 ⇒ 该桶不写（不新建角色块、不改已知条目）；
+     * - 缺省空表 ⇒ 无角色块未知键的档逐字节不变。
+     *
+     * 为什么不按块位置（列表下标）绑定：角色顺序/数量在「读档 → 存档」之间可能变化
+     * （ADDCHARA / DELCHARA / 排序），位置绑定会把切片挂到**别人**身上 —— 比丢失更坏。
+     * `NO` 是原版角色登记号，是块内唯一稳定的身份项。
+     *
+     * 为什么还要相位：原版读侧 `CharacterData.LoadFromStreamBinary` 在 `case Separator:`
+     * 之后只认 `UserDefinedCharaVariableToken`（`CharacterData.cs:702-720`）；系统项切片
+     * 落到用户段（或反之）会在同名变量将来被重新声明时落到错误的查找分支而被丢 ——
+     * 文件里有键、运行期读不到。
+     */
+    var unclaimedCharacterVariables: Map<Long, List<UnclaimedCharaEntry>> = emptyMap()
+        internal set
+
+    /**
+     * 因**身份不可判定**而整块丢弃的角色块未认领键名（L17，只用于留痕）。
+     *
+     * 三种来源：块内 `NO` 缺失、块内 `NO` 重复、唯一 `NO` 不是整数标量；以及两个以上角色块
+     * 解出同一个 `NO`（桶键撞车）。**不进** [droppedCharacterVariables] 的报告
+     * —— 那一条仍只报「当前游戏没声明」的键名清单（L12 口径不变）。
+     */
+    var unclaimedCharacterDroppedKeys: List<String> = emptyList()
+        internal set
+
+    /**
+     * **EM 段**（Map / Xml / DataTable）里被接受集拒绝的条目的原始编码切片
+     * （L28 / ADR-005 例外第三波），保持读入原序。
+     *
+     * - 读侧 [SaveFormat.read] 在传入 EM 接受谓词（`emKeepKey`）时，对 `Map/Xml/DT`
+     *   三类标签按容器名判：不在接受集里的名字**只走标签、不建值对象**，把
+     *   「类型字节 + 容器名 + 值」的原始字节截进本字段（复用 [UnclaimedSaveEntry] 的形状：
+     *   `bytes` = 类型字节起到值末字节）。`emKeepKey` 为 null（旧签名）时本字段恒空，
+     *   与改动前逐字等价 —— 未知名仍被完整解析进 [emData] 后由池侧丢弃。
+     * - 写侧 [SaveFormat.writePayload] 在 [emData] 的已知条目之后、EM 段的 `EOF` **之前**
+     *   逐条原样回写；`SaveCapture.emitNormal` / `emitGlobal` 走同一个插入点。
+     * - 缺省空表 ⇒ 无未知 EM 条目的档逐字节不变。
+     *
+     * 为什么与 [unclaimedVariables] 分字段：EM 名是**容器名**（`SAVE_MAPS/SAVE_XMLS/SAVE_DTS`
+     * 声明的名字，`ConstantData.cs:1311-1316` 一族），不是变量名；写回位置也在另一个段
+     * （变量段 `EOF` 之后、EM 段 `EOF` 之前）。混进变量段会造出原版读不回来的档。
+     *
+     * 为什么不进 [RestoreReport]：EM 名不是变量，报告只收「变量」（原版对这些名字本就
+     * 读完即丢，`VariableData.cs:4095-4124` 的 `Contains` 守卫）；本例外只补文件层面的保留。
+     * 2026-11-15 起报告只作内部读数，不再有玩家面上屏通道（原版读档全程静默，
+     * `VariableData.cs:1418-1426`）。
+     */
+    var unclaimedEmData: List<UnclaimedSaveEntry> = emptyList()
+        internal set
+
     /** 便捷入口：把存档还原进变量池。返回实际写入/跳过的条目数。 */
     fun applyTo(
         store: VariableStore,
@@ -196,6 +280,25 @@ class SaveData(
     ): RestoreReport {
         var applied = 0
         var skipped = 0
+        // M1-2：三域「未声明键」清单（仅变量池查不到定义的键；类型/维度不符只进 skipped）。
+        // 顶层条目按 fileType 分域：global.sav / var_*.dat 的顶层是全局变量，普通档是 normal 域。
+        // 二进制读侧按 keepKey 丢弃的键值已不建数组，键名从 dropped* 直接并进来。
+        val unclaimedNormal = sortedSetOf<String>()
+        val unclaimedGlobal = sortedSetOf<String>()
+        val unclaimedChara = sortedSetOf<String>().apply { addAll(droppedCharacterVariables) }
+        val globalTop = fileType == SaveFileKind.GLOBAL || fileType == SaveFileKind.VAR
+        val topLevelUnclaimed = if (globalTop) unclaimedGlobal else unclaimedNormal
+        topLevelUnclaimed.addAll(droppedVariables)
+        fun account(e: SaveEntry, charPos: Long?, report: MutableSet<String>) {
+            when (applyEntry(store, e, charPos, floatSink)) {
+                EntryOutcome.APPLIED -> applied++
+                EntryOutcome.UNKNOWN -> {
+                    skipped++
+                    report += e.key
+                }
+                EntryOutcome.SKIPPED -> skipped++
+            }
+        }
 
         // 伪变量 LASTLOAD_VERSION / LASTLOAD_TEXT 的赋值点（VariableEvaluator.cs:2627-2629）。
         // LOADDATA 写它们；LOADCHARA 不写（LoadChara 全程不碰 LASTLOAD_*，:2285-2330），
@@ -226,7 +329,7 @@ class SaveData(
                 val pos = (charBase + ci).toLong()
                 for (e in block) {
                     if (e is SaveEntry.Separator) continue
-                    if (applyEntry(store, e, pos, floatSink)) applied++ else skipped++
+                    account(e, pos, unclaimedChara)
                 }
             }
         } else if (restoreCharacters) {
@@ -234,12 +337,26 @@ class SaveData(
         }
 
         for (e in variables) {
-            if (applyEntry(store, e, null, floatSink)) applied++ else skipped++
+            account(e, null, topLevelUnclaimed)
         }
-        // Map/Xml/DT 由各自的池消费（A2/A3），存档层只负责原样保留。
+        // Map/Xml/DT 由各自的池消费（A2/A3），存档层只负责原样保留（不属「未声明键」）。
         skipped += emData.size
 
-        return RestoreReport(applied, skipped, characters.size)
+        return RestoreReport(
+            applied = applied,
+            skipped = skipped,
+            characters = characters.size,
+            unclaimedNormal = unclaimedNormal.toList(),
+            unclaimedGlobal = unclaimedGlobal.toList(),
+            unclaimedChara = unclaimedChara.toList(),
+        )
+    }
+
+    /** 单条目写回结局（M1-2 区分「未声明」与「已声明但不符」）。 */
+    private enum class EntryOutcome {
+        APPLIED,
+        SKIPPED,
+        UNKNOWN,
     }
 
     /**
@@ -265,11 +382,30 @@ class SaveData(
      * 拷回 min 区域）。因此移植侧的清零必须以「各维 store ≥ 各维 file」为前提，
      * 否则会把原版会保留的旧值抹掉。
      */
-    private fun applyEntry(store: VariableStore, e: SaveEntry, charPos: Long?, floatSink: FloatSink?): Boolean {
-        if (e is SaveEntry.Separator) return false
-        if (e is SaveEntry.MapValue || e is SaveEntry.XmlValue || e is SaveEntry.DataTableValue) return false
-        // 只在系统注册表与静态用户变量里找（见 KDoc 的排除表口径）。
-        val def = store.registry.def(e.key) ?: store.userVar(e.key, null)?.def ?: return false
+    private fun applyEntry(store: VariableStore, e: SaveEntry, charPos: Long?, floatSink: FloatSink?): EntryOutcome =
+        when {
+            e is SaveEntry.Separator || e is SaveEntry.MapValue ||
+                e is SaveEntry.XmlValue || e is SaveEntry.DataTableValue -> EntryOutcome.SKIPPED
+            else -> {
+                // 只在系统注册表与静态用户变量里找（见 KDoc 的排除表口径）。
+                // 查不到 = 档里有、当前游戏没声明 ⇒ 三域未声明键（M1-2），进 RestoreReport 清单。
+                val def = store.registry.def(e.key) ?: store.userVar(e.key, null)?.def
+                when {
+                    def == null -> EntryOutcome.UNKNOWN
+                    applyDefined(store, e, charPos, floatSink, def) -> EntryOutcome.APPLIED
+                    else -> EntryOutcome.SKIPPED
+                }
+            }
+        }
+
+    /** 已解析到声明的写回半边；返回是否真正落进变量池（类型/维度不符 = false）。 */
+    private fun applyDefined(
+        store: VariableStore,
+        e: SaveEntry,
+        charPos: Long?,
+        floatSink: FloatSink?,
+        def: VarDef,
+    ): Boolean {
         if (def.isConst) return false
         if (charPos != null && !def.isCharacterData) return false
         if (charPos == null && def.isCharacterData) return false
@@ -509,5 +645,15 @@ class SaveData(
  * @property applied  成功写进变量池的条目数
  * @property skipped  当前游戏不认识 / 类型不符 / 由其它池消费的条目数
  * @property characters 存档中的角色数
+ * @property unclaimedNormal 顶层档内**变量池查不到定义**的键（normal 域；排序去重）
+ * @property unclaimedGlobal 同上（global 域；来自 global.sav 的顶层条目）
+ * @property unclaimedChara 同上（角色块内的未声明键；排序去重）
  */
-data class RestoreReport(val applied: Int, val skipped: Int, val characters: Int)
+data class RestoreReport(
+    val applied: Int,
+    val skipped: Int,
+    val characters: Int,
+    val unclaimedNormal: List<String> = emptyList(),
+    val unclaimedGlobal: List<String> = emptyList(),
+    val unclaimedChara: List<String> = emptyList(),
+)

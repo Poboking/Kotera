@@ -468,7 +468,9 @@ class FloatVarRuntimeTest {
         store.enterFunction("T")
         try {
             assertEquals(16, store.getLength("LOCALF"), "#LOCALFSIZE 16 必须覆盖出厂 10")
-            assertEquals(16, store.getLength("ARGF"), "ARGF 与 LOCALF 同受 #LOCALFSIZE")
+            // ARGF 与 #LOCALFSIZE 不互相抬界（严格照抄裁决，CONTRACT-RT2-M32A 判据 2 口径差 1；
+            // fork VariableLocal.cs:48-49 的 ARGF 支只读 ArgFloatLength）⇒ ARGF 仍出厂 10。
+            assertEquals(10, store.getLength("ARGF"), "ARGF 不吃 #LOCALFSIZE（只读 ArgFloatLength）")
         } finally {
             store.leaveFunction()
         }

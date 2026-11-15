@@ -126,9 +126,9 @@ class OpcodeTableTest {
         assertEquals(169, ops.size, "语句操作码数量与 isa 的 169 个语句槽不符")
         assertEquals((Opcode.INTERNAL_COUNT..Opcode.MAX_STATEMENT_OPCODE).toList(), ops)
         assertEquals(
-            247,
+            249,
             Opcode.NAMES.size,
-            "内部指令 29 + 语句 169 + 编译器扩展 4（198..201）+ 栈码 42（202..243）+ 浮点返回追加段 1（244）+ 运行期字符串调用追加段 1（245）+ 条件位融合追加段 1（246）",
+            "内部指令 29 + 语句 169 + 编译器扩展 4（198..201）+ 栈码 42（202..243）+ 浮点返回追加段 1（244）+ 运行期字符串调用追加段 1（245）+ 条件位融合追加段 1（246）+ 循环条件融合追加段 2（247..248）",
         )
         assertEquals(Opcode.MAX_OPCODE, Opcode.NAMES.size - 1, "MAX_OPCODE 必须等于 NAMES 末位")
     }
@@ -197,10 +197,18 @@ class OpcodeTableTest {
         assertTrue(!Opcode.isInternal(Opcode._CALL_STR), "_CALL_STR 不是 VM 内部指令")
         assertEquals(null, Opcode.statementOf("_CALL_STR"), "扩展指令不是 ERB 语句")
         assertEquals(null, Opcode.kindOf(Opcode._CALL_STR), "扩展指令不属于任何语句 kind 段")
-        // MODERN-T1：条件位融合超指令 `_EVAL_INT_JZ`（246）同样是末尾追加段末条，
+        // MODERN-T1：条件位融合超指令 `_EVAL_INT_JZ`（246）同样是末尾追加段，
         // 紧跟 `_CALL_STR`（245）、不挤动任何既有码。
         assertEquals(246, Opcode._EVAL_INT_JZ, "_EVAL_INT_JZ 必须末尾追加在 _CALL_STR（245）之后")
-        assertEquals(246, Opcode.MAX_OPCODE, "MAX_OPCODE 应跟进到融合追加段末条")
+        // PERF-LOOP：循环条件融合 `_LT_JZ`/`_GT_JZ`（247/248）是本仓表尾；判死路线
+        // （PERF-ASSIGN `_SET_VAR_*`/`_EVAL_SET_*`）已删除，编号不占位、不重排。
+        assertEquals(247, Opcode._LT_JZ)
+        assertEquals(248, Opcode._GT_JZ)
+        assertEquals("_LT_JZ", Opcode.NAMES[247])
+        assertEquals("_GT_JZ", Opcode.NAMES[248])
+        assertEquals(248, Opcode.BY_NAME["_GT_JZ"], "汇编写回需要名字反查")
+        assertTrue(Opcode.isExtension(Opcode._LT_JZ) && Opcode.isExtension(Opcode._GT_JZ))
+        assertEquals(248, Opcode.MAX_OPCODE, "MAX_OPCODE 应跟进到循环条件融合末条")
         assertEquals("_EVAL_INT_JZ", Opcode.NAMES[246])
         assertEquals(246, Opcode.BY_NAME["_EVAL_INT_JZ"], "汇编写回需要名字反查")
         assertEquals("_EVAL_INT_JZ", Opcode.nameOf(246), "反汇编不得打印 <op:246>")
@@ -228,7 +236,7 @@ class OpcodeTableTest {
         // 改造前这里是 `MAX_OPCODE == STACK_OPS.last`（栈码组就是表尾）。4.981 追加 [_RETF]
         // 后表尾让给追加段，栈码组区间本身一位未动 —— 改钉成「表尾 = 扩展区末位」。
         assertEquals(Opcode.MAX_OPCODE, Opcode.EXTENSION_OPS.last, "MAX_OPCODE 必须等于扩展区末位")
-        assertEquals(198..246, Opcode.EXTENSION_OPS, "扩展区 = 编译器扩展 + 栈码组 + 末尾追加段（_RETF + _CALL_STR + _EVAL_INT_JZ）")
+        assertEquals(198..248, Opcode.EXTENSION_OPS, "扩展区 = 编译器扩展 + 栈码组 + 末尾追加段（_RETF + _CALL_STR + _EVAL_INT_JZ + _LT_JZ/_GT_JZ）")
 
         val expectedHead = listOf(
             "_STK_PUSH_IMM", "_STK_PUSH_STR", "_STK_DUP_I", "_STK_DROP", "_STK_DROP_S",

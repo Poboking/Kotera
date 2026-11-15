@@ -1,15 +1,28 @@
 package com.eratw.port.core.patch
 
+import com.eratw.port.core.entity.ComponentFieldSpec
+import com.eratw.port.core.entity.ComponentFieldType
 import com.eratw.port.core.entity.ComponentSchema
 import com.eratw.port.core.entity.EntityArchetype
+import com.eratw.port.core.entity.NativeCharaField
 import com.eratw.port.core.entity.RelationshipSchema
 import com.eratw.port.core.vars.DimSpec
+import com.eratw.port.core.vars.SystemLayout
+import com.eratw.port.core.vars.VariableCode
+import com.eratw.port.core.vars.VariableSizes
 import java.util.Locale
 
 /**
- * 声明事务的五域（era-arch-v61u.md §5，ABI-5；v6.4-c 收口为「一张 Registry 管所有声明」）。
+ * 声明事务的域（era-arch-v61u.md §5，ABI-5；v6.4-c 收口为「一张 Registry 管所有声明」；
+ * v6.6-c §20.4 扩 hook / interaction-hooks / phase-jobs 三域）。
  *
- * 五域之外的东西不进本事务：函数覆盖归 LSC（§3），事件归事件视图（§6），
+ * 原五域：global-dims / csv-patches / component-schemas / entity-archetypes /
+ * relationship-schemas。v6.6-c 新增：hooks（函数钩子槽）、interaction-hooks（交互阶段钩子）、
+ * phase-jobs（自定义相位 + 定时任务），**同进本事务**，不另设注册路径。
+ * M5-4 刀 1 新增：chara-field-routes（角色变量路由，wire 载体在 component-schemas 段内
+ * 判别 tag 子类型 B1），同进本事务。
+ *
+ * 域外的东西不进本事务：函数覆盖归 LSC（§3），事件归事件视图（§6），
  * 持久化域由声明种类推导（§8），不另造自由枚举。
  */
 enum class DeclarationDomain(val label: String) {
@@ -18,6 +31,10 @@ enum class DeclarationDomain(val label: String) {
     COMPONENT_SCHEMA("component-schemas"),
     ENTITY_ARCHETYPE("entity-archetypes"),
     RELATIONSHIP_SCHEMA("relationship-schemas"),
+    HOOK("hooks"),
+    INTERACTION("interaction-hooks"),
+    PHASE_JOB("phase-jobs"),
+    CHARA_ROUTE("chara-field-routes"),
 }
 
 /**
@@ -129,6 +146,56 @@ data class DeclaredArchetype(val packageId: String, val archetype: EntityArchety
 /** 冻结快照里的关系类型。 */
 data class DeclaredRelationship(val packageId: String, val schema: RelationshipSchema)
 
+/** 冻结快照里的 hook 槽（§20.1，ABI-9）。 */
+data class DeclaredHook(val packageId: String, val declaration: HookDeclaration)
+
+/**
+ * 冻结快照里的角色变量路由（M5-4 刀 1）：声明包 + freeze 派生的**逐格**域行。
+ *
+ * [field] 是 `NativeCharaField`（variable / indices / field / isStr，形状不变）：
+ * `variable` 为大写归一后的变量族名、`indices` 是角色位之外的单元素下标（v1 只派生
+ * 1 维族）、`field` 为 freeze 合成的镜像字段名 `族名:格号`（Mod 不写）。派生是 freeze
+ * 的纯函数：输出按（族名，格号）字典序定序，与声明序无关（确定性判据的强形态）。
+ */
+data class DeclaredCharaFieldRoute(val packageId: String, val field: NativeCharaField)
+
+/**
+ * 快照路由域（M5-4 刀 1，RECON-RT2-M54 §2 Q1 方案 B 的派生产物）：
+ * [mirrorSchema] = freeze 合成的 `__native_chara__` 镜像组件 schema（逐格字段），
+ * [routes] = 逐格路由清单。无路由声明时两成员皆空（镜像不派生、fields 仍空表）。
+ *
+ * [mirrorSchema] 同时注册进 [DeclarationSnapshot.componentSchemas] —— EntityKernel 的
+ * 字段注册面只认那张表（capture 的 fail-closed 判据，RECON §1.2），路由域成员只是
+ * 同一不可变对象的派生视图，供声明面取证与测试直查，不构成第二注册面。
+ */
+data class CharaFieldRouteDomain(
+    val mirrorSchema: DeclaredComponentSchema?,
+    val routes: List<DeclaredCharaFieldRoute>,
+) {
+    init {
+        require(routes.isEmpty() || mirrorSchema != null) {
+            "路由域不变量破坏：有逐格路由必有派生镜像 schema（mirrorSchema 为 null）"
+        }
+    }
+
+    /** 无路由 = 空域（镜像不派生）。 */
+    fun isEmpty(): Boolean = mirrorSchema == null && routes.isEmpty()
+
+    companion object {
+        /** 无路由时的唯一空域实例（判据 5：零变化口径的快照形态）。 */
+        val EMPTY: CharaFieldRouteDomain = CharaFieldRouteDomain(null, emptyList())
+    }
+}
+
+/** 冻结快照里的交互阶段钩子（§20.3，ABI-11）。 */
+data class DeclaredInteractionHook(val packageId: String, val declaration: InteractionHookDeclaration)
+
+/** 冻结快照里的自定义相位（§20.2，ABI-10）。 */
+data class DeclaredPhase(val packageId: String, val declaration: PhaseDeclaration)
+
+/** 冻结快照里的定时任务槽（§20.2，ABI-10）。 */
+data class DeclaredJob(val packageId: String, val declaration: JobDeclaration)
+
 /**
  * 一条已裁决的 CSV 关键字绑定（两阶段分配之后的结果）。
  *
@@ -175,6 +242,12 @@ class DeclarationSnapshot internal constructor(
     componentSchemas: Map<String, DeclaredComponentSchema>,
     entityArchetypes: Map<String, DeclaredArchetype>,
     relationshipSchemas: Map<String, DeclaredRelationship>,
+    hookDeclarations: List<DeclaredHook>,
+    interactionHookDeclarations: List<DeclaredInteractionHook>,
+    phaseDeclarations: List<DeclaredPhase>,
+    jobDeclarations: List<DeclaredJob>,
+    jobTemplateDeclarations: List<DeclaredJobTemplate>,
+    charaFieldRoutes: CharaFieldRouteDomain = CharaFieldRouteDomain.EMPTY,
 ) {
     /** 归一全局变量名 → 声明。 */
     val globalDims: Map<String, DeclaredGlobalDim> = globalDims.toMap()
@@ -208,6 +281,34 @@ class DeclarationSnapshot internal constructor(
     val relationshipSchemas: Map<String, DeclaredRelationship> =
         relationshipSchemas.toMap()
 
+    /** hook 槽声明（链接序 = 包序 + 包内声明序；priority 排序由 HookPipeline 做）。 */
+    val hookDeclarations: List<DeclaredHook> = hookDeclarations.toList()
+
+    /** 交互阶段钩子声明（链接序）。 */
+    val interactionHookDeclarations: List<DeclaredInteractionHook> = interactionHookDeclarations.toList()
+
+    /** 自定义相位声明（链接序）。 */
+    val phaseDeclarations: List<DeclaredPhase> = phaseDeclarations.toList()
+
+    /** 定时任务槽声明（链接序）。 */
+    val jobDeclarations: List<DeclaredJob> = jobDeclarations.toList()
+
+    /**
+     * 动态任务模板声明（链接序）。
+     *
+     * 形状复用 F2 的 DeclaredJobTemplate（同包 ExtensionDeclarations.kt 定义；调度器输入
+     * 形态与声明事务形态保持同一类型，不复制第二套）。freeze 在此前完成包内 templateKey
+     * 唯一、相位可解析、与 jobId 命名空间分离三项校验。
+     */
+    val jobTemplateDeclarations: List<DeclaredJobTemplate> = jobTemplateDeclarations.toList()
+
+    /**
+     * 角色变量路由域（M5-4 刀 1）：freeze 派生的逐格路由 + 合成镜像 schema（镜像同时
+     * 注册在 [componentSchemas]）。无路由声明 = [CharaFieldRouteDomain.EMPTY]（判据 5：
+     * 快照路由域空、镜像不派生、投射器 fields 仍空表）。
+     */
+    val charaFieldRoutes: CharaFieldRouteDomain = charaFieldRoutes
+
     fun globalDim(name: String): DimSpec? = globalDims[NamePolicy.canonical(name)]?.spec
 
     /** 某包某函数的私有声明；函数键按 [NamePolicy] 归一后查（Manifest 侧本就大写归一）。 */
@@ -233,6 +334,30 @@ class DeclarationSnapshot internal constructor(
 
     fun csvCellPlan(table: String, row: String, column: String): CsvCellPlan? =
         csvValueCells[CsvCellKey(NamePolicy.canonical(table), row, column)]
+
+    /** 某目标函数键的 hook 声明（声明序；priority 排序由 `HookPipeline` 做）。 */
+    fun hooksFor(targetKey: String): List<DeclaredHook> {
+        val key = NamePolicy.canonical(targetKey)
+        return hookDeclarations.filter { it.declaration.normalizedTargetKey() == key }
+    }
+
+    /** 某交互阶段的钩子声明（声明序；priority 排序由 `InteractionPipeline` 做）。 */
+    fun interactionHooksFor(phase: InteractionPhase): List<DeclaredInteractionHook> =
+        interactionHookDeclarations.filter { it.declaration.phase == phase }
+
+    /** 是否声明了某相位（含引擎固定相位）。 */
+    fun hasPhase(name: String): Boolean {
+        val key = NamePolicy.canonical(name)
+        return key in BuiltinPhases.ALL || phaseDeclarations.any { it.declaration.normalizedName() == key }
+    }
+
+    /** 某包的任务槽声明（包内声明序）。 */
+    fun jobsOf(packageId: String): List<DeclaredJob> =
+        jobDeclarations.filter { it.packageId == packageId }
+
+    /** 某包的任务模板声明（包内声明序）。 */
+    fun jobTemplatesFor(packageId: String): List<DeclaredJobTemplate> =
+        jobTemplateDeclarations.filter { it.packageId == packageId }
 }
 
 /**
@@ -281,6 +406,17 @@ class DeclarationSnapshot internal constructor(
  * 与符号层不同，**数据层可叠加**：同 (表, 行, 列) 的全部值补丁按链接序求值，末位生效，
  * 快照里的 [CsvCellPlan.writers] 保留全部写者供诊断。这里不做冲突拒绝（RimWorld patch
  * 语义）；无法在本层校验的只剩「行列是否存在」——那要等 M1-4 的稳定身份键与数据装载面。
+ *
+ * ## 角色变量路由（chara-field-routes 域，M5-4 刀 1）
+ *
+ * 路由声明（[CharaRouteDeclaration]，wire 载体在 component-schemas 段内判别 tag B1）进本
+ * 事务做三道闸：拒载名单（RELATION / NO / CDFLAG / 0 维族，[rejectedCharaRouteReason]）、
+ * 同变量族重名（大写归一，跨包与包内一律）、显式格越出厂尺寸（全跨度不查 —— 以
+ * [VariableSizes] 出厂值展开）。闸净后 freeze **派生**：合成 `__native_chara__` 镜像
+ * schema（逐格字段，注册进 componentSchemas）+ 逐格 [NativeCharaField] 行进快照路由域
+ * （输出按族名与格号定序，与声明序无关）。用户角色变量（非 SystemLayout 注册名）：显式
+ * 格放行（isStr/镜像类型占位 INT，attach 期以 def 类型终审）、全跨度拒（尺寸只在运行期
+ * 存在，不猜）。变量存在性本身也是 attach 期终审（freeze 只见声明事务），RECON §2 Q3 两段式。
  *
  * @param builtinVariableNames 引擎内置变量名（原文；内部归一大写）。撞名 = 拒绝。
  * @param csvTableCapacities 可打补丁的表 → 声明长度（下标上界）。**未列出的表拒绝
@@ -739,6 +875,290 @@ class DeclarationRegistry(
             csvValueCells[cell] = CsvCellPlan(cell, last.op, last.value, writers.toList())
         }
 
+        // ---- 域 6：phase-jobs 的相位形（全局命名空间；不得占用固定相位名） ----
+        val phases = LinkedHashMap<String, DeclaredPhase>()
+        val phaseSite = HashMap<String, DeclarationSite>()
+        for (st in staged) {
+            val pkg = st.descriptor.packageId
+            for (p in st.descriptor.phaseDeclarations) {
+                val key = p.normalizedName()
+                val here = site(pkg, "phase ${p.name}")
+                if (key.isEmpty()) {
+                    conflict(DeclarationDomain.PHASE_JOB, key, here, here, "相位名为空")
+                    continue
+                }
+                if (key in BuiltinPhases.ALL) {
+                    conflict(
+                        DeclarationDomain.PHASE_JOB,
+                        key,
+                        here,
+                        here,
+                        "相位名与引擎固定相位冲突（Mod 不得占用固定相位名）",
+                    )
+                    continue
+                }
+                val prev = phases[key]
+                if (prev != null) {
+                    conflict(
+                        DeclarationDomain.PHASE_JOB,
+                        key,
+                        phaseSite.getValue(key),
+                        here,
+                        "同名相位已声明（相位名是全局命名空间）",
+                    )
+                    continue
+                }
+                phases[key] = DeclaredPhase(pkg, p)
+                phaseSite[key] = here
+            }
+        }
+
+        // ---- 域 7：phase-jobs 的任务形（jobId 包内唯一；相位引用须可解析） ----
+        val jobs = ArrayList<DeclaredJob>()
+        val jobSeen = HashSet<String>()
+        for (st in staged) {
+            val pkg = st.descriptor.packageId
+            for (j in st.descriptor.jobDeclarations) {
+                val jobKey = "$pkg|${j.jobId}"
+                val here = site(pkg, "job ${j.jobId}")
+                if (!jobSeen.add(jobKey)) {
+                    conflict(DeclarationDomain.PHASE_JOB, jobKey, here, here, "同包 jobId 重复声明")
+                    continue
+                }
+                val phaseKey = j.normalizedPhase()
+                if (phaseKey !in BuiltinPhases.ALL && phaseKey !in phases) {
+                    conflict(
+                        DeclarationDomain.PHASE_JOB,
+                        jobKey,
+                        here,
+                        here,
+                        "任务引用了未声明的相位：${j.phase}（须为固定相位或本事务声明的相位）",
+                    )
+                    continue
+                }
+                jobs += DeclaredJob(pkg, j)
+            }
+        }
+
+        // ---- 域 7b：phase-jobs 的模板形 ----
+        // templateKey 包内唯一；相位引用口径同静态任务（固定相位 ∪ 本事务已声明相位）；
+        // templateKey 与 jobId 不共享命名空间：两者同名不冲突，也不得互相遮蔽。
+        val jobTemplates = ArrayList<DeclaredJobTemplate>()
+        val templateSeen = HashSet<String>()
+        for (st in staged) {
+            val pkg = st.descriptor.packageId
+            for (t in st.descriptor.jobTemplateDeclarations) {
+                val templateKey = "$pkg|${t.templateKey}"
+                val here = site(pkg, "job-template ${t.templateKey}")
+                if (!templateSeen.add(templateKey)) {
+                    conflict(
+                        DeclarationDomain.PHASE_JOB,
+                        templateKey,
+                        here,
+                        here,
+                        "同包 templateKey 重复声明",
+                    )
+                    continue
+                }
+                val phaseKey = t.normalizedPhase()
+                if (phaseKey !in BuiltinPhases.ALL && phaseKey !in phases) {
+                    conflict(
+                        DeclarationDomain.PHASE_JOB,
+                        templateKey,
+                        here,
+                        here,
+                        "任务模板引用了未声明的相位：${t.phase}（须为固定相位或本事务声明的相位）",
+                    )
+                    continue
+                }
+                jobTemplates += DeclaredJobTemplate(pkg, t)
+            }
+        }
+
+        // ---- 域 8：hooks（同包同目标同相位重复 = 冲突；跨包同目标合法） ----
+        val hooks = ArrayList<DeclaredHook>()
+        val hookSeen = HashSet<String>()
+        for (st in staged) {
+            val pkg = st.descriptor.packageId
+            for (h in st.descriptor.hookDeclarations) {
+                val target = h.normalizedTargetKey()
+                val key = "$pkg|$target|${h.phase}"
+                val here = site(pkg, "hook ${h.targetKey}/${h.phase}")
+                if (target.isEmpty()) {
+                    conflict(DeclarationDomain.HOOK, key, here, here, "hook 目标函数键为空")
+                    continue
+                }
+                if (!hookSeen.add(key)) {
+                    conflict(
+                        DeclarationDomain.HOOK,
+                        key,
+                        here,
+                        here,
+                        "同一包对同一函数同一相位重复声明 hook",
+                    )
+                    continue
+                }
+                hooks += DeclaredHook(pkg, h)
+            }
+        }
+
+        // ---- 域 9：interaction-hooks（同包同阶段重复 = 冲突；跨包合法） ----
+        val interactionHooks = ArrayList<DeclaredInteractionHook>()
+        val interactionSeen = HashSet<String>()
+        for (st in staged) {
+            val pkg = st.descriptor.packageId
+            for (ih in st.descriptor.interactionHookDeclarations) {
+                val key = "$pkg|${ih.phase}"
+                val here = site(pkg, "interaction-hook ${ih.phase}")
+                if (!interactionSeen.add(key)) {
+                    conflict(
+                        DeclarationDomain.INTERACTION,
+                        key,
+                        here,
+                        here,
+                        "同一包对同一交互阶段重复声明钩子",
+                    )
+                    continue
+                }
+                interactionHooks += DeclaredInteractionHook(pkg, ih)
+            }
+        }
+
+        // ---- 域 10：chara-field-routes（角色变量路由；拒载名单 + 同族重名 + freeze 派生） ----
+        // RECON-RT2-M54 §2 Q1 方案 B / §2 Q2/Q3：路由行进本事务做闸，冻结期派生合成
+        // __native_chara__ 镜像 schema（同时注册进 componentSchemas —— EntityKernel 的字段
+        // 注册面唯一真源）与逐格 NativeCharaField。派生是 freeze 的纯函数：输出按
+        // （族名字典序，族内格号升序）定序，与声明序无关（派生确定性判据的强形态）。
+        val routeRows = ArrayList<DeclaredCharaFieldRoute>()
+        var routeMirror: DeclaredComponentSchema? = null
+        var routeDomainClean = true
+        fun routeConflict(key: String, first: DeclarationSite, second: DeclarationSite, reason: String) {
+            routeDomainClean = false
+            conflict(DeclarationDomain.CHARA_ROUTE, key, first, second, reason)
+        }
+
+        val routeSite = HashMap<String, DeclarationSite>()
+        class RouteRequest(
+            val pkg: String,
+            val route: CharaRouteDeclaration,
+            val canonical: String,
+            val site: DeclarationSite,
+        )
+        val acceptedRoutes = ArrayList<RouteRequest>()
+        for (st in staged) {
+            val pkg = st.descriptor.packageId
+            for (r in st.descriptor.charaRoutes) {
+                val key = NamePolicy.canonical(r.variable)
+                val here = site(pkg, "chara-route ${r.variable}（格 ${if (r.cells.isEmpty()) "全跨度" else r.cells}）")
+                val rejectedReason = rejectedCharaRouteReason(key)
+                if (rejectedReason != null) {
+                    routeConflict(key, here, here, rejectedReason)
+                    continue
+                }
+                val prev = routeSite[key]
+                if (prev != null) {
+                    routeConflict(
+                        key,
+                        prev,
+                        here,
+                        "同变量族已路由（逐格行与镜像字段会双写；大写归一后同族跨包与包内都只允许一次）",
+                    )
+                    continue
+                }
+                routeSite[key] = here
+                acceptedRoutes += RouteRequest(pkg, r, key, here)
+            }
+        }
+
+        // 派生（只在路由域干净时进行 —— 否则镜像建立在已判冲突的声明上，报告互相污染）。
+        if (routeDomainClean && acceptedRoutes.isNotEmpty()) {
+            // 出厂尺寸权威 = VariableSizes 出厂值（本地实例，无静态可变全局）；装载期
+            // VARIABLESIZE.CSV 改写不进 freeze —— 派生只做声明侧展开，attach 期以 def.dims
+            // 终审兜底（RECON §2 Q3 两段式）。
+            val sizes = VariableSizes()
+            val mirrorFields = ArrayList<ComponentFieldSpec>()
+            val mirrorFieldSeen = HashSet<String>()
+            for (request in acceptedRoutes.sortedBy { it.canonical }) {
+                val family = systemCharaFamily(request.canonical, sizes)
+                if (family == null && request.route.cells.isEmpty()) {
+                    routeConflict(
+                        request.canonical,
+                        request.site,
+                        request.site,
+                        "全跨度路由需要出厂尺寸；「${request.canonical}」不是 SystemLayout 注册的系统角色族" +
+                            "（用户角色变量的尺寸只在运行期存在，freeze 不猜 —— 显式格可放行，attach 期终审）",
+                    )
+                    continue
+                }
+                val isStr = family?.first ?: false
+                val cells: List<Int> = if (request.route.cells.isEmpty()) {
+                    IntRange(0, family!!.second - 1).toList()
+                } else {
+                    val upper = family?.second
+                    if (upper != null) {
+                        val over = request.route.cells.filter { it >= upper }
+                        if (over.isNotEmpty()) {
+                            routeConflict(
+                                request.canonical,
+                                request.site,
+                                request.site,
+                                "显式格下标越出出厂尺寸 $upper：$over（族 ${request.canonical}）",
+                            )
+                            continue
+                        }
+                    }
+                    request.route.cells.sorted()
+                }
+                for (cell in cells) {
+                    val fieldName = "${request.canonical}:$cell"
+                    if (!mirrorFieldSeen.add(fieldName)) {
+                        routeConflict(fieldName, request.site, request.site, "镜像字段名重复：$fieldName")
+                        continue
+                    }
+                    val owner = fieldOwner[fieldName]
+                    if (owner != null) {
+                        routeConflict(
+                            fieldName,
+                            owner,
+                            request.site,
+                            "镜像字段名与已声明组件字段撞名（引擎按字段名寻址，跨 schema 必须唯一）",
+                        )
+                        continue
+                    }
+                    mirrorFields += ComponentFieldSpec(
+                        fieldName,
+                        if (isStr) ComponentFieldType.STR else ComponentFieldType.INT,
+                        isEntityRef = false,
+                    )
+                    routeRows += DeclaredCharaFieldRoute(
+                        request.pkg,
+                        NativeCharaField(request.canonical, longArrayOf(cell.toLong()), fieldName, isStr),
+                    )
+                }
+            }
+            if (routeRows.isNotEmpty()) {
+                val mirrorKey = NamePolicy.canonical(MIRROR_SCHEMA_NAME)
+                val userMirror = schemas[mirrorKey]
+                if (userMirror != null) {
+                    routeConflict(
+                        mirrorKey,
+                        schemaSite.getValue(mirrorKey),
+                        DeclarationSite(
+                            userMirror.packageId,
+                            sources.getValue(userMirror.packageId),
+                            "component-schema ${userMirror.schema.name}",
+                        ),
+                        "保留名 $MIRROR_SCHEMA_NAME 与派生镜像 schema 撞名（v1 口径 = 拒载 fail-closed）",
+                    )
+                } else {
+                    val mirrorSchema = ComponentSchema(MIRROR_SCHEMA_NAME, MIRROR_SCHEMA_NAME, mirrorFields)
+                    val declaredMirror = DeclaredComponentSchema(MIRROR_SCHEMA_NAME, mirrorSchema)
+                    schemas[mirrorKey] = declaredMirror
+                    routeMirror = declaredMirror
+                }
+            }
+        }
+
         if (conflicts.isNotEmpty()) throw DeclarationConflictException(conflicts)
 
         val snapshot = DeclarationSnapshot(
@@ -751,9 +1171,66 @@ class DeclarationRegistry(
             componentSchemas = schemas,
             entityArchetypes = archetypes,
             relationshipSchemas = relationships,
+            hookDeclarations = hooks,
+            interactionHookDeclarations = interactionHooks,
+            phaseDeclarations = phases.values.toList(),
+            jobDeclarations = jobs,
+            jobTemplateDeclarations = jobTemplates,
+            charaFieldRoutes = if (routeRows.isEmpty()) {
+                CharaFieldRouteDomain.EMPTY
+            } else {
+                CharaFieldRouteDomain(routeMirror, routeRows.toList())
+            },
         )
         frozen = snapshot
         onCommit(snapshot)
         return snapshot
+    }
+}
+
+/**
+ * freeze 派生镜像组件 schema 的保留名（M5-4 刀 1）：名字与包身份标记同名（镜像不是
+ * 任何真实 mod 包的声明，是路由声明的派生视图）。Mod 声明同名组件 = freeze 期拒载
+ * （v1 口径 fail-closed；「用户版优先」语义未裁定，RECON 需组长接线 3）。
+ */
+internal const val MIRROR_SCHEMA_NAME: String = "__native_chara__"
+
+/**
+ * 0 维角色变量族（M5-4 刀 1 路由不开放，RECON TODO-2 在案）：NAME / CALLNAME /
+ * NICKNAME / MASTERNAME（charaStr0D）与 ISASSI（charaInt0D）。`NO` 也在 0 维族内，
+ * 但它的拒载理由另有身份列口径（[rejectedCharaRouteReason] 的字面分支优先命中）。
+ */
+private val ZERO_DIM_CHARA_FAMILIES: Set<String> =
+    (SystemLayout.charaInt0D + SystemLayout.charaStr0D).mapTo(HashSet()) { NamePolicy.canonical(it.first) }
+
+/**
+ * M5-4 刀 1 路由 freeze 期拒载名单（fail-closed，逐类点名，RECON §2 Q2）。
+ * 返回 null = 不在名单（放行进派生）；返回串 = 拒载理由（进冲突报告）。
+ */
+private fun rejectedCharaRouteReason(canonical: String): String? = when {
+    canonical == "RELATION" ->
+        "关系格读写由关系投影桥独占（M5-3）；路由 RELATION 会与关系桥双写冲突"
+    canonical == "NO" ->
+        "NO 是身份列（虚拟 NO 由 VirtualCharaNoRegistry 独占写）；路由 NO 破坏身份面"
+    canonical == "CDFLAG" ->
+        "C_INT2 扁平格的「关键字与扁平格」映射语义未定义（M1-4B 整表排除沿用），不猜"
+    canonical in ZERO_DIM_CHARA_FAMILIES ->
+        "0 维角色变量在投射行上的语义未取证（RECON TODO-2 在案），v1 不开放"
+    else -> null
+}
+
+/**
+ * 系统角色变量族的派生参数（M5-4 刀 1）：canonical 族名 → (isStr, 出厂尺寸)。
+ * 尺寸 = [VariableSizes] 出厂值（装载期 VARIABLESIZE.CSV 改写不进 freeze —— 派生只做
+ * 声明侧展开，attach 期以 def.dims 终审兜底，RECON §2 Q3 两段式）。
+ * 返回 null = 非 SystemLayout 注册名（用户角色变量；显式格放行，全跨度 freeze 拒）。
+ */
+private fun systemCharaFamily(canonical: String, sizes: VariableSizes): Pair<Boolean, Int>? {
+    val intMatch = SystemLayout.charaInt1D.firstOrNull { NamePolicy.canonical(it.first) == canonical }
+    val strMatch = SystemLayout.charaStr1D.firstOrNull { NamePolicy.canonical(it.first) == canonical }
+    return when {
+        intMatch != null -> Pair(false, sizes.charaInt1D[VariableCode.lowIndex(intMatch.second)])
+        strMatch != null -> Pair(true, sizes.charaStr1D[VariableCode.lowIndex(strMatch.second)])
+        else -> null
     }
 }

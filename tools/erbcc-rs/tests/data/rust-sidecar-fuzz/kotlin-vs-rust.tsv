@@ -16,6 +16,24 @@
 #   tests/data/rust-meta-parity/cost-readings.txt，档族自证见 tests/meta_deep_parity.rs。
 # 仍在册的 2 条文案薄档（sc-meta-bad-utf8 / sc-cut-midrecord）判的是头部三行本身：那一层由 Rust 自算，
 #   Kotlin 的 BootMetaFormatException 里带了 JDK 异常细节 ⇒ 同 kind、文案薄一档（不是分歧）。
+# 【meta 读侧对齐 v3 + 夹具保鲜重出，2026-11-10】MODERN-R12-RUST2 波：
+#   ① 读侧 META_FORMAT_VERSION 1→3（Kotlin BootMetadata.FORMAT_VERSION=3 @ BootMetadata.kt:422；
+#      判据照抄不发明宽容：拒 >3 与 <1、1..=3 全收；v2/v3 的版本门控可选原子全在头三层之后，
+#      由委托腿的 Kotlin 权威判，Rust 头层只消费版本号本身）；
+#   ② 种子 manifest 保鲜：compiler-digest 3d1bcef5…/303源 → aa780d2b…/306源（RT2-E 三文件
+#      RuntimeDiagnostics/QueryPlan/DecisionPipeline 进 core-vm 源树 ⇒ 双根 digest 闸设计内行为；
+#      重编 program.erbc/meta/stmt.idx 与入库夹具逐字节同，manifest 只差 digest/sources/corpus-root 三行）；
+#   ③ 变异档订正：sc-fmtver-2 → sc-fmtver-4（种子已是 v3，3→2 是降级、两侧按兼容语义都收，
+#      改 3→4 保住「高于支持版本两侧都拒」的绊线）；sc-fmtver-0 的 desc「1→0」→「3→0」（载荷不变）。
+#   本版读数：110 档 = 90 BOTH_REJECT_VERBATIM + 16 BOTH_PASS + 2 BOTH_REJECT_SAME_KIND +
+#   2 BOTH_REJECT_DIFFERENT_KIND；KOTLIN_REJECT_RUST_PASS 与 RUST_REJECT_KOTLIN_PASS **均 0 档**。
+# 【种子 manifest 保鲜重出，2026-11-11】MODERN-R13-FRESH 波：
+#   种子 manifest.txt 保鲜：compiler-digest aa780d2b…/306源 → 7ddbe30b…/325源（RUST2 收口后
+#   core-vm + tools/erbcc 源树继续进账 ⇒ 双根 digest 闸设计内行为；重编四件套里 program.erbc /
+#   program.meta / program.stmt.idx 与入库夹具逐字节同，manifest 只差 digest / sources / corpus-root 行）。
+#   本版读数：110 档 = 90 BOTH_REJECT_VERBATIM + 16 BOTH_PASS + 2 BOTH_REJECT_SAME_KIND +
+#   2 BOTH_REJECT_DIFFERENT_KIND；KOTLIN_REJECT_RUST_PASS 与 RUST_REJECT_KOTLIN_PASS **均 0 档**
+#   （与 2026-11-10 RUST2 版逐档同 verdict，仅 COMPILER_STALE 文案内嵌摘要两档随 digest 换新）。
 # id	family	desc	kotlin_rc	kotlin_issues	rust_rc	rust_issues	verdict
 sc-control	meta-head	控制档：四件套一字未改（两腿都必须 rc=0，否则拒因来自拷贝流程而不是变异）	0	PASS	0	PASS	BOTH_PASS
 sc-functions-minus1	meta-count	functions 计数 3→2（少读一条 ⇒ 状态机在 global-dims 处撞见 function）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 18 行：期望 global-dims，实际 function	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 18 行：期望 global-dims，实际 function	BOTH_REJECT_VERBATIM
@@ -48,7 +66,7 @@ sc-func-argint-neg	meta-record	function argIntCount 0→-3（形参桶是数组�
 sc-file-quote-unterminated	meta-record	file 记录第二个引号串不闭合（少一个右引号）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 引号串未闭合	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 引号串未闭合	BOTH_REJECT_VERBATIM
 sc-keyword-swap-globaldim	meta-record	第一条 global-dim 的关键字换成 private-dim ⇒「期望 X 实际 Y」	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 20 行：期望 global-dim，实际 private-dim	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 20 行：期望 global-dim，实际 private-dim	BOTH_REJECT_VERBATIM
 sc-privdim-bit-two	meta-record	private-dim 的 isStr 位 0→2（位口径严卡 0/1）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 25 行：isStr 应为 0/1，实为 2	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 25 行：isStr 应为 0/1，实为 2	BOTH_REJECT_VERBATIM
-sc-privdim-dims-neg	meta-record	private-dim 的 dims 2→-2（维度是数组长度，负值必须拒）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 25 行：dims 段出现负长度: -2	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 25 行：dims 段出现负长度: -2	BOTH_REJECT_VERBATIM
+sc-privdim-dims-neg	meta-record	private-dim 的 dims 2→-2（维度是数组长度，负值必须拒）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 25 行：isFloat 应为 0/1，实为 -2	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 25 行：isFloat 应为 0/1，实为 -2	BOTH_REJECT_VERBATIM
 sc-macro-dup-key	meta-record	macros 计数 +1 并重复整条 macro（Map 段同名后者覆盖）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 29 行：macro 名重复: SC_G_MACRO	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 29 行：macro 名重复: SC_G_MACRO	BOTH_REJECT_VERBATIM
 sc-label-dup	meta-record	labelset 的条数 1→2 并重复同名 label（旧实现静默覆盖 pc）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 7 行：label 名重复: SC_L1（函数 SC_ALPHA）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 7 行：label 名重复: SC_L1（函数 SC_ALPHA）	BOTH_REJECT_VERBATIM
 sc-const-value-nonint	meta-record	const 的值改成 `4x2`（整型常量表必须是整数）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 30 行：const 值 不是整数: 4x2	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 30 行：const 值 不是整数: 4x2	BOTH_REJECT_VERBATIM
@@ -69,8 +87,8 @@ sc-loadwarn-extra-field	meta-record	load-warn 记录尾部多一个裸记号 ⇒
 sc-globaldim-dup-record	meta-record	global-dims 计数 +1 并重复整条 global-dim（三元组相同只可能来自坏档）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 24 行：global-dim 记录重复: SC_GLOBALS.ERH:0	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 24 行：global-dim 记录重复: SC_GLOBALS.ERH:0	BOTH_REJECT_VERBATIM
 sc-privdim-dup-key	meta-record	private-dims 计数 +1 并重复整条 private-dim（函数键+变量名重复）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 26 行：private-dim 声明重复: SC_ALPHA/SC_LOCAL	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 26 行：private-dim 声明重复: SC_ALPHA/SC_LOCAL	BOTH_REJECT_VERBATIM
 sc-file-dup-key	meta-record	files 计数 +1 并重复整条 file（同一函数键两行 ⇒ 前者静默丢）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 13 行：file 函数键重复: SC_ALPHA	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 13 行：file 函数键重复: SC_ALPHA	BOTH_REJECT_VERBATIM
-sc-fmtver-2	meta-head	format-version 1→2（高于本引擎支持的版本 ⇒ 两侧都拒）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 侧车格式版本 2 高于本引擎支持的 1（由更新的 erbcc 写出）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 侧车格式版本 2 高于本引擎支持的 1（由更新的 erbcc 写出）	BOTH_REJECT_VERBATIM
-sc-fmtver-0	meta-head	format-version 1→0（版本非法 ⇒ 两侧都拒）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 侧车格式版本非法: 0	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 侧车格式版本非法: 0	BOTH_REJECT_VERBATIM
+sc-fmtver-4	meta-head	format-version 3→4（高于本引擎支持的版本 ⇒ 两侧都拒）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 侧车格式版本 4 高于本引擎支持的 3（由更新的 erbcc 写出）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 侧车格式版本 4 高于本引擎支持的 3（由更新的 erbcc 写出）	BOTH_REJECT_VERBATIM
+sc-fmtver-0	meta-head	format-version 3→0（版本非法 ⇒ 两侧都拒）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 侧车格式版本非法: 0	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 侧车格式版本非法: 0	BOTH_REJECT_VERBATIM
 sc-fmtver-nonint	meta-head	format-version 载荷改成 `x`（不是整数 ⇒ 两侧都拒）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 1 行：format-version 不是整数	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 1 行：format-version 不是整数	BOTH_REJECT_VERBATIM
 sc-head-order-swap	meta-head	首条记录换成 engine（首条必须是 format-version ⇒ 两侧都拒）	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 1 行：首条记录必须是 format-version	1	META_UNREADABLE: program.meta 读取失败: BootMetaFormatException: 第 1 行：首条记录必须是 format-version	BOTH_REJECT_VERBATIM
 sc-sha-flip	meta-head	program-sha256 末位翻掉（侧车与容器不是一对 ⇒ META_STALE，两侧都红且同文）	1	META_STALE: program.meta 记 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe8，容器摘要 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe9（侧车与容器不是一对）	1	META_STALE: program.meta 记 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe8，容器摘要 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe9（侧车与容器不是一对）	BOTH_REJECT_VERBATIM
@@ -109,8 +127,8 @@ sc-idx-append-junk	sidecar	偏移表尾部追加 2 个字节（长度不再是 h
 sc-man-artifacts-count-lie	manifest	artifacts 3→7（与 artifact 行数不符；两侧都不解析这行的语义）	0	PASS	0	PASS	BOTH_PASS
 sc-man-artifacts-count-neg	manifest	artifacts 3→-1（同上）	0	PASS	0	PASS	BOTH_PASS
 sc-man-source-files-count-lie	manifest	source-files 4→9（与 source 行数不符 ⇒ 两侧都不判）	0	PASS	0	PASS	BOTH_PASS
-sc-man-no-compiler-digest	manifest	删掉 compiler-digest 行（旧编译器产物 ⇒ COMPILER_STALE，两侧都拒）	1	COMPILER_STALE: 产物由旧编译器产出（清单没有 compiler-digest 行，是旧格式/旧编译器产物），必须重编：当前源码树 8185fdd6f2db2c2611f634a745c710a9dedd7d9c8eb58be417d6f5549347d382 共 204 个源文件 → ./gradlew :tools:erbcc:compileCorpus	1	COMPILER_STALE: 产物由旧编译器产出（清单没有 compiler-digest 行，是旧格式/旧编译器产物），必须重编：当前源码树 8185fdd6f2db2c2611f634a745c710a9dedd7d9c8eb58be417d6f5549347d382 共 204 个源文件 → ./gradlew :tools:erbcc:compileCorpus	BOTH_REJECT_VERBATIM
-sc-man-digest-flip	manifest	compiler-digest 末位翻掉（产物由旧编译器产出 ⇒ COMPILER_STALE）	1	COMPILER_STALE: 产物由旧编译器产出，必须重编：清单 compiler-digest 8185fdd6f2db2c2611f634a745c710a9dedd7d9c8eb58be417d6f5549347d381（compiler-sources 204 个），当前源码树 8185fdd6f2db2c2611f634a745c710a9dedd7d9c8eb58be417d6f5549347d382（204 个）→ ./gradlew :tools:erbcc:compileCorpus	1	COMPILER_STALE: 产物由旧编译器产出，必须重编：清单 compiler-digest 8185fdd6f2db2c2611f634a745c710a9dedd7d9c8eb58be417d6f5549347d381（compiler-sources 204 个），当前源码树 8185fdd6f2db2c2611f634a745c710a9dedd7d9c8eb58be417d6f5549347d382（204 个）→ ./gradlew :tools:erbcc:compileCorpus	BOTH_REJECT_VERBATIM
+sc-man-no-compiler-digest	manifest	删掉 compiler-digest 行（旧编译器产物 ⇒ COMPILER_STALE，两侧都拒）	1	COMPILER_STALE: 产物由旧编译器产出（清单没有 compiler-digest 行，是旧格式/旧编译器产物），必须重编：当前源码树 7ddbe30babaa3841a41ee0ef347b490d2e4c9f521b810d666fc9535c03332c55 共 325 个源文件 → ./gradlew :tools:erbcc:compileCorpus	1	COMPILER_STALE: 产物由旧编译器产出（清单没有 compiler-digest 行，是旧格式/旧编译器产物），必须重编：当前源码树 7ddbe30babaa3841a41ee0ef347b490d2e4c9f521b810d666fc9535c03332c55 共 325 个源文件 → ./gradlew :tools:erbcc:compileCorpus	BOTH_REJECT_VERBATIM
+sc-man-digest-flip	manifest	compiler-digest 末位翻掉（产物由旧编译器产出 ⇒ COMPILER_STALE）	1	COMPILER_STALE: 产物由旧编译器产出，必须重编：清单 compiler-digest 7ddbe30babaa3841a41ee0ef347b490d2e4c9f521b810d666fc9535c03332c54（compiler-sources 325 个），当前源码树 7ddbe30babaa3841a41ee0ef347b490d2e4c9f521b810d666fc9535c03332c55（325 个）→ ./gradlew :tools:erbcc:compileCorpus	1	COMPILER_STALE: 产物由旧编译器产出，必须重编：清单 compiler-digest 7ddbe30babaa3841a41ee0ef347b490d2e4c9f521b810d666fc9535c03332c54（compiler-sources 325 个），当前源码树 7ddbe30babaa3841a41ee0ef347b490d2e4c9f521b810d666fc9535c03332c55（325 个）→ ./gradlew :tools:erbcc:compileCorpus	BOTH_REJECT_VERBATIM
 sc-man-compiler-sources-junk	manifest	compiler-sources 改成非整数（只进文案，判据只认 digest ⇒ 两侧都放行）	0	PASS	0	PASS	BOTH_PASS
 sc-man-container-bytes-lie	manifest	容器 artifact 行的字节数 +1 ⇒ ARTIFACT_SIZE，两侧都拒	1	ARTIFACT_SIZE: erbc.v1/program.erbc 实际 1606 字节，清单登记 1607 字节（写一半或被截断）	1	ARTIFACT_SIZE: erbc.v1/program.erbc 实际 1606 字节，清单登记 1607 字节（写一半或被截断）	BOTH_REJECT_VERBATIM
 sc-man-container-sha-lie	manifest	容器 artifact 行的 sha 末位翻掉 ⇒ ARTIFACT_SHA（并连带 META_STALE）	1	ARTIFACT_SHA: erbc.v1/program.erbc 摘要 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe9，清单登记 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe8 | META_STALE: program.meta 记 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe9，容器摘要 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe8（侧车与容器不是一对）	1	ARTIFACT_SHA: erbc.v1/program.erbc 摘要 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe9，清单登记 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe8 | META_STALE: program.meta 记 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe9，容器摘要 924c641c4070b0ab8ebab8e21a71fe8bd821aa4939b14f9ec1dd17e314dfcbe8（侧车与容器不是一对）	BOTH_REJECT_VERBATIM

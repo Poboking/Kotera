@@ -97,6 +97,15 @@ class InfiniteLoopGuardTest {
         private val answer: InfiniteLoopAnswer,
         private val sourceName: String? = null,
         private val sleepPerSegment: Boolean = true,
+        /**
+         * 每个段落第一条语句真实睡多久。
+         *
+         * 为什么可变：答「继续」后生效阈值会**翻倍**（`VmConfig.infiniteLoopAlertTimeMs` 的
+         * 「有意偏离官方」，见 `escalatedLoopAlertMs`），横跨多段落的用例要保证每一段都真的
+         * 越过当时那一刻的阈值 —— 用固定 [SEGMENT_SLEEP_MS] 会在第 4 段起被翻倍后的阈值甩开
+         * （1→2→4→8→16 ms），于是用例随机器快慢时红时绿。
+         */
+        private val sleepMs: Long = SEGMENT_SLEEP_MS,
     ) : VmHost {
         override val evalContext: EvalContext? = null
 
@@ -124,7 +133,7 @@ class InfiniteLoopGuardTest {
             dispatches++
             lastEnvLine = env.line
             if (sleepPerSegment && dispatches % CHECK_LINES == 1) {
-                Thread.sleep(SEGMENT_SLEEP_MS)
+                Thread.sleep(sleepMs)
             }
             return StmtOutcome.Normal
         }
@@ -231,11 +240,19 @@ class InfiniteLoopGuardTest {
         assertEquals(CHECK_LINES + 50, host.dispatches)
     }
 
-    /** 玩家答「继续」⇒ 行数与计时**成对归零**，于是每满一万行才再问一次。 */
+    /**
+     * 玩家答「继续」⇒ 行数与计时**成对归零**，于是每满一万行才再问一次。
+     *
+     * 2026-11-10 调整：答「继续」后生效阈值**翻倍**（180→360→720…，见
+     * `escalatedLoopAlertMs` 的取舍），所以段落睡多久必须压得住翻倍后的阈值 ——
+     * 这里用 40 ms，覆盖五段里最大的一档（1→2→4→8→16 ms）且留足机器抖动余量。
+     * 本用例要钉的东西没变：**行数与计时成对归零**（`Process.cs:486-487`），
+     * 只是不再兼任「阈值不翻倍」这件事（那是 `InfiniteLoopWallClockTest` 的判据）。
+     */
     @Test
     fun `继续之后行数归零，每段各问一次`() {
         val program = markerLoop(5 * CHECK_LINES)
-        val host = AlertHost(answer = InfiniteLoopAnswer.Continue)
+        val host = AlertHost(answer = InfiniteLoopAnswer.Continue, sleepMs = 40L)
         val vm = VirtualMachine(program, host, officialOnly)
 
         vm.run()
@@ -249,8 +266,9 @@ class InfiniteLoopGuardTest {
                     "实际 ${alert.linesExecuted}",
             )
             assertTrue(
-                alert.elapsedMs >= ALERT_MS,
-                "第 ${i + 1} 次的计时也要从段落起点重启（:487 的 startTime.Restart）：${alert.elapsedMs}",
+                alert.elapsedMs >= alert.alertTimeMs,
+                "第 ${i + 1} 次的计时也要从段落起点重启（:487 的 startTime.Restart）：" +
+                    "elapsed=${alert.elapsedMs} 阈值=${alert.alertTimeMs}",
             )
         }
         assertEquals(5 * CHECK_LINES, host.dispatches, "从头到尾一行没少")

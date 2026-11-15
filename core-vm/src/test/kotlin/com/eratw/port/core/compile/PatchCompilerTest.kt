@@ -7,6 +7,7 @@ import com.eratw.port.core.expr.Binary
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.FuncCall
 import com.eratw.port.core.expr.IntLiteral
+import com.eratw.port.core.expr.KeywordIndexArg
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.StrLiteral
 import com.eratw.port.core.expr.Ternary
@@ -41,6 +42,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -303,8 +305,23 @@ class PatchCompilerTest {
         sym: SymbolTable,
         source: String = patchSource,
         entry: String = "B_HELLO",
+        /** 常量关键字折叠的数据面（生产 = 导入链按设备 CSV/ERD 构造；null = 旧行为）。 */
+        constantKeywordLookup: ((String, Int, String) -> Long?)? = null,
     ): PatchCompiler.PatchResult =
-        PatchCompiler(meta, counts, sym).compile(
+        PatchCompiler(meta, counts, sym, constantKeywordLookup = constantKeywordLookup).compile(
+            listOf(PatchCompiler.SourceFile("mods/patch.ERB", source)),
+            entry,
+        )
+
+    /** 显式钉告警门（原版 `Config.WarnNormalFunctionOverloading`）：三处用例都用 [patchSymbols]。 */
+    private fun patchCompileGated(
+        meta: BootMetadata,
+        counts: PatchCompiler.BaseCounts,
+        source: String,
+        entry: String,
+        gated: Boolean,
+    ): PatchCompiler.PatchResult =
+        PatchCompiler(meta, counts, patchSymbols(), warnNormalFunctionOverloading = gated).compile(
             listOf(PatchCompiler.SourceFile("mods/patch.ERB", source)),
             entry,
         )
@@ -878,13 +895,14 @@ class PatchCompilerTest {
 
     @Test
     fun `包内同名覆盖——后定义者生效且出告警，非胜者定义整段废弃`() {
-        // 原版对同名非事件函数是「后装载者留下」（spec: LabelDictionary.cs:60-68 直接赋值，
-        // ErbLoader.cs:443-450 只告警不拒绝，WarnNormalFunctionOverloading 出厂默认关
-        // ConfigData.cs:94）——社区口上包重度依赖该语义（蕾米莉亚色情特化 v1.3 包内 77 组）。
+        // 原版对同名非事件函数是「后装载者留下」（spec: LabelDictionary.cs:107-113 直接赋值，
+        // ErbLoader.cs:466 只告警不拒绝，WarnNormalFunctionOverloading 键缺省 false
+        // ConfigData.cs:99）——社区口上包重度依赖该语义（蕾米莉亚色情特化 v1.3 包内 77 组）。
+        // 告警门显式传 true（本仓出厂 emuera.config 第 48 行 = YES）；false 分支见下一例。
         val (_, meta, counts) = compileBase()
         val src = "@B_ONE\n#DIM LOCAL_P, 2\nPRINTL FIRST\nRETURN 0\n\n" +
             "@B_ONE\nPRINTL SECOND\nRETURN 0\n"
-        val r = patchCompile(meta, counts, patchSymbols(), source = src, entry = "B_ONE")
+        val r = patchCompileGated(meta, counts, src, "B_ONE", gated = true)
         assertEquals(
             1, r.program.functions.count { it.upperKey == "B_ONE" },
             "同键只留胜者（后定义者）一个函数",
@@ -897,6 +915,66 @@ class PatchCompilerTest {
         assertTrue(
             r.privateDims.none { it.functionKey == "B_ONE" && it.spec.name == "LOCAL_P" },
             "非胜者定义的私有 #DIM 不得进 privateDims，实际: ${r.privateDims.map { it.functionKey to it.spec.name }}",
+        )
+    }
+
+    @Test
+    fun `门控关闭——同名非事件覆盖零告警且覆盖结果逐位不变`() {
+        // 原版门 `!label.IsEvent && (Config.WarnNormalFunctionOverloading || Program.AnalysisMode)`
+        // （spec: ErbLoader.cs:466）：设备侧补丁预扫不是 AnalysisMode，配置关时该告警必须静默，
+        // 但覆盖语义（非事件后定义者胜出，LabelDictionary.cs:107-113）与装载结果逐位不变。
+        val (_, meta, counts) = compileBase()
+        val src = "@B_ONE\n#DIM LOCAL_P, 2\nPRINTL FIRST\nRETURN 0\n\n" +
+            "@B_ONE\nPRINTL SECOND\nRETURN 0\n"
+        val on = patchCompileGated(meta, counts, src, "B_ONE", gated = true)
+        val off = patchCompileGated(meta, counts, src, "B_ONE", gated = false)
+        assertEquals(
+            1, on.parseWarnings.count { it.contains("B_ONE") && it.contains("后定义者生效") },
+            "门开时必须出且只出一条同名覆盖告警，实际: ${on.parseWarnings}",
+        )
+        assertTrue(
+            off.parseWarnings.none { it.contains("B_ONE") && it.contains("后定义者生效") },
+            "门关时同一批源必须零告警（不许降级成别的话术），实际: ${off.parseWarnings}",
+        )
+        assertEquals(
+            1, off.program.functions.count { it.upperKey == "B_ONE" },
+            "门关不改变覆盖结果：同键仍只留胜者一个函数",
+        )
+        assertContentEquals(
+            on.program.code, off.program.code,
+            "告警门只改「发不发」，补丁指令流必须逐字相同",
+        )
+        assertEquals(
+            on.functions.map { it.sig.name }, off.functions.map { it.sig.name },
+            "告警门不改变补丁函数表序与命名",
+        )
+        assertTrue(
+            off.privateDims.none { it.functionKey == "B_ONE" && it.spec.name == "LOCAL_P" },
+            "门关时非胜者定义的私有 #DIM 同样不得进 privateDims",
+        )
+    }
+
+    @Test
+    fun `同名事件重复定义恒不告警——原版 !IsEvent 门`() {
+        // 原版 `!label.IsEvent && …`（spec: ErbLoader.cs:466）：事件名不是覆盖关系（多成员
+        // 并存），不受 `WarnNormalFunctionOverloading` 约束 —— 配置开也不许出「重复定义」。
+        // 设备侧同名事件仍是「最后成员胜出」（类尾 TODO(verify) 4a），本波只关告警，不改覆盖。
+        val (_, meta, counts) = compileBase()
+        val src = "@EVENTTRAIN\nPRINTL A\nRETURN 0\n" +
+            "@EVENTTRAIN\nPRINTL B\nRETURN 0\n" +
+            "@B_ANY\nRETURN 0\n"
+        val r = patchCompileGated(meta, counts, src, "B_ANY", gated = true)
+        assertTrue(
+            r.parseWarnings.none { it.contains("重复定义") },
+            "事件名重复不得产生「同名非事件函数重复定义」告警，实际: ${r.parseWarnings}",
+        )
+        assertEquals(
+            1, r.program.functions.count { it.upperKey.startsWith("EVENTTRAIN#") },
+            "同名事件成员的既有覆盖形态不变（最后成员胜出），实际: ${r.program.functions.map { it.name }}",
+        )
+        assertTrue(
+            r.program.functions.any { it.name == "EVENTTRAIN" },
+            "事件名本身仍留给合成入口，实际: ${r.program.functions.map { it.name }}",
         )
     }
 
@@ -1176,6 +1254,55 @@ class PatchCompilerTest {
         assertEquals(18, text.lines().size, "15 项字段 + function-metas + --- + 尾空行")
         assertTrue(text.lines()[15].startsWith("function-metas "), "第 16 行=function-metas 段: ${text.lines()[15]}")
         assertEquals("---", text.lines()[16], "第 17 行=头结束标记")
+    }
+
+    // ------------------------------------------------------------------
+    // 常量关键字下标的解析期折叠（装载相位；与 erbcc 全量编译同一数据面）
+    // ------------------------------------------------------------------
+
+    /**
+     * 设备端补丁编译是**运行期唯一还在解析脚本**的入口（[PatchCompiler] KDoc）：
+     * 注入查表回调后，`ITEM:药` 这类常量下标必须在解析期折成整数，产物自带下标、
+     * 运行期不再按名查盘上 CSV 表（spec: `VariableStrArgTerm.cs:57-69`）。
+     * 反向用例锁「未注入 = 旧行为」——保留 [KeywordIndexArg]，报错时机与文案不变。
+     */
+    @Test
+    fun `常量关键字下标——注入查表回调折成整数，未注入保留运行期查表结点`() {
+        val sym = patchSymbols()
+        val (_, meta, counts) = compileBase(sym = sym)
+        val foldSource = """
+            @B_FOLD
+            ITEM:药 = 7
+            RETURN 0
+        """.trimIndent()
+        val lookup: (String, Int, String) -> Long? =
+            { v, d, k -> if (v.equals("ITEM", true) && d == 0 && k == "药") 3L else null }
+
+        val folded = patchCompile(
+            meta, counts, sym, source = foldSource, entry = "B_FOLD",
+            constantKeywordLookup = lookup,
+        )
+        val foldedIndices = (counts.statementCount until folded.program.statementCount)
+            .map { folded.program.statement(it) }
+            .filterIsInstance<AssignStmt>()
+            .first { it.raw.contains("ITEM") }
+            .dest.indices
+        assertTrue(
+            foldedIndices.any { it is IntLiteral && it.value == 3L },
+            "常量关键字下标必须在解析期折成整数 3：$foldedIndices",
+        )
+        assertTrue(
+            foldedIndices.none { it is KeywordIndexArg },
+            "折叠后产物里不能再留关键字名结点：$foldedIndices",
+        )
+
+        val unfolded = patchCompile(meta, counts, sym, source = foldSource, entry = "B_FOLD")
+        val unfoldedIndices = (counts.statementCount until unfolded.program.statementCount)
+            .map { unfolded.program.statement(it) }
+            .filterIsInstance<AssignStmt>()
+            .first { it.raw.contains("ITEM") }
+            .dest.indices
+        assertIs<KeywordIndexArg>(unfoldedIndices.last(), "未注入 = 旧行为（运行期按名查表）")
     }
 
     private companion object {

@@ -1,0 +1,20 @@
+# usage-subset.tsv —— Rust CLI 相对 Kotlin USAGE 的声明式子集（MODERN-R9-A）
+# 字段以单个 TAB 分隔；`#` 开头为注释、空行忽略。
+#   drop<TAB><lhs>           Rust 不打印基准里的这一整行
+#   sub<TAB><lhs><TAB><rhs>  Rust 把这一整行改打印成 rhs（rhs 必须是 Rust USAGE 里的整行原文）
+# 每条 lhs 在 kotlin-usage.txt 主体里必须恰好出现一次；sub 的 rhs 在 cli::USAGE 里必须恰好出现一次。
+# 遗漏理由只写在 src/cli.rs 的文件头 KDoc 里，不写进本文件（避免把说明混进判据）。
+sub	  erbcc compile --corpus <ERB目录> --out <产物目录> [--limit <N>] [--mode strict|compat] [--allow-parse-failures <容错清单>]	  erbcc compile --corpus <ERB目录> --out <产物目录> [--limit <N>]
+sub	  退出码        0 = 审计完成且（--strict 时）无硬差异；1 = 编译失败或 --strict 下有硬差异、或可达性读数与基线有漂移；2 = 参数错误（含 `--allow` 白名单不是合法 UTF-8 的拒绝档，以及两个基线开关缺 --reachability 或互斥同给）	  退出码        0 = 审计完成且（--strict 时）无硬差异；1 = 编译失败或 --strict 下有硬差异；2 = 参数错误（含 `--allow` 白名单不是合法 UTF-8 的拒绝档）
+drop	  --mode        strict | compat（缺省 strict）
+drop	                strict：任何解析失败都拒落盘（出包默认，防编译器回归被吞）。
+drop	                compat：配合 --allow-parse-failures 使用，清单内失败切片降级为 THROW 空体桩
+drop	                （运行到该函数时抛原版 Lang.Error.CalledFailedFunc 文案，等价原版
+drop	                「该函数不可用」，而不是静默返回默认值）；manifest 追加 degraded-slices 段随包留痕。
+drop	  --allow-parse-failures <清单>
+drop	                容错档清单（每行 `相对路径:行号`，`#` 开头为注释）。仅 --mode compat 接受。
+drop	                清单外的任何失败、或清单项未命中（源已修好/行号漂移）一律退出码 1。
+drop	  --reachability 追加可达性/可移植性报告（缺省关；审计的 stdout/退出码/TSV 与不带本开关时逐字节相同）：根 = 事件名（IdentifierDictionary.cs:72-89）∪ 系统名（:91-135），BFS 给可达集与深度；静态不可判定的调用落成 dynamic-call 行（报告是下界）；可达函数上的 CLIENTWIDTH/CLIENTHEIGHT/GETFONT/GGETFONT*/GDRAWTEXT 按 persist/display/unknown 分级
+drop	  --reach-out    可达性报告 TSV（缺省 = --out 同目录的 reachability.tsv；仅 --reachability 时生效）
+drop	  --reach-expect 可达性读数对拍基线（仅 --reachability 时生效，与 --reach-write-expect 互斥）：基线是纯 ASCII key=value（version=1 + roots/reachable/dynamicCalls/portability/persist 五项计数 + 全表 TSV 的 tsvSha256）；六项全等 ⇒ 追加一行「reachability 基线一致」；任一漂移 ⇒ stderr 逐字段一行「reachability 基线不一致：<field> 期望 <a> 实际 <b>」并退出码 1；基线文件坏（非文件/缺字段/未知或重复字段/version 不认识/tsvSha256 不是 64 位小写十六进制）⇒ 退出码 2
+drop	  --reach-write-expect 把当前读数写成该基线文件（父目录不存在则创建；仅 --reachability 时生效），stdout 追加「reachability 基线已写入：<绝对路径>」

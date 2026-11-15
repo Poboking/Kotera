@@ -175,6 +175,24 @@ data class ParserConfig(
      * 而 [ArgCtx] 的构造点在语句层解析器里 —— 复用现有载体可避免跨层改签名。
      */
     val systemIgnoreStringSet: Boolean = false,
+    /**
+     * 常量字符串下标的**解析期 Restructure** 回调：`(变量名, dim, 关键字) -> 整数下标`。
+     *
+     * spec: `VariableStrArgTerm.cs:57-69` —— 原版 `Restructure` 在装载期就把常量字符串
+     * 下标折成 `SingleLongTerm`，产物里只留整数；动态下标才保留运行期按名查表。
+     * 移植侧此前把关键字**名字**编进 `.erbc`，运行期按名查设备盘上的 CSV/ERD 表，
+     * 编译产物与数据面耦合（盘上表旧/半截就在剧情里抛「未定义关键字」）。
+     *
+     * 两条**编译脚本**的路都要注入同一口径的数据面：
+     * - erbcc 全量编译（出包产物）：编译期 `CSV/` 与 ERB 目录下 `.erd` 里的 ERD 表；
+     * - 设备端补丁编译（`PatchCompiler`，玩家导入口上）：设备现盘同一份表。
+     *
+     * 运行期解析**运行期拼出来的字符串**（PRINTFORMS/RETURNFORM 等）不注入 —— 原版
+     * 那两类字符串也只能到运行期才存在，没有装载期可折的常量；null = 旧行为
+     * （解析出 [KeywordIndexArg]，运行期查表）。回调返回 null = 不折，失败方向与既有
+     * 报错逐字不变。
+     */
+    val constantKeywordLookup: ((String, Int, String) -> Long?)? = null,
 )
 
 /**
@@ -658,8 +676,17 @@ class ExprParser(
             }
         }
         // 字符串关键字下标包装。spec: VariableParser.cs:182-188
+        // 常量字面量在解析期就按原版 `VariableStrArgTerm.Restructure` 折成整数
+        // （`VariableStrArgTerm.cs:57-69`）：产物自带下标，运行期不再按名查盘上 CSV 表。
+        // 动态下标 / 查不到的关键字保持 KeywordIndexArg，报错时机与文案不变。
+        val lookup = config.constantKeywordLookup
         val wrapped = array.mapIndexed { i, e ->
-            if (e.operandType == OperandType.STR) KeywordIndexArg(e, info.name, i) else e
+            if (e.operandType != OperandType.STR) {
+                e
+            } else {
+                val v = if (e is StrLiteral && lookup != null) lookup(info.name, i, e.value) else null
+                if (v != null) IntLiteral(v, e.line, e.col) else KeywordIndexArg(e, info.name, i)
+            }
         }
         return VarRef(
             name = info.name,

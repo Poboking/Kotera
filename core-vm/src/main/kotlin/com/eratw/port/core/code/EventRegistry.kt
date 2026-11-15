@@ -37,10 +37,17 @@ class EventRegistry private constructor(
     private val byKey: Map<String, List<Member>>,
 ) {
 
-    /** 一个事件成员：物理下标 + 桶位 + SINGLE 旗标 + 归属包（诊断）。 */
+    /**
+     * 一个事件成员：物理下标 + 桶位 + ONLY / SINGLE 旗标 + 归属包（诊断）。
+     *
+     * [isOnly] 与 [bucket] 同源派生自 [FuncMeta.isOnly]（`eventBucket` 的 ONLY=0），
+     * 但**不**让运行期拿 `bucket == 0` 反推旗标：派发所需的语义全部随成员带出，
+     * 四桶表本身就是可直接执行的真源（M2-6），不依赖第二张元数据表。
+     */
     class Member(
         val physicalIndex: Int,
         val bucket: Int,
+        val isOnly: Boolean,
         val isSingle: Boolean,
         val ownerPackageId: String,
     )
@@ -90,6 +97,7 @@ class EventRegistry private constructor(
                     members += Member(
                         physicalIndex = b.physicalIndex,
                         bucket = meta.eventBucket,
+                        isOnly = meta.isOnly,
                         isSingle = meta.isSingle,
                         ownerPackageId = b.ownerPackageId,
                     )

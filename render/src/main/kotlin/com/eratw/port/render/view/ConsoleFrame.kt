@@ -131,7 +131,8 @@ class ConsoleFrame(
      *   与 `screen.list.dirtyStrips()` 必须来自同一次提交 —— 前者决定「要不要画」，
      *   后者给出「画哪几行、擦到哪一列」
      * @param scene 背景色与立绘摆位
-     * @param sprites 立绘注册表（只在整屏路径用到；场景里有立绘时本类不做按行重绘）
+     * @param sprites 立绘注册表（整屏路径解析立绘摆位；按行重绘路径透传给正文行内图形段，
+     *   MODERN-R10-A。场景里有立绘摆位时本类不做按行重绘）
      * @param pointing 绘制侧的指（按）位置（命中口径），null 表示无焦点
      * @return 本帧画布（复用同一个实例，不要跨帧持有像素快照）
      */
@@ -210,6 +211,7 @@ class ConsoleFrame(
                 strips = strips,
                 backgroundArgb = scene.backgroundArgb,
                 focusedButton = focused,
+                sprites = sprites,
             )
             lastDrawCount = countDrawn(commands, strips)
             lastWasFull = false

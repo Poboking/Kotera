@@ -9,20 +9,21 @@ notes:
 - 参数形态中 [ ] 表示可省略参数，省略起点依据构造函数 ArgTypeList.OmitStart 或 argumentTypeArray；部分旧式类的可选参数边界标注 medium 待复核。
 - ERB 用户函数（#FUNCTION）不在本表，其注册位于 Process.LabelDictionary（Runtime.Script 侧），需另立规约。
 - 【证据源 2：fork-src（2026-10-30 W0 新增）】`source` 以 `fork-src ` 开头的条目取自上游 fork 源码仓库 qirchen421/emuera.sk@48494165（branch develop-skiasharp，2026-08-28；README 自称 Emuera 1824+v24+EMv18+EEv56+Skiav9），相对路径 `Emuera/Runtime/Script/Statements/Function/Creator.Method.cs`（注册表 `Emuera/Runtime/Script/Statements/Function/Creator.cs`，SQL 实现 `Emuera/Runtime/Utils/尊尼获加/SqlManager.cs`）。本仓 `reference/emuera-cs` 是 1.824/4.980 期快照，`GETANIMETIMER`/`TOFLOAT`/`UNCHECKED_*`/`SQL_*`/`GETPLATFORM`/`MAP_VALUES`/`MAP_MERGE`/`MAP_REMOVEIF`/`MAP_FINDKEY`/`MAP_TOSTRING`/`DISABLE_INPUT_MACRO`/`ENABLE_INPUT_MACRO` 在其中 grep 均无命中，故只能用 fork 源码作 A 级证据。
-- 【版本漂移】4.981 随包是 Emuera SkiaX 0.77.0，与上述仓库 HEAD 可能有个别差异：仓库另有 `SQL_CONNECTION_OPEN`/`SQL_READER_GET_FLOAT`/`SQL_EXECUTE_SCALAR_FLOAT`/`SQL_P_EXECUTE_SCALAR_FLOAT`/`MAP_FROMSTRING`/`UNCHECKED_SUB`/`UNCHECKED_NEGATE`/`TOSTRF`，而 4.981《画蛇又添足版自改emuera相关说明.txt》第 249、22、34 行的新增命令清单未列 `*_FLOAT` 系列与 `MAP_FROMSTRING`；本表只登记语料与自改说明确认到的条目，其余见 verify-notes.md §23。
+- 【版本漂移】4.981 随包是 Emuera SkiaX 0.77.0，与上述仓库 HEAD 可能有个别差异：仓库另有 `SQL_CONNECTION_OPEN`/`SQL_READER_GET_FLOAT`/`SQL_EXECUTE_SCALAR_FLOAT`/`SQL_P_EXECUTE_SCALAR_FLOAT`/`MAP_FROMSTRING`/`UNCHECKED_SUB`/`UNCHECKED_NEGATE`/`TOSTRF`，而 4.981《画蛇又添足版自改emuera相关说明.txt》第 249、22、34 行的新增命令清单未列 `*_FLOAT` 系列与 `MAP_FROMSTRING`；P1 已按上游 `Creator.cs:408-432` 注册表补齐 SQL_* 全部 25 条（含上述 float 系列），`MAP_FROMSTRING` 等其余条目见 verify-notes.md §23。
 # 2026-10-30 4.981 增量 +28（string/浮点解析 1、math 2、view 1、variable 5、other 19）；
 # 2026-11-06 fixcore 再补 1 条 4.981 fork 新增（SPRITEANIMEFRAME，view；出处是 fork 的更新记录
 #   画蛇又添足版自改emuera相关说明.txt:236-239，无 C# 源、无 fork-src，故 source 不带宽前缀）；
 # 原 271 条口径只含 reference/emuera-cs 内可对质的函数，fork 新增条目单列在表末，source 一律带 fork-src 前缀。
 summary:
-  total: 300
+  total: 334
   by_category:
     character: 19
     debug: 6
+    entity: 24
     input: 13
     load: 3
-    math: 31
-    other: 36
+    math: 32
+    other: 45
     save: 7
     string: 34
     variable: 76
@@ -220,6 +221,14 @@ functions:
   side_effects: ''
   semantics: 返回 base 的 exponent 次幂的整数部分；结果为 NaN/无穷大或超出 Int64 范围时抛错。
   source: FunctionMethodCreator.cs:4159-4192
+  confidence: high
+- name: ROUND
+  category: math
+  args: value
+  returns: int
+  side_effects: ''
+  semantics: 四舍五入到整数（.5 远离零，MidpointRounding.AwayFromZero）；任一实参为浮点则返回浮点（CanReturnFloat），整型路结果超出 Int64 范围抛错。1.824 无此函数，蛇版 4.981 数学扩展新增（Creator.cs:100）；语料 261111 的 DLC/小游戏/锻税.ERB 四处实算使用。
+  source: 'emuera-skia-4.981 Creator.Method.cs:4544-4577'
   confidence: high
 - name: SQRT
   category: math
@@ -2312,6 +2321,22 @@ functions:
   semantics: 以 dbName 为键登记并打开一个 Microsoft.Data.Sqlite 连接；connStr 省略时用「Data Source=:memory:」（内存库）。同名连接已存在则直接返回 1、不重开；打开失败抛 CodeEE（文案前缀「SQL_CONNECT 失败」）。连接表按 OrdinalIgnoreCase 比较，名字大小写不敏感。语料见 魔改内容/qol/qol_db.ERB:60（SQL_CONNECT "TR_DB"）与 qol_dish.ERB:96（带 Data Source 的 connStr）。
   source: fork-src Creator.Method.cs:10237-10251; SqlManager.cs:15,67-82; Creator.cs:405
   confidence: high
+- name: SQL_CONNECTION_OPEN
+  category: other
+  args: name
+  returns: int
+  side_effects: 在 SavDir/sql 下创建并打开 <name>.db；同名连接先关再开
+  semantics: 校验库名（空白、路径字符、`..` 一律拒绝），在 SavDir/sql 下建 `<name>.db`；同名连接已存在时先 Close/Dispose 再重开，执行 `PRAGMA journal_mode = WAL` 与 `PRAGMA synchronous = NORMAL`，成功返回 1。打开失败抛 CodeEE（文案前缀「SQL_CONNECTION_OPEN 失败」）。上游 fork 专有函数，语料无调用。
+  source: fork-src Creator.Method.cs:10271-10278; SqlManager.cs:17-56; Creator.cs:408
+  confidence: high
+- name: SQL_DISCONNECT
+  category: other
+  args: dbName
+  returns: int
+  side_effects: 关闭并移除命名连接
+  semantics: 关闭并 Dispose 该连接后从全局连接表移除，恒返回 1；连接不存在时静默 no-op（不抛错）。reader 表不随之清理，reader 仍需显式 SQL_READER_CLOSE。
+  source: fork-src Creator.Method.cs:10296-10304; SqlManager.cs:86-94; Creator.cs:410
+  confidence: high
 - name: SQL_EXECUTE_NONQUERY
   category: other
   args: dbName, sql
@@ -2343,6 +2368,14 @@ functions:
   side_effects: 读游标当前行
   semantics: 取当前行指定列的 64 位整数；该列为 NULL 时返回 0（与 ISNULL 成对使用）；readerId 无效抛 CodeEE「无效的 Reader ID」。列下标从 0 起（语料用常量 COL_* 名，如 qol_dish.ERB:477-478）。
   source: fork-src Creator.Method.cs:10290-10297; SqlManager.cs:167-175; Creator.cs:410
+  confidence: high
+- name: SQL_READER_GET_FLOAT
+  category: other
+  args: readerId, columnIndex
+  returns: float
+  side_effects: 读游标当前行
+  semantics: 取当前行指定列的浮点值（GetDouble）；该列为 NULL 时返回 0.0；readerId 无效抛 CodeEE「无效的 Reader ID」。列下标从 0 起。
+  source: fork-src Creator.Method.cs:10734-10741; SqlManager.cs:188-197; Creator.cs:415
   confidence: high
 - name: SQL_READER_GET_STRING
   category: other
@@ -2376,6 +2409,14 @@ functions:
   semantics: 执行查询取首行首列并转成整数（Convert.ToInt64）；结果 NULL 或无行时返回 0；库未连接抛 CodeEE，出错抛 CodeEE（前缀「SQL 标量查询错误」）。语料高频（qol_tachie.ERB:49、qol_wood.ERB:145、qol_graph_query.ERB:331）。
   source: fork-src Creator.Method.cs:10326-10333; SqlManager.cs:238-273,275-276; Creator.cs:415
   confidence: high
+- name: SQL_EXECUTE_SCALAR_FLOAT
+  category: other
+  args: dbName, sql
+  returns: float
+  side_effects: 读数据库
+  semantics: 执行查询取首行首列并转成浮点（Convert.ToDouble）；结果 NULL 或无行时返回 0.0；库未连接抛 CodeEE，文本列不能数值化或 SQL 出错抛 CodeEE（前缀「SQL 标量查询错误」并回显语句）。
+  source: fork-src Creator.Method.cs:10743-10750; SqlManager.cs:238-282; Creator.cs:420
+  confidence: high
 - name: SQL_EXECUTE_SCALAR_STRING
   category: other
   args: dbName, sql
@@ -2399,6 +2440,38 @@ functions:
   side_effects: 建表并批量写入
   semantics: 读 MAP_TOXML 格式的 XML（根 /map/p，每个 p 取 ./k 的 InnerText 与 ./v 的 InnerXml），在一个事务里建表 CREATE TABLE IF NOT EXISTS <表> (k TEXT PRIMARY KEY, v TEXT) 后逐条 INSERT OR REPLACE，成功返回 1。dbName 未连接返回 0（不抛错）；文件路径先按 WorkingDir 再按 ExeDir 找，都找不到抛 CodeEE（文案前缀「SQL_IMPORT_MAP_XML」）；XML 解析失败抛 CodeEE（前缀「导入 MAP XML 失败」）。语料见 魔改内容/qol/qol_db.ERB:61-62。
   source: fork-src Creator.Method.cs:10343-10350; SqlManager.cs:285-339; Creator.cs:418
+  confidence: high
+- name: SQL_IMPORT_DT_XML
+  category: other
+  args: dbName, tableName, schemaPath, dataPath
+  returns: int
+  side_effects: 建表并批量写入
+  semantics: 读 DataTable 风格的 XSD schema（列名/类型，`id` 列作 PRIMARY KEY）与数据 XML（根 DocumentElement、行名 = tableName），在一个事务里 CREATE TABLE IF NOT EXISTS 后逐行 INSERT OR REPLACE，成功返回 1。dbName 未连接返回 0；schema/数据文件缺失分别抛 CodeEE（「找不到架构文件」/「找不到数据文件」）；XML 解析或 SQL 失败抛 CodeEE。
+  source: fork-src Creator.Method.cs:10395-10402; SqlManager.cs:340-420; Creator.cs:423
+  confidence: high
+- name: SQL_EXPORT_MAP_XML
+  category: other
+  args: dbName, tableName, filePath
+  returns: int
+  side_effects: 写 XML 文件
+  semantics: 执行 `SELECT k, v FROM <表>`，写成 `<map><p><k>文本</k><v>原始 XML</v></p></map>`（k 转义、v 以 WriteRaw 原样落盘）；成功返回 1，dbName 未连接返回 0，SQL/写文件失败抛 CodeEE（前缀「导出 MAP XML 失败」）。
+  source: fork-src Creator.Method.cs:10404-10411; SqlManager.cs:422-459; Creator.cs:424
+  confidence: high
+- name: SQL_EXPORT_DT_XML
+  category: other
+  args: dbName, tableName, schemaPath, dataPath
+  returns: int
+  side_effects: 写 XSD schema 与数据 XML
+  semantics: 先取表结构（整数列 → xs:long/System.Int64，其余 → xs:string）写 schema，再流式写 `<DocumentElement><表>…</表></DocumentElement>` 数据；NULL 列不写元素。成功返回 1，dbName 未连接返回 0，表不存在/SQL/写文件失败抛 CodeEE（前缀「导出 DT XML 失败」）。
+  source: fork-src Creator.Method.cs:10413-10420; SqlManager.cs:461-515; Creator.cs:425
+  confidence: high
+- name: SQL_IMPORT_XML_CUSTOM
+  category: other
+  args: dbName, tableName, filePath, rowXPath, columnMappings
+  returns: int
+  side_effects: 建表并批量写入
+  semantics: 按 rowXPath 最后一段匹配行元素，按 columnMappings（`Col=@attr` / `Col=node` / `Col=node(xml)`）取值，建全 TEXT 列的表后逐行 INSERT，成功返回 1。dbName 未连接或文件缺失返回 0；映射/XML/SQL 失败抛 CodeEE（前缀「自定义 XML 导入失败」）。
+  source: fork-src Creator.Method.cs:10422-10429; SqlManager.cs:516-603; Creator.cs:426
   confidence: high
 - name: SQL_P_EXECUTE_NONQUERY
   category: other
@@ -2424,6 +2497,14 @@ functions:
   semantics: 与 SQL_EXECUTE_SCALAR_LONG 同语义（NULL/无行返 0），多出的实参按序绑定 @0、@1…。语料 qol_mushi.ERB:162-265 的 GET_* 系列、生活系统_隙间渔获.ERB:308-309。
   source: fork-src Creator.Method.cs:2699-2720; SqlManager.cs:238-273,275-276; Creator.cs:426
   confidence: high
+- name: SQL_P_EXECUTE_SCALAR_FLOAT
+  category: other
+  args: dbName, sql, [param0[, param1[, ...]]]
+  returns: float
+  side_effects: 读数据库（参数化）
+  semantics: 与 SQL_EXECUTE_SCALAR_FLOAT 同语义（NULL/无行返 0.0），多出的实参按序绑定 @0、@1…。
+  source: fork-src Creator.Method.cs:10752-10774; SqlManager.cs:238-282; Creator.cs:431
+  confidence: high
 - name: SQL_P_EXECUTE_SCALAR_STRING
   category: other
   args: dbName, sql, [param0[, param1[, ...]]]
@@ -2431,4 +2512,196 @@ functions:
   side_effects: 读数据库（参数化）
   semantics: 与 SQL_EXECUTE_SCALAR_STRING 同语义（NULL/无行返空串），多出的实参按序绑定 @0、@1…。语料 qol_portrait_map.ERB:57、71 一条语句绑 4 个参数（其中整数实参由 TOSTR 转换）。
   source: fork-src Creator.Method.cs:2722-2743; SqlManager.cs:238-273,278-279; Creator.cs:428
+  confidence: high
+- name: ENTITY_CREATE
+  category: entity
+  args: archetype
+  returns: int
+  side_effects: 创建实体
+  semantics: 按已声明 archetype 创建实体并返回 EntityId；失败返回 -1。archetype 未声明抛 CodeEE。归属包短 ID 取 archetype 的声明包（禁止默认 __core__、禁止按调用帧猜包）。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_DESTROY
+  category: entity
+  args: id
+  returns: int
+  side_effects: 删除实体并级联清关系边
+  semantics: 真删指定实体，成功返回 1、不存在/悬空/复用引用返回 0。槽位 generation 递增；组件 EntityRef 字段原值保留（不 cascade-null）。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_EXISTS
+  category: entity
+  args: id
+  returns: int
+  side_effects: 读取实体状态
+  semantics: 按 pkg+generation+slot 全位域判定实体是否存在，存在返回 1 否则 0；RETIRED 仍算存在。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_GET_STATE
+  category: entity
+  args: id
+  returns: int
+  side_effects: 读取实体状态
+  semantics: 返回生命周期三态（1=ACTIVE、2=INACTIVE、3=RETIRED）；不存在或悬空返回 0。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_SET_STATE
+  category: entity
+  args: id, state
+  returns: int
+  side_effects: 修改实体生命周期状态
+  semantics: 将实体置为 state（仅 1/2/3）；成功返回 1，实体不存在或 state 非法返回 0。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_GET_INT
+  category: entity
+  args: id, field
+  returns: int
+  side_effects: 读取实体组件字段
+  semantics: 读取实体组件整数字段；实体/字段不存在或字段类型不符返回 0。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_SET_INT
+  category: entity
+  args: id, field, value
+  returns: int
+  side_effects: 写入实体组件字段
+  semantics: 写入实体组件整数字段；成功返回 1，实体/字段不存在或类型不符返回 0（不隐式建列）。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_GET_STR
+  category: entity
+  args: id, field
+  returns: string
+  side_effects: 读取实体组件字段
+  semantics: 读取实体组件字符串字段；实体/字段不存在或字段类型不符返回空串。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_SET_STR
+  category: entity
+  args: id, field, value
+  returns: int
+  side_effects: 写入实体组件字段
+  semantics: 写入实体组件字符串字段；成功返回 1，实体/字段不存在或类型不符返回 0（不隐式建列）。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_ADD_REL
+  category: entity
+  args: from, kind, to
+  returns: int
+  side_effects: 新增关系边
+  semantics: 新增 from→to 的 kind 关系边；成功返回 1，端点不存在或边已存在返回 0；kind 未声明抛 CodeEE。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_DEL_REL
+  category: entity
+  args: from, kind, to
+  returns: int
+  side_effects: 删除关系边
+  semantics: 删除 from→to 的 kind 关系边；成功返回 1，边不存在返回 0；kind 未声明抛 CodeEE。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_HAS_REL
+  category: entity
+  args: from, kind, to
+  returns: int
+  side_effects: 读取关系边
+  semantics: 判定 from→to 的 kind 关系边是否存在，存在返回 1 否则 0；kind 未声明抛 CodeEE。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_QUERY_COUNT
+  category: entity
+  args: archetype, state
+  returns: int
+  side_effects: 读取实体集合
+  semantics: 返回指定 archetype 且处于 state 的实体数；state=0 表示不限，其余仅允许 1/2/3，越界抛 CodeEE；archetype 未声明抛 CodeEE。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_QUERY_FILL
+  category: entity
+  args: archetype, state, outArrName
+  returns: int
+  side_effects: 写入具名 ERB 数组
+  semantics: 将指定 archetype/state 的实体按 EntityId 升序写入目标帧的一维整型数组；容量足够返回实际写入数，容量不足截断并返回负总数。数组名按目标帧 NamePolicy 解析，拼错/非数组/维度不符/非整型抛 CodeEE 并带数组名；state 仅 0/1/2/3。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_QUERY_REL_COUNT
+  category: entity
+  args: id, kind, dir
+  returns: int
+  side_effects: 读取实体关系集合
+  semantics: 返回实体 id 的 kind 关系邻接数；dir=0 出边、1 入边，其它抛 CodeEE；kind 未声明抛 CodeEE。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_QUERY_REL_FILL
+  category: entity
+  args: id, kind, dir, outArrName
+  returns: int
+  side_effects: 写入具名 ERB 数组
+  semantics: 将实体 id 的 kind 关系邻接实体写入目标帧的一维整型数组；dir 仅 0 出边/1 入边；容量足够返回实际写入数，容量不足截断并返回负总数。数组名解析与溢出口径同 ENTITY_QUERY_FILL。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_PROJECT_CHARA
+  category: entity
+  args: id
+  returns: int
+  side_effects: 创建原生角色行并注水
+  semantics: 将实体投射为原生角色行，成功返回 charIndex；已投射幂等返回当前行号，失败返回 -1。投射桥未装配抛 CodeEE。运行时未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_UNPROJECT_CHARA
+  category: entity
+  args: id
+  returns: int
+  side_effects: 脱水、删除原生角色行并清扫指针
+  semantics: 将已投射实体退场，成功返回 1、未投射返回 0。先 sync 脱水，再删行并由行删除钩子维护映射，最后清扫 TARGET/ASSI/PLAYER 指针。投射桥未装配抛 CodeEE。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_TO_CHARA
+  category: entity
+  args: id[, expectedGeneration]
+  returns: int
+  side_effects: 读取角色行映射
+  semantics: 返回实体当前原生角色行号；未投射或无投射桥返回 -1。两参变体走世代校验通道，rosterGeneration 与 expectedGeneration 不符返回 -1（拒绝过期缓存）。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: CHARA_TO_ENTITY
+  category: entity
+  args: charIndex
+  returns: int
+  side_effects: 读取角色行映射
+  semantics: 返回原生角色行上的投射 EntityId；该行无投射实体或未装配投射桥返回 0（EntityIdCodec.NULL）。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ROSTER_GENERATION
+  category: entity
+  args: ''
+  returns: int
+  side_effects: 读取行排列世代
+  semantics: 返回角色行排列世代；行排列/删除（含退场删行）递增，尾部追加不递增。未装配投射桥返回 0。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: MOD_IS_ACTIVE
+  category: entity
+  args: packageId
+  returns: int
+  side_effects: 读取 Mod 激活态
+  semantics: Mod 激活返回 1，否则 0；未装配 Mod 激活判定返回 0。包名匹配口径由宿主实现决定。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: HAS_SUPER
+  category: entity
+  args: ''
+  returns: int
+  side_effects: 读取符号覆盖链
+  semantics: 当前函数有 super 覆盖链返回 1，否则 0；当前函数为空或未装配符号目录返回 0。
+  source: RT2 ABI-1（era-arch-v61u.md §7；core-vm EntityMethods.kt）
+  confidence: high
+- name: ENTITY_RAND
+  category: entity
+  args: id, salt
+  returns: int
+  side_effects: 无（纯函数派生）
+  semantics: 按实体身份位域（pkg+generation+slot 全位域）与 salt 确定性派生 64 位整数（SplitMix64 finalizer + FNV-1a 64，DeterministicDeriver）；同一 (id, salt) 跨存读/跨进程/跨设备逐位复现，不消耗全局 SFMT、不引入存档状态；槽位复用（generation 变）值必变。id 为空引用（0）抛 CodeEE；运行时未装配抛 CodeEE；悬空引用不拦（派生值是身份的纯函数，与内核存活态解耦）。ERB 面固定 purpose="erb"、ordinal=0，一个特征一个 salt；用途分域/一串取值走 Kotlin SDK DeterministicDeriver 全参面。原版无此函数（移植侧扩展）。
+  source: RT2 M4-5（era-arch-v61u.md §16/§17；core-vm DeterministicDeriver.kt + EntityMethods.kt）
   confidence: high

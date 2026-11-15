@@ -238,6 +238,53 @@ class ErrorReportTest {
         assertNull(ErrorReport.scriptLocationOf(null))
     }
 
+    // ---- scriptLocationOf：文件段（MODERN-R7-F1）------------------------
+
+    /**
+     * 报告正文的「函数名 文件 行N」：文件段来自 [CodeEE.scriptFile]（语句层捕获点盖章的
+     * 源文件显示名，非绝对路径），空格连接、缺哪段省哪段。
+     */
+    @Test
+    fun 脚本位置带文件段时按函数文件行号拼接() {
+        assertEquals(
+            "F ERB/X.ERB 行370",
+            ErrorReport.scriptLocationOf(CodeEE("x", funcName = "F", line = 369, scriptFile = "ERB/X.ERB")),
+        )
+        // 只有文件 + 行（无函数名）
+        assertEquals(
+            "ERB/X.ERB 行1",
+            ErrorReport.scriptLocationOf(CodeEE("x", line = 0, scriptFile = "ERB/X.ERB")),
+        )
+        // 只有函数 + 文件（无行号，不补假行号）
+        assertEquals(
+            "F ERB/X.ERB",
+            ErrorReport.scriptLocationOf(CodeEE("x", funcName = "F", scriptFile = "ERB/X.ERB")),
+        )
+        // 因果链内层同样读文件段
+        assertEquals(
+            "GET_TALENTNAME ERB/SUB/A.ERB 行370",
+            ErrorReport.scriptLocationOf(
+                IllegalStateException("装载失败", CodeEE("越界", funcName = "GET_TALENTNAME", line = 369, scriptFile = "ERB/SUB/A.ERB")),
+            ),
+        )
+    }
+
+    /**
+     * 无文件时输出逐字节不变（旧三例原样复钉），且同一错误过两次同串（不因重复取用漂移）。
+     */
+    @Test
+    fun 无文件时输出与旧串逐字相同且可重复取用() {
+        val noFile = CodeEE("越界", funcName = "GET_TALENTNAME", line = 369, pc = 682671)
+        assertEquals("GET_TALENTNAME 行370", ErrorReport.scriptLocationOf(noFile))
+        assertEquals("ONLY_NAME", ErrorReport.scriptLocationOf(CodeEE("x", funcName = "ONLY_NAME")))
+        assertEquals("行1", ErrorReport.scriptLocationOf(CodeEE("x", line = 0)))
+        val withFile = CodeEE("x", funcName = "F", line = 369, scriptFile = "ERB/X.ERB")
+        assertEquals(ErrorReport.scriptLocationOf(withFile), ErrorReport.scriptLocationOf(withFile))
+        assertEquals("F ERB/X.ERB 行370", ErrorReport.scriptLocationOf(withFile))
+        // scriptFile 参与报告正文，不参与 0 基行号（键面仍是 369）。
+        assertEquals(369, withFile.line)
+    }
+
     // ---- rootCauseOf：因果链最深层 --------------------------------------
 
     @Test

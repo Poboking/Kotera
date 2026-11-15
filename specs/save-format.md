@@ -164,6 +164,11 @@
   坏档不因「键不认识」被放过，见 `SaveUnknownKeySkipTest`）。
 - **迁移应用**：4.981 相对 4.980 删除的 3 个 SAVEDATA 声明（`MP_GRADE`/`P_AdjList`/`P_AdjListDone`，
   verify-notes §24.2）在旧档读入时按本节丢弃；4.981 新增的自然变量在旧游戏下读入同样丢弃。
+- **写侧不写回（A 案现状，2026-11-14 裁定）**：未知键读掉后不进变量池，下一次存档只遍历声明表
+  （写侧 `VariableData.cs:3980-3997`，移植侧 `SaveCapture.emitVariables` 同口径）
+  ⇒ **这些键下次存档后会从存档中移除**。原版与移植侧在这条读写不对称上同构，
+  不保留、不半保留、不写回；现状锁在 `SaveUnclaimedNoWriteBackTest`（core）。
+  若要改成透传回写（B 案），属 ADR-005「官方 bug 原样复刻」的例外，须先登记裁定、单独立波。
 
 ## 6. 实测勘误（a2-savechara，2026-10-19 实测）
 
@@ -230,3 +235,157 @@
   实际落盘文件名 = `chara_golden chara.dat`（E2E 临时 dump 实证）。
 - 影响的判据：GOLDEN_IO 的 IO-CHARAFILE 节（`FIND_CHARADATA=0` / `CHKCHARADATA=1` / `AFTER-LOAD` 无角色）。
   该文件非本 agent 所有权，按合同列为「需组长接线」。修法见交付报告。
+
+## 7. L15 例外登记（ADR-005）：顶层未认领键的原始切片回写（2026-11-14）
+
+> 本节是 §5.3「写侧不写回（A 案现状）」的**受控例外**，不修改 §5.3 的读面语义；
+> 裁定与判据 = `CONTRACT-RT2-UNCLAIMED-B1`（组长已登记 ADR-005 例外）。
+
+- **范围**：只做顶层 `normal` / `global` 域，只回写 `def == null` 的条目；`char` 域（角色块内）
+  与 EM 段**不在本波**，仍按 §5.3 原样丢弃。
+- **读侧**：`SaveFormat.read(bytes, keepKey)` 对 `keepKey` 判 false 的顶层条目，把
+  「类型字节 + 键名 + 值」的**原始编码切片**按原序收进 `SaveData.unclaimedVariables`；
+  不解析、不重编码，所以 §5.3 的「不建数组」根修（`SaveUnknownKeySkipTest`，306.8 MiB 声明量）
+  不回退。
+- **写侧**：`SaveCapture.emitNormal` / `emitGlobal` 与 `SaveFormat.writePayload` 在已知变量之后、
+  `EOF` 之前原样直写切片（`SaveWriter.raw`）；已知条目的字节/顺序不动。无切片 ⇒ 输出与改动前逐字节相同。
+- **跨档生命周期**：切片只随「读档 → 存档」存活（`store.aux` 槽 `save.unclaimed`）；
+  normal 域以 `lastLoadNo`（`VariableEvaluator.cs:2706`；`ResetData` 经 `SetDefaultValue`
+  `VariableData.cs:3511-3512` 复位）作失效闸，回标题/新局不会把旧档未知键带进新档。
+- **写回闸**：装载后又被声明（mod / ERH 补装）的键会被跳过，避免同名条目出现两次。
+- **失败面**：捕获/回写步骤异常 ⇒ 按原行为丢弃并留痕（`SaveDiagnostics.note`），不写半截档；
+  `OutOfMemoryError` 仍走既有求援重试链。文本格式（非 eratw 口径）不回写。
+- **原版对照**：读侧丢弃 `VariableData.cs:4081-4160`；写侧只遍历声明表
+  `VariableData.cs:3980-3997`（无回写设施）。本例外是移植侧增强，按 ADR-005 登记。
+
+## 8. L17 例外登记（ADR-005）：角色块未认领键的原始切片回写（2026-11-14）
+
+> 本节是 §5.3「写侧不写回（A 案现状）」的第二笔受控例外（第一笔见 §7），
+> 裁定与判据 = `CONTRACT-RT2-UNCLAIMED-B2`；不修改 §5.3 的读面语义与 §7 的顶层口径。
+
+- **范围**：普通存档（`FileType=NORMAL`）的**角色块内**未认领条目；`chara_*.dat`（CHARVAR）
+  与 EM 段**不在本波**（CHARVAR 是「追加角色」语义，按 `NO` 回写会串进别人的角色档）。
+- **身份绑定**：分桶键 = **该块内 `NO` 条目的数值**（`SystemLayout.charaInt0D` 第 2 项，
+  原版角色块首项整数条目），**不按块位置（pos）** —— 角色顺序/数量变化时位置绑定会把切片
+  挂到别人身上。块内 `NO` 缺失 / 重复 / 非整数标量，或两个以上块解出同一个 `NO`
+  （桶键撞车）⇒ **整块切片丢弃** + `SaveDiagnostics.note` 留痕（fail-closed）。
+- **读侧**：`SaveFormat.read(bytes, keepKey)` 在角色块里截「类型字节 + 键名 + 值」的原始编码，
+  按 `NO` 分桶收进 `SaveData.unclaimedCharacterVariables`；`droppedCharacterVariables`
+  的键名清单语义不变（报告只作内部读数，2026-11-15 起无玩家面上屏）。
+- **写侧**：`SaveCapture.emitNormal` 与 `SaveFormat.writePayload` 在**同一 `NO` 的角色块**
+  已知条目之后、`EOC` 之前原样直写（`SaveWriter.raw`）；当前 store 无该 `NO`
+  （角色被删/被替换）⇒ 该桶丢弃 + 留痕；不新建角色块、不改已知条目字节/顺序。
+- **跨档生命周期**：角色桶与 §7 的顶层 normal 桶共用 `store.aux` 槽（`save.unclaimed`）与
+  `lastLoadNo` 失效闸；`ResetData` 之后旧档的角色块切片不进入新局。
+- **失败面**：捕获/回写任一步异常 ⇒ 按原行为丢弃 + 留痕，不写半截档；
+  `OutOfMemoryError` 原样上抛给 `FileSystemOps.saveData` 的求援重试链。文本格式（非 eratw 口径）不回写。
+- **原版对照**：读侧 `VariableData.cs:4081-4160`；写侧 `CharacterData.cs:513-558`
+  （只遍历声明表，无回写设施）。本例外是移植侧增强，按 ADR-005 登记。
+
+### 8.1 相位口径（L23，`CONTRACT-RT2-UNCLAIMED-B2-PHASE`）
+
+> 角色块有**两段相位**：系统项（`Separator` 之前）与用户 `#DIM CHARADATA` 项（`Separator` 之后）。
+> §8 的「落 `EOC` 之前」只说了插入点，未说相位；L23 补上相位，不改 §8 的身份绑定与 fail-closed 规则。
+
+- **原版锚**：写侧 `CharacterData.SaveToStreamBinary` 先写系统项（`CharacterData.cs:601-663`），
+  只有 `UserDefCVarDataList.Count != 0` 才 `writer.WriteSeparator()`（`:666-668`）再写用户项，
+  最后 `writer.WriteEOC()`（`:686`）；读侧 `LoadFromStreamBinary` 用 `bool userDefineData`
+  （`:692`）记相位，`case EraSaveDataType.Separator:` 置位（`:718-720`）之后只认
+  `UserDefinedCharaVariableToken`（`:702-707`）。
+- **读侧**：`SaveFormat.readCharacterBlock` 以块内 `Separator` 为界，给每条未认领切片记
+  `SYSTEM` / `USER`（`UnclaimedCharaEntry.phase`）；相位错 = 同名变量将来被重新声明时落到
+  错误的查找分支而被丢（文件里有键、运行期读不到）。
+- **写侧**：`SaveCapture.emitNormal`（经 `CharaFileIO.emitCharacter` 的相位参数）与
+  `SaveFormat.writePayload` 把系统相位切片放在 `Separator` **之前**、用户相位切片放在
+  **之后**；当前块没有 `Separator` 但存在用户相位切片 ⇒ **补一个 `Separator`** 再写
+  （否则读侧按系统相位认它们）。不新建角色块、不改已知条目字节/顺序。
+- **零变化**：无未认领键的档逐字节不变；canonical 两相位夹具 `write(read(f)) == f`
+  逐字节不变（切片落回原相位）。物化入口（`SaveCapture.normal` / `global`）与流式入口逐字节一致。
+- **失败面**：相位判定/回写异常仍按 §8 口径丢弃切片 + `SaveDiagnostics.note`，不写坏档；
+  `OutOfMemoryError` 原样上抛。`chara_*.dat`（CHARVAR）仍不捕获。
+
+## 9. L28 例外登记（ADR-005）：EM 段未认领容器名的原始切片回写（2026-11-14）
+
+> 本节是 §5.3「写侧不写回」的第三笔受控例外（前两笔见 §7 顶层变量 / §8 角色块），
+> 裁定与判据 = `CONTRACT-RT2-UNCLAIMED-B3-EM`（上游 L19 RECON §1/§8 的 P0 裁定）；
+> 不修改 §5.3 的读面语义，也不动 §7/§8 的既有口径。
+
+- **范围**：`FileType=NORMAL` / `GLOBAL` 的 **EM 段**（`Map` / `Xml` / `DataTable` 三种条目）；
+  `chara_*.dat`（CHARVAR）与文本格式路**不在本波**。MAP/XML/DT 的函数语义（`MAP_*` / `XML_*` /
+  `DT_*`）零改动，`EmDataPools` 的池操作零改动。
+- **读侧**：`SaveFormat.read(bytes, keepKey)` **不变**（不筛 EM 段，未知容器读完即丢，§5.3 原口径）。
+  新增三参重载 `SaveFormat.read(bytes, keepKey, emKeepKey)`：`emKeepKey` 判 false 的容器名
+  **只走标签、不建值对象**，把「类型字节 + 容器名 + 值」的原始编码切片按原序收进
+  `SaveData.unclaimedEmData`；不解析、不重编码（未知 DT/Xml 的坏 XML 内容照样往返）。
+  被拒名字**不进** `droppedVariables`（EM 名不是变量，报告只收变量；报告自 2026-11-15 起
+  无玩家面上屏，见 §10 末段）。
+  为什么是三参重载而不是给旧函数加缺省参数：Kotlin 尾随 lambda 永远绑定最后一个形参，
+  加参会把全仓 `read(bytes) { 变量谓词 }` 的谓词悄悄变成 EM 谓词（实测 6 例立刻红）。
+- **写侧**：`SaveCapture.emitNormal` / `emitGlobal` 与 `SaveFormat.writePayload` 在
+  **已知 EM 条目之后、EM 段的 `EOF` 之前**逐条原样直写（`SaveWriter.raw`）；已知条目的
+  字节/顺序不动。无未知 EM 条目 ⇒ 输出与改动前逐字节相同（`sourceFile` 幂等短路仍命中）。
+- **写回闸 = 本档自己的声明表**：`emitNormal` 用 `SAVE_*`、`emitGlobal` 用 `GLOBAL_*`，即
+  `EmDataPools.emitSnapshot` 刚遍历的那张表。名字此刻在表内 ⇒ 活池已按活值写过一条，
+  切片跳过（避免同名两条）；名字只在**另一域**表里（读面接受集是 `Save* ∪ Global*` 并集，
+  `VariableData.cs:4099/4109/4119`）⇒ 本档不会写它，切片保留（按并集过滤会直接丢数据）。
+- **域与生命周期**：normal / global **分槽**（`SaveUnclaimedPassthrough` 的 em 两域）；
+  normal 域与顶层变量共用 `lastLoadNo` 闸（`ResetData` 后旧档 EM 切片不进新局），
+  global 域跨局（与 `GLOBAL` 变量同源）。`LOADDATA` / `LOADGLOBAL` 开头与既有的
+  `clearNormal` / `clearGlobal` 一起清 em 槽。
+- **失败面**：捕获/回写异常 ⇒ 按原行为丢弃 + `SaveDiagnostics.note`，不写半截档；
+  `OutOfMemoryError` 原样上抛给 `FileSystemOps.saveData` 的求援重试链。
+  文本格式（非 eratw 口径）不写 EM 段，`SaveTextFormat` 零改动。
+- **物化入口**：`SaveCapture.normal` / `global` → `materialize` 读回时 EM 接受集 = 本次发射用的
+  `EmDataNames`，于是 `SaveData.emData` 恰是已知条目、`SaveData.unclaimedEmData` 恰是切片，
+  与流式入口产物逐字节一致。
+- **原版对照**：读侧 `VariableData.LoadVariableBinary` 的 Map/Xml/DT 三支只接受
+  `Save* ∪ Global*`（`:4095-4124`，不在并集的名字读完值即丢）；写侧
+  `SaveEMDataToStreamBinary` / `SaveGlobalEMDataToStreamBinary` 只遍历声明名
+  （`:3936-3959` / `:3911-3934`），无回写设施。本例外是移植侧增强，按 ADR-005 登记。
+  触发面：4.981 的 `CSV/VarExtGameData.csv` 比 4.980 多一条 `SAVE_DTS, QOL_FISH_INSTANCE`
+  （钓鱼实例表），4.980 名字表读 4.981 档时它就是未知名。
+
+## 10 未认领键回写范围矩阵（B1 / B2 / B3-EM / 余量，2026-11-14）
+
+> 本节把「哪一域在**本仓**被保住、哪一域仍按原版丢弃、生命周期由谁清」集中到一页。
+> 各域的实现口径与失败面仍以 §7（顶层）、§8 + §8.1（角色块两相位）、§9（EM 段）为准，
+> 本节只做汇总与索引，不改那三节的语义。原版对照总口径见 §5.3（读掉即丢）与 §7 末
+> 「写侧只遍历声明表」。
+>
+> 口径：「未认领」= 当前游戏**没声明**的条目（读侧 `keepKey` / `emKeepKey` 判 false），
+> 不是坏档；「切片」= 类型字节 + 键名（EM 段为容器名）+ 值的原始编码，不解析、不重编码。
+> 「已声明」的条目始终按活值写一条，切片只补未声明面（写回闸 = `SaveUnclaimedPassthrough`
+> 的 `normalSlices` / `globalSlices` / `charaSlices` / `emSlices`，EM 域另由发射点按本档
+> `SAVE_*` / `GLOBAL_*` 名表过滤）。表内 `TODO(verify)` = 有代码/源码依据但缺实机取证，卡点随行。
+
+| 域 | 读侧行为 | 写侧行为 | 例外登记 | 残余 | owner lane |
+|---|---|---|---|---|---|
+| **顶层 normal 变量**（`saveNN.sav` 变量段） | `SaveFormat.read(bytes, keepKey)` 对 `keepKey=false` 的顶层条目截「类型字节 + 键名 + 值」原序收进 `SaveData.unclaimedVariables`；不解析、不建数组（`SaveUnknownKeySkipTest` 的 306.8 MiB 根修不回退） | `SaveCapture.emitNormal`（`emitUnclaimedSlices`）与 `SaveFormat.writePayload`：已知变量之后、`EOF` 之前 `SaveWriter.raw` 直写；写回闸跳过此刻已声明的键 | ADR-005 例外 ①：§7；`CONTRACT-RT2-UNCLAIMED-B1`（C# 读侧 `VariableData.LoadVariableBinary` `VariableData.cs:4081-4160`；写侧 `VariableData.SaveToStreamBinary` `:3980-3997`） | 切片只随「读档 → 存档」存活，`lastLoadNo` 闸见 §10.1；`LOADGAME` / `SAVEGAME` 宿主快照不携带 aux 槽（失败方向 = 不回写）；PC 实机对段尾追加条目的接受度 `TODO(verify)`（卡点：无 PC 往返环境） | L15 `lane-unclaimed` |
+| **顶层 global 变量**（`global.sav` 顶层；`var_*.dat` 同类域） | 同上（`SaveFormat.read` 对非 `CHARVAR` 类别都走同一顶层捕获），条目进 `SaveData.unclaimedVariables` | `SaveCapture.emitGlobal`（`emitUnclaimedSlices`）与 `SaveFormat.writePayload` 同一插入点；`globalSlices` **无**装载号闸（global 域跨局） | ADR-005 例外 ①：§7；`CONTRACT-RT2-UNCLAIMED-B1`（C# 写侧 `VariableData.SaveGlobalToStreamBinary` `:3961-3978`） | `RESETGLOBAL` 清 global 槽 = **已落 L32**（`CONTRACT-RT2-RESETGLOBAL-EM` + `ResetGlobalUnclaimedSlotTest`；复位后 `SAVEGLOBAL` 不再写回重置前的未知键）；`var_*.dat` 的宿主入口不在 eratw 常规路径，`TODO(verify)` 是否有玩家可见面 | L15 `lane-unclaimed`；槽清理 L32 `lane-resetglobal`（已落） |
+| **普通存档角色块 · 系统相位**（`Separator` 之前） | `SaveFormat.readCharacterBlock` 以块内 `Separator` 分相位；未认领切片记 `CharaPhase.SYSTEM`，按块内 `NO`（`SystemLayout.charaInt0D` 第 2 项）分桶，**不按块位置** | `SaveCapture.emitNormal` 的 `charaSlicePlan` → `CharaFileIO.emitCharacter`：同一 `NO` 的块内、最后一个系统项之后 `Separator` 之前 `raw` 直写 | ADR-005 例外 ②：§8 + §8.1；`CONTRACT-RT2-UNCLAIMED-B2` / `-B2-PHASE`（C# 写侧 `CharacterData.SaveToStreamBinary` `CharacterData.cs:513-558`；4.981 树相位 `:601-687`、`Separator` `:666-668`、`EOC` `:686`） | 块内 `NO` 缺失/重复/非整数、或两块解出同一 `NO` ⇒ 整块/整桶 fail-closed 丢弃 + `SaveDiagnostics.note`（§8）；`ADDVOIDCHARA` 伪角色 `NO=0` 与真角色同档的组合是否出现 `TODO(verify)`（卡点：缺含多伪角色的玩家档）；回写档在块尾的 PC 接受度 `TODO(verify)` | L17 `lane-unclaimed` + L23（相位） |
+| **普通存档角色块 · 用户相位**（`Separator` 之后，`#DIM CHARADATA`） | 同上，切片记 `CharaPhase.USER`（读侧 `bool userDefineData` 置位后只认 `UserDefinedCharaVariableToken`） | 同上；用户项之后 `raw`。当前块没有 `Separator` 但存在 USER 切片 ⇒ **补一个 `Separator`** 再写（否则读侧按系统相位认它们） | ADR-005 例外 ②：§8.1；`CONTRACT-RT2-UNCLAIMED-B2-PHASE`（4.981 树 `CharacterData.cs:692` / `:702-720`） | 相位错 = 「文件里有键、运行期读不到」；未知条目在块内的绝对位置不保留（只保证相位 + 桶内原序）；`NO` 撞桶规则同系统相位行 | L17 `lane-unclaimed` + L23（相位） |
+| **EM 段**（`Map` / `Xml` / `DataTable` 容器名） | 三参 `SaveFormat.read(bytes, keepKey, emKeepKey)`：`emKeepKey=false` 的容器名只走标签、不建值对象，「类型字节 + 容器名 + 值」原序收进 `SaveData.unclaimedEmData`；被拒名字**不进** `droppedVariables`（EM 名不是变量） | `SaveCapture.emitNormal` / `emitGlobal`（`emitUnclaimedEm`）与 `SaveFormat.writePayload`：已知 EM 条目之后、EM 段 `EOF` 之前 `raw`；写回闸 = **本档自己的** `SAVE_*` / `GLOBAL_*` 名字表（与 `EmDataPools.emitSnapshot` 同源） | ADR-005 例外 ③：§9；`CONTRACT-RT2-UNCLAIMED-B3-EM`（C# 读侧接受集 `VariableData.cs:4095-4124`；写侧 `SaveEMDataToStreamBinary` / `SaveGlobalEMDataToStreamBinary` `:3911-3959`） | normal / global **分槽**；normal 共用 `lastLoadNo` 闸；global 槽的 `RESETGLOBAL` 清理 = **已落 L32**；真实触发面 = 4.980/4.981 `CSV/VarExtGameData.csv` 的 `QOL_FISH_INSTANCE` 差；PC 实机接受度与未知 EM 值尺寸分布 `TODO(verify)` | L28 `lane-unclaimed`；槽清理 L32 `lane-resetglobal`（已落） |
+| **`chara_*.dat`（CHARVAR）** | **CHARVAR 自身未知键 = 仍不回写（L38 D）**：`CharaFileIO.load` 走二参 `SaveFormat.read(bytes) { 变量谓词 }`，不传 `emKeepKey`，也不捕获切片（`SaveFormat.decode` 的 `capture = fileType == NORMAL && keepKey != null`）；未认领键读完即丢（L38 D 案：保持原版「读完即丢」） | **`SAVECHARA` 导出面 = 消费普通存档 char 切片（L41，`NO` 唯一才写 / 未选中不写 / 相位回写）**：`SAVECHARA` 的 `CharaFileIO.emitCapture`（`capture` / `encode` 共用）按本次选中角色的**当前 `NO`** 取 `SaveUnclaimedPassthrough.charaSlicesOf` 的桶，`emitCharacter` 按相位写回（SYSTEM 在 `Separator` 前、USER 在后，缺 `Separator` 时补一个）；当前表里该 `NO` 不唯一 ⇒ 该角色不写 + `SaveDiagnostics.note`（fail-closed），未选中角色的桶不写（子集 = 快照）。CHARVAR 自身的未知键仍不捕获、不回写 | CHARVAR 自身：无（L38 D：保持原版丢弃，**不立** ADR-005 例外）；导出面消费普通存档 char 切片：ADR-005 例外 ② 的消费扩展（L41 `CONTRACT-RT2-SAVECHARA-CHARSLICES`） | CHARVAR 自身重启前置 = per-row generation + `COPYCHARA` 切片转移（L38 `RECON-RT2-CHARVAR` §0.1 / §3.6：`NO` 无法区分同号新实例；无 generation 会错挂、加 generation 又丢 wife 目标行）；`LOADDATA` 之后同一会话内才生效（`charaSlicesOf` 的 `lastLoadNo` 闸，§10.1）；CHARVAR 仍是**追加**语义（`LoadChara` 不清空角色表，§6.5 同文件）；`NO` 不唯一 / 角色被删或替换 ⇒ 宁可丢也不挂错人；第三方 mod 往 chara 档塞未知键的真机样本 `TODO(verify)` | L19 `lane-unclaimed`（CHARVAR 暂缓）+ L41 `lane-savechara-slices`（导出面消费） |
+| **文本格式路**（`SystemSaveInBinary=false`） | **未回写**：`SaveCodec.read` 的文本分支忽略 `SaveReadFilters`，`SaveTextFormat.read` 不筛键（未知条目作为普通条目进 `SaveData.variables`，`SaveData.droppedVariables` 恒空） | **未回写**：`SaveTextFormat.write` 无切片直写点；二进制 → 文本、文本 → 二进制都丢 EM 段与切片 | 无（L19 裁定「只登记不落码」，**不立**实现波） | 原版文本存档不写 EM 段（4.981 树 `VariableEvaluator.SaveToStream` `:2788-2805`；`SaveGlobal` 文本支 `:2866-2874` 不调 `SaveEMDataToStreamBinary`）；文本路同样不携带角色用户变量（`SaveTextFormat` 类 KDoc 差异 2）；eratw 实机为二进制 + GZip（§6.1），文本路是保守兼容面 | L19 `lane-unclaimed`（不立实现波） |
+| **EM STATIC 集合**（`STATIC_MAPS` / `STATIC_XMLS` / `STATIC_DTS`） | **不进档**：`EmSaveSets.staticSets` 认这三张名单，但不并入 `loadAccept`（读档接受集 = `Save* ∪ Global*`；`EmSaveSets` 类 KDoc） | **不回写**：`SaveEMDataToStreamBinary` / `SaveGlobalEMDataToStreamBinary` 只遍历 `Save*` / `GlobalSave*`，无 static 支 | 无（原版同口径，非 ADR-005 例外） | `RESETGLOBAL` 负责清：C# `VariableData.RemoveEMStaticData`（`VariableData.cs:4056-4079`；4.981 树 `:1344-1367`），移植侧 `EmDataPools.clear(store, em.staticSets)`（`StatementExecutor` 的 `RESETGLOBAL` 分支）；基语料 / DLC 全树 `RESETGLOBAL` 0 命中、第三方包是否调用 `TODO(verify)` | M4-N（静态池复位）+ L28（EM 域口径） |
+
+**玩家面上屏：无**（2026-11-15 退役）。原版 `LOADDATA` / `LOADGLOBAL` 对未声明键全程静默
+（`VariableData.LoadVariableBinary`：Int `VariableData.cs:1418-1421`、Str `:1424-1426`、
+数组/浮点 `:1430-1500`；`vToken == null` ⇒ `reader.ReadInt()` / `ReadIntArray(null, true)`，
+无 `ParserMediator.Warn`）。移植侧 M1-2 曾把三域清单经 `SaveRestoreCopy` 上屏；2026-11-15
+玩家事故（261017 旧档含 5 个已退役的 `#DIM SAVEDATA`，每次读档被喊「未载入」）后，
+`SaveRestoreCopy` / `SaveLoadHandoff.restoreRenderer` / `StatementExecutor.printRestoreNotice`
+整体退役，`RestoreReport` 只作内部读数（不再有壳层渲染器注入位）。
+`LoadStatementSilenceTest` 用语句层零输出 + 源码哨兵钉住这条（不许再长出第二套上屏通道）。
+
+### 10.1 生命周期闸（切片什么时候失效）
+
+| 闸 / 入口 | 触发点 | 失效面 | C# 锚 | 状态 |
+|---|---|---|---|---|
+| `lastLoadNo` | 每次 `LOADDATA` 成功置槽号（`FileSystemOps.loadData` 的 `store.lastLoadNo = no`） | normal 顶层（`normalSlices`）、角色桶（`charaSlices`）、EM normal（`emSlices(global=false)`）三域共用：装载号不等 ⇒ 一律不回写 | `VariableEvaluator.cs:2706`；初值 -1 见 4.981 树 `VariableData.cs:64` | 已落（L15 / L17 / L28） |
+| `LOADDATA` 开头 `clearNormal()` | 读到一半失败、或下一份档不认领任何键时，旧切片不得带进下一次存档 | normal + chara + em-normal 三槽整体清 | 原版 `LoadFromStreamBinary` 先复位再解析（§7 口径） | 已落（L15） |
+| `LOADGLOBAL` 开头 `clearGlobal()` | 文件存在、确认要重读时（文件不存在 ⇒ 原版不改状态，槽也不动） | global + em-global 两槽整体清 | `RemoveEMGlobalData()` 在打开文件之前（§9） | 已落（L15 / L28） |
+| `RESETDATA` | `FunctionCode.RESETDATA`（脚本 / 回标题可达） | `resetData()` → `resetValues()` 把 `lastLoadNo` 复位成 -1 ⇒ normal/char/em-normal 自动失效；EM `SAVE_*` 池同步清（`EmDataPools.clear(store, em.save)`） | 4.981 树 `Instraction.Child.cs:1955-1968` → `VariableEvaluator.ResetData`（`:1727-1744`）；`SetDefaultValue` 复位 `LastLoadNo`（`VariableData.cs:745`） | 已落 |
+| `RESETGLOBAL` | `FunctionCode.RESETGLOBAL` | `resetGlobalValues()` + `EmDataPools.clear(global)` + `EmDataPools.clear(staticSets)`；**未认领 global 槽（顶层 + EM）的清理 = 已落 L32** | 4.981 树 `Instraction.Child.cs:1970-1982` → `VariableEvaluator.ResetGlobalData`（`:1746-1755`）；`RemoveEMGlobalData` / `RemoveEMStaticData`（`VariableData.cs:4031-4079`） | 已落（L32：变量/EM 池 + 槽清理） |
+| 回标题 / 新开一局 | 语料 `TITLE.ERB:115` 的 `RESETDATA` 可达（与「新局」同一复位面） | 同 `RESETDATA`：旧档 normal/char/em-normal 切片不进入新局 | 同上 `ResetData`（`StatementExecutor` 的 `RESETDATA` 分支注释锚） | 已落（靠 `lastLoadNo` 闸，无需额外接线） |
+| 宿主快照 / 会话重建 | `SessionVault` 接回同一活 store | aux 槽**不进** VM / 宿主快照；重建后按「没有切片」处理（安全方向 = 不回写） | 无 C# 锚（移植侧宿主面） | `TODO(verify)`：是否把槽并入快照段（L15 交付已登记，卡点：需宿主快照格式裁定） |

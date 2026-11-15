@@ -38,7 +38,7 @@ class LedgerTest {
         return p
     }
 
-    /** 构造一条记录行（与 sweep.jsonl 同形状）。 */
+    /** 构造一条记录行（与 sweep.jsonl 同形状）；[file] 非 null 时按 sweep 的位置追加在行尾。 */
     private fun rec(
         fn: String,
         status: String,
@@ -46,12 +46,15 @@ class LedgerTest {
         line: Int = -1,
         pc: Int = -1,
         msg: String = "",
-    ): String = Jsonl.obj(
-        listOf(
+        file: String? = null,
+    ): String {
+        val fields = mutableListOf<Pair<String, Any?>>(
             "fn" to fn, "key" to fn, "status" to status, "cls" to cls,
             "line" to line, "pc" to pc, "msg" to msg, "steps" to 1, "elapsedMs" to 1,
-        ),
-    )
+        )
+        if (file != null) fields.add("file" to file)
+        return Jsonl.obj(fields)
+    }
 
     @Test
     fun fingerprintNormalizesDigitsAndWhitespace() {
@@ -118,6 +121,53 @@ class LedgerTest {
         assertTrue("新增 1 / 回归 1 / 修复 2 / 共有 1" in text, text)
         assertTrue("== 新增 NEW (1) ==" in text, text)
         assertTrue("== 回归 REGRESSED (1) ==" in text, text)
+    }
+
+    @Test
+    fun fileColumnDoesNotEnterFingerprintOrDiffOutput() {
+        // 同一批记录两份：一份带 file 列、一份不带 —— 指纹同值、`ledger diff` 输出逐字节相同。
+        // 本项钉的是「file 只是显示列」：把 file 拼进指纹材料（反向证明 B）这里必红。
+        fun diffText(base: Path, head: Path): String {
+            val buf = ByteArrayOutputStream()
+            val out = PrintStream(buf, true, Charsets.UTF_8)
+            assertEquals(0, Cli.run(arrayOf("ledger", "diff", "--base", base.toString(), "--head", head.toString()), out, System.err))
+            return buf.toString(Charsets.UTF_8)
+        }
+
+        val plainBase = writeJsonl(
+            "fp-base-plain.jsonl",
+            listOf(rec("FN1", "CODEEE", "CodeEE", 3, 7, "失败A"), rec("FN2", "PASS")),
+        )
+        val plainHead = writeJsonl(
+            "fp-head-plain.jsonl",
+            listOf(rec("FN3", "CODEEE", "CodeEE", 2, 4, "失败C"), rec("FN1", "PASS")),
+        )
+        val fileBase = writeJsonl(
+            "fp-base-file.jsonl",
+            listOf(
+                rec("FN1", "CODEEE", "CodeEE", 3, 7, "失败A", file = "ERB/A.ERB"),
+                rec("FN2", "PASS", file = "ERB/B.ERB"),
+            ),
+        )
+        val fileHead = writeJsonl(
+            "fp-head-file.jsonl",
+            listOf(
+                rec("FN3", "CODEEE", "CodeEE", 2, 4, "失败C", file = "ERB/C.ERB"),
+                rec("FN1", "PASS", file = "ERB/A.ERB"),
+            ),
+        )
+
+        fun fps(p: Path): Map<String, String> = CmdLedger.loadTerminal(p).values.associate {
+            it.key to Ledger.fingerprint(it.cls, it.fn, it.line, it.pc, it.msg)
+        }
+        assertEquals(fps(plainBase), fps(fileBase), "带不带 file 列，指纹必须同值")
+        assertEquals(fps(plainHead), fps(fileHead), "带不带 file 列，指纹必须同值")
+
+        val a = diffText(plainBase, plainHead)
+        val b = diffText(fileBase, fileHead)
+        assertEquals(a, b, "ledger diff 输出必须逐字节相同（file 不参与判定）")
+        assertTrue("file" !in a, "diff 行不新增 file 列：$a")
+        assertTrue("新增 1" in a, a)
     }
 
     @Test

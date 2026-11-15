@@ -8,6 +8,8 @@ import kotlin.test.assertTrue
 /**
  * 求值语义测试——每类运算至少 1 例；负数除法/取余、`+` 重载、三目结合性、
  * 比较链、省略索引变量引用各 1 例。
+ *
+ * 整数除零按 4.981 `SafeArithmetic.cs:67-89` 是「钳制 0 + 系统行」，不是 1.824 的抛错。
  */
 class ExprEvalTest {
 
@@ -43,10 +45,17 @@ class ExprEvalTest {
         assertEquals(0L, evalInt(parseOrThrow(listOf(i(-8), op("%"), i(2)))))
     }
 
+    /**
+     * 4.981 `SafeArithmetic.cs:67-89`：整数除/余在 `b == 0` 时 `PrintWarning` + 返回 0，
+     * **不再抛** `DivideByZero`（1.824 `OperatorMethodManager.cs:121-157` 的硬错通道作废；
+     * 调用点 `OperatorMethod.cs:374/:388`）。浮点支仍是硬错，见 `Binary.getFloatValue`。
+     */
     @Test
-    fun `除零报错`() {
-        assertFailsWith<ExprEvalException> { evalInt(parseOrThrow(listOf(i(1), op("/"), i(0)))) }
-        assertFailsWith<ExprEvalException> { evalInt(parseOrThrow(listOf(i(1), op("%"), i(0)))) }
+    fun `整数除零钳制为0并打印系统行`() {
+        val ctx = TestContext()
+        assertEquals(0L, evalInt(parseOrThrow(listOf(i(1), op("/"), i(0))), ctx))
+        assertEquals(0L, evalInt(parseOrThrow(listOf(i(1), op("%"), i(0))), ctx))
+        assertEquals(listOf("零除: 1 / 0", "零除: 1 \\ 0"), ctx.systemLines)
     }
 
     /**

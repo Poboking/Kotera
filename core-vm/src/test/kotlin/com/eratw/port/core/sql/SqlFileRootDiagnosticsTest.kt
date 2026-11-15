@@ -48,13 +48,45 @@ class SqlFileRootDiagnosticsTest {
     }
 
     /** 无根读数的自定义宿主桩（FileOps 不按根解析，`as? FileRootReadout` 落空）。 */
-    private class StubHost(override val fileOps: FileOps?) : BuiltinHost
+    private class StubHost(
+        override val fileOps: FileOps?,
+        override val sqlDriver: SqlDriver = NoopDriver(),
+    ) : BuiltinHost
 
     private class StubFiles : FileOps {
         override fun exists(path: String): Boolean = false
         override fun readText(path: String): String? = null
         override fun writeText(path: String, text: String, append: Boolean): Boolean = false
         override fun list(dir: String, pattern: String, recursive: Boolean): List<String> = emptyList()
+    }
+
+
+    /** 本类只验文件根读数；SQL 端口只需可连接，不在这里重复验证 SQL 语义。 */
+    private class NoopDriver : SqlDriver {
+        override fun open(connectionString: String): SqlConnection = NoopConnection()
+    }
+
+    private class NoopConnection : SqlConnection {
+        override fun prepare(sql: String): SqlStatement = NoopStatement()
+        override fun totalChanges(): Long = 0L
+        override fun lastChanges(): Long = 0L
+        override fun close() = Unit
+    }
+
+    private class NoopStatement : SqlStatement {
+        override val columnCount: Int = 0
+        override fun bind(index: Int, value: SqlBind) = Unit
+        override fun step(): Boolean = false
+        override fun reset() = Unit
+        override fun clearBindings() = Unit
+        override fun columnName(index: Int): String = ""
+        override fun columnType(index: Int): SqlColumnType = SqlColumnType.NULL
+        override fun isNull(index: Int): Boolean = true
+        override fun getLong(index: Int): Long = 0L
+        override fun getDouble(index: Int): Double = 0.0
+        override fun getText(index: Int): String = ""
+        override fun getBlob(index: Int): ByteArray = ByteArray(0)
+        override fun close() = Unit
     }
 
     private class Env(val ctx: BuiltinEvalContext, val store: VariableStore)
@@ -86,13 +118,13 @@ class SqlFileRootDiagnosticsTest {
         Files.write(gameRoot.resolve(rel), "<map><p><k>A</k><v>甲</v></p></map>".toByteArray(Charsets.UTF_8))
 
         // 游戏根 = 生产形状（会话宿主根取游戏根）：成功、**零留痕**。
-        val game = env(ConsoleBuiltinHost(gameRoot))
+        val game = env(ConsoleBuiltinHost(gameRoot, sqlDriver = NoopDriver()))
         assertEquals(1L, intOf(game.ctx, "SQL_CONNECT", q("TR_DB")))
         assertEquals(1L, intOf(game.ctx, "SQL_IMPORT_MAP_XML", q("TR_DB"), q("CSV_MAP"), q(rel)))
         assertTrue(FileReadTrail.trailLines(game.store).isEmpty(), "成功读一行都不许记（只加可见性）")
 
         // 沙盒根 = 2026-11-04 装置红的形状：同一句相对读落空。
-        val sandbox = env(ConsoleBuiltinHost(sandboxRoot))
+        val sandbox = env(ConsoleBuiltinHost(sandboxRoot, sqlDriver = NoopDriver()))
         assertEquals(1L, intOf(sandbox.ctx, "SQL_CONNECT", q("TR_DB")))
         val e = assertFailsWith<CodeEE> {
             intOf(sandbox.ctx, "SQL_IMPORT_MAP_XML", q("TR_DB"), q("CSV_MAP"), q(rel))
@@ -140,7 +172,7 @@ class SqlFileRootDiagnosticsTest {
     @Test
     fun `出根被拒的失败读写明越界闸拦截`() {
         val root = Files.createTempDirectory("eratw-outroot")
-        val env = env(ConsoleBuiltinHost(root))
+        val env = env(ConsoleBuiltinHost(root, sqlDriver = NoopDriver()))
         assertEquals(1L, intOf(env.ctx, "SQL_CONNECT", q("TR_DB")))
 
         val e = assertFailsWith<CodeEE> {
@@ -180,7 +212,7 @@ class SqlFileRootDiagnosticsTest {
     @Test
     fun `连续失败只保留最近十六条旧的先出环`() {
         val root = Files.createTempDirectory("eratw-ring")
-        val env = env(ConsoleBuiltinHost(root))
+        val env = env(ConsoleBuiltinHost(root, sqlDriver = NoopDriver()))
         assertEquals(1L, intOf(env.ctx, "SQL_CONNECT", q("TR_DB")))
         for (i in 0 until 20) {
             assertFailsWith<CodeEE> {
@@ -200,7 +232,7 @@ class SqlFileRootDiagnosticsTest {
     fun `掩码口径只保留根路径末两节`() {
         val root: Path = Files.createTempDirectory("eratw-mask").resolve("host-root")
         Files.createDirectories(root)
-        val env = env(ConsoleBuiltinHost(root))
+        val env = env(ConsoleBuiltinHost(root, sqlDriver = NoopDriver()))
         assertEquals(1L, intOf(env.ctx, "SQL_CONNECT", q("TR_DB")))
         assertFailsWith<CodeEE> {
             intOf(env.ctx, "SQL_IMPORT_MAP_XML", q("TR_DB"), q("CSV_MAP"), q("plugins/none.xml"))
@@ -214,7 +246,7 @@ class SqlFileRootDiagnosticsTest {
 
     @Test
     fun `未连接库返零不抛也不留痕`() {
-        val env = env(ConsoleBuiltinHost(Files.createTempDirectory("eratw-nodb")))
+        val env = env(ConsoleBuiltinHost(Files.createTempDirectory("eratw-nodb"), sqlDriver = NoopDriver()))
         assertEquals(0L, intOf(env.ctx, "SQL_IMPORT_MAP_XML", q("NO_DB"), q("CSV_MAP"), q("plugins/x.xml")))
         assertTrue(FileReadTrail.trailLines(env.store).isEmpty())
     }

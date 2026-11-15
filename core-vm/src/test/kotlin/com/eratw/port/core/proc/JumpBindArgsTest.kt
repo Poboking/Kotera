@@ -4,7 +4,6 @@ import com.eratw.port.core.code.CodeBuilder
 import com.eratw.port.core.code.Opcode
 import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.SlotAddr
-import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.ExprToken
 import com.eratw.port.core.expr.IdentifierResolver
@@ -18,7 +17,6 @@ import com.eratw.port.core.expr.parseOrThrow
 import com.eratw.port.core.vars.VariableStore
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 
 /**
  * R10 尾跳实参绑定回归测试 —— 锁住 `ProcessRuntime.bindArgs` 的"根帧槽为零 ⇒ 绑零等价"分支。
@@ -136,24 +134,23 @@ class JumpBindArgsTest {
     }
 
     /**
-     * 尾跳**同样**受 `ConvertArg` 的实参过多硬判约束 —— `JUMP`/`CALL` 在原版是同一个
-     * `CALL_Instruction.DoInstruction`（`isJump` 只是字段），两者都先过 `ConvertArg`
-     * （spec: FunctionIdentifier.cs:3592-3596 → CalledFunction.cs:136-140）。
+     * 尾跳**同样**静默丢弃超出被调 arity 的实参 —— `JUMP`/`CALL` 在真机宿主是同一个
+     * `SpCallArgment` 指令（`isJump` 只是字段），两者都过同一个 `ConvertArg`
+     * （4.981：`reference/emuera-skia-4.981/Emuera/Runtime/Script/Statements/Instraction.Child.cs:3795/3834`
+     * → `Process.CalledFunction.cs:212-357`，只按 `func.Arg.Length` 逐位转换）。
      *
-     * 旧实现 `jumpInto` 取 `argc=min(2,1)=1` **静默裁剪**，本例断言 5（ARG:1 保持 0）。
-     * 2026-10-26 起 `onFunctionEnter` 在建帧前先判 `argc > arity` ⇒ 抛 CodeEE，
-     * 文案 = zhs:901 `{0}函数: 参数过多`（`{0}` 不带 `@`）。
+     * 本例断言 5：ARG:0 绑到 5、ARG:1（超出被调 arity=1）保持 0。
+     * 1.824 口径（抛 `CALLEE函数: 参数过多`）的装置读数即 0.2.x 的引擎偏差本身。
      */
     @Test
-    fun `尾跳时超出被调 arity 的实参抛参数过多而非静默裁剪`() {
+    fun `尾跳时超出被调 arity 的实参静默丢弃`() {
         val store = VariableStore()
         val rt = runtime(
             tailProgram(store, tail = true, calleeArity = 1),
             store,
             listOf(calleeMeta(argInt = 1)),
         )
-        val e = assertFailsWith<CodeEE> { rt.execute() }
-        assertEquals("CALLEE函数: 参数过多", e.message)
-        assertEquals(0, store.callDepth(), "抛在建帧前 ⇒ 帧栈不泄漏")
+        assertEquals(5L, rt.execute(), "只绑 ARG:0=5；ARG:1 不参与求值")
+        assertEquals(0, store.callDepth(), "帧栈不泄漏")
     }
 }

@@ -103,6 +103,18 @@ class HtmlRunFlatten(
     fun interface ImageSizeSource {
         /** 返回 `width * 1 shl 16 or height` 的打包整数；查不到返回 null。 */
         fun destSize(resource: String): Int?
+
+        /**
+         * 该资源的**绘制帧此刻拿不拿得到**（MODERN-R12-DIVW2）：尺寸表命中而帧不可用时，
+         * [HtmlRunFlatten.emitImage] 落原版单出口（AltText 当文本接回行内、宽度按文本量，
+         * 显式 `width`/`height` 不生效 —— 与绘制侧缺帧回落 R9-B 同一把尺，判据见 core
+         * `CellWidth.imgWidthPxOrNull` 的唯一名下文档）。
+         *
+         * 缺省 true = 本来源**不接帧判定**：展平按「有帧」处理，宽度照旧按图宽入表
+         * （接线前旧读数；绘制侧的缺帧回落照旧在绘制时自行发生）。生产形状 =
+         * `SpriteBitmapSource`（platform）：它同时是尺寸源与帧源（`frameOf`），两边同源。
+         */
+        fun frameAvailable(resource: String): Boolean = true
     }
 
     private val out = ArrayList<TextRun>()
@@ -372,6 +384,11 @@ class HtmlRunFlatten(
                     ch == '<' -> tag()
                     ch == '&' -> entity()
                     else -> {
+                        // 条带只在**紧邻**的四参 rect 之间合并（core 的 `CellWidth.rectBandRun`
+                        // 同样在遇到任何文本时断开）。文本插在条带中间必须先落掉攒着的块，
+                        // 否则渲染把 6 块并成 1 个矩形、折行预算却按 3+3 两块算 —— 两把尺分叉，
+                        // 且这段文本会被挪到整条矩形之后（见 [appendRectBand] 的 KDoc）。
+                        if (rectBands.isNotEmpty()) flushRectBands()
                         text.append(ch)
                         pos++
                     }
@@ -380,9 +397,12 @@ class HtmlRunFlatten(
         }
 
         /** `<` 开头的一切：注释、开标签、闭标签；结构不合法时按原文吞掉这个 `<`（宽容）。 */
+        @Suppress("CyclomaticComplexMethod", "ReturnCount")
         private fun tag() {
             val start = pos
             if (src.startsWith("<!--", start)) {
+                // 注释同样不是条带内容（core 的扫描遇非 shape 标签即断）。
+                if (rectBands.isNotEmpty()) flushRectBands()
                 val end = src.indexOf("-->", start + 4)
                 pos = if (end < 0) src.length else end + 3
                 return
@@ -391,6 +411,7 @@ class HtmlRunFlatten(
             var i = if (close) start + 2 else start + 1
             while (i < src.length && !src[i].isWhitespace() && src[i] != '>' && src[i] != '/') i++
             if (i == start + (if (close) 2 else 1)) {
+                if (rectBands.isNotEmpty()) flushRectBands()
                 text.append('<')
                 pos = start + 1
                 return
@@ -398,6 +419,7 @@ class HtmlRunFlatten(
             val name = src.substring(if (close) start + 2 else start + 1, i)
             val end = findTagEnd(src, i)
             if (end < 0) {
+                if (rectBands.isNotEmpty()) flushRectBands()
                 text.append('<')
                 pos = start + 1
                 return
@@ -438,6 +460,8 @@ class HtmlRunFlatten(
         }
 
         private fun entity() {
+            // 实体解出来是可见文本，与 [scan] 的普通字符同一条「条带遇文本即断」判据。
+            if (rectBands.isNotEmpty()) flushRectBands()
             val semi = src.indexOf(';', pos + 1)
             if (semi < 0 || semi <= pos + 1) {
                 text.append('&')
@@ -515,6 +539,12 @@ class HtmlRunFlatten(
     }
 
     private fun openTag(name: String, attrs: Map<String, String>) {
+        // 条带的连续性判据：只有紧邻的 `shape` 标签才可能并入同一条带。`<br>` / `<p>` /
+        // `<div>` / 未知标签这类**零宽标签**在 core 的 `CellWidth.rectBandRun` 里同样会
+        // 断开扫描（它只认连续的可合并 shape），这里不 flush 就会出现「渲染跨标签合并、
+        // 折行预算分段」的两把尺。`shape` 自己分支内各形态分别处理（单参/错误形态走
+        // emitGraphic/flushCurrentText，本身就会 flush；四参 x==0 才继续攒条带）。
+        if (name != "shape") flushRectBands()
         // 改样式之前先把攒着的文字落成一段：原版扫到 `<` 就先用**当前**样式快照建一个
         // `ConsoleStyledString` 节点，之后才轮到 `tagAnalyze` 去改状态
         // （spec: `HtmlManager.cs:569-575` 的 `new ConsoleStyledString(str3, htmlAnalzeState.GetSS())`
@@ -608,6 +638,9 @@ class HtmlRunFlatten(
     }
 
     private fun closeTag(name: String) {
+        // 闭标签同样是「非条带内容」：core 的扫描遇到 `</…>` 会断开，这里先落条带，
+        // 避免 `</button>` 之后的内容被并进前一个条带（宽度与段序都会错位）。
+        flushRectBands()
         // 与 [openTag] 同一条理由：闭标签同样先断段，才改样式
         // （spec: `HtmlManager.cs:964-980` 的 `state.FontStyle ^= fontStyle`、
         //  `:998-1004` 的 `FonttagList.RemoveAt(末尾)`）。
@@ -660,6 +693,22 @@ class HtmlRunFlatten(
     /**
      * `<img>`：尺寸换算逐条照 `ConsoleImagePart.cs:66-82`，缺宽时按纵横比推。
      *
+     * ## 竖向：`height` 按字号、百分比 `ypos` 按行高（2026-11-03 立绘压字）
+     *
+     * `height` 两支与 `ypos` 的 `px` 支都按字号折（`ConsoleImagePart.cs:66,78,81`）。
+     * **百分比 `ypos` 是唯一的例外**：语料把它当「几行」写 —— `グラフィック表示.ERB:219` 用
+     * `100 × K × (一行の高さ / フォントサイズ)` 把行数折进百分比（本语料 18/18 ⇒ 一行 = 100 点），
+     * `PRINT_IMAGE` / `IMAGE2.ERB:604` / `INFO.ERB:1305` 的叠层同形。端口一行 = 行高
+     * （字号 × 19/18），不等于字号 ⇒ 照字号折会每挂一行欠 `行高 − 字号`（41/43 档 2px/行），
+     * 叠层或挂图累积后图底越进下面的文字、或被原版补铺语义画在文字之上。
+     * `height` **不能**跟着换尺：`height='180px'` 与 `height='1000'` 必须同高
+     * （`HtmlRunFlattenTest` 的「真机档下 px 与百分比折成同一个高」与
+     * `PortraitRowGapTest` 的空档判据），换尺会把两者拆成 410 / 430 两个数。
+     *
+     * TODO(verify)：百分比 `ypos` 的「行」语义以语料 `FONT SIZE == LINE HEIGHT` 为前提；
+     * 玩家把两键配成不等时这一支会残留 `K × 行高 × (1 − LINE/字体)` 的偏移。要收干净
+     * 得把 `Config.LineHeight` 也报进渲染层（`GameSession` 现在只报字号）。
+     *
      * **不做任何横向夹取**：原版 `destRect` 就是 `(0, top, Width, num)`（`ConsoleImagePart.cs:82`），
      * 宽度只由 `height` / `width` 两个属性与基图纵横比决定，与窗口宽无关。图比窗口宽时原版
      * 的处置是「整块排到下一行 + 右侧被绘制区裁掉」：`ConsoleImagePart.CanDivide => false`
@@ -703,7 +752,7 @@ class HtmlRunFlatten(
         val height = mixedNum(attrs["height"])
         val width = mixedNum(attrs["width"])
         val ypos = mixedNum(attrs["ypos"])
-        val lineHeight = metrics.fontPixelSize
+        val fontPx = metrics.fontPixelSize
         val base = if (src.isEmpty()) null else sizeSource?.destSize(src)
         val baseHeight = base?.and(0xFFFF) ?: 0
         // 原版单出口（`ConsoleImagePart.cs:60-65`）：图元取不到 ⇒ `Text = AltText`，整段
@@ -715,10 +764,19 @@ class HtmlRunFlatten(
             emitImageAltText(attrs)
             return
         }
+        // 缺帧面（MODERN-R12-DIVW2）：尺寸命中而绘制时**帧拿不到**（R9-B 已把画回落到
+        // AltText）⇒ 与 miss 同一条单出口：AltText 当文本接回行内、显式 width/height 不生效、
+        // 宽度按文本量 —— 量与画同一把尺。判据唯一名下 = core `CellWidth.imgWidthPxOrNull`
+        // 的文档表（本函数消费同一判据，不许另写一份）；`frameAvailable` 缺省 true =
+        // 尺寸源未接帧判定 ⇒ 保持图宽旧读数（接线前行为，绘制侧回落照旧自行发生）。
+        if (base != null && sizeSource != null && !sizeSource.frameAvailable(src)) {
+            emitImageAltText(attrs)
+            return
+        }
         val heightPx = when {
-            height == null || height.num == 0 -> lineHeight
+            height == null || height.num == 0 -> fontPx
             height.isPx -> scriptPx(height.num)
-            else -> lineHeight * height.num / 100
+            else -> fontPx * height.num / 100
         }
         // 显式 width 走 [graphicSize]（脚本尺主路）；缺 width 的纵横比回落没有脚本 px
         // 可言，照旧设备尺。
@@ -744,10 +802,15 @@ class HtmlRunFlatten(
         val flipY = heightPx < 0
         val layoutW = kotlin.math.abs(widthPx)
         val layoutH = kotlin.math.abs(heightPx)
+        // 百分比 `ypos` 在语料里是「几行」的另一种写法（见 emitImage 的 KDoc）：
+        // 端口一行 = 行高 ≠ 字号，必须按行高折。Long 中间量与 [CellMetrics.scriptPixels]
+        // 同一条「不许 Int 回绕」的纪律。
         val yOffsetPx = when {
             ypos == null -> 0
             ypos.isPx -> scriptPx(ypos.num)
-            else -> ypos.num * lineHeight / 100
+            else -> (ypos.num.toLong() * metrics.lineHeight / 100)
+                .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong())
+                .toInt()
         }
         emitGraphic(
             InlineGraphic.Image(
@@ -766,7 +829,44 @@ class HtmlRunFlatten(
                 mappingResource = attrs["srcm"]?.takeIf { it.isNotEmpty() },
                 flipX = flipX,
                 flipY = flipY,
+                // 原版构造期**无条件**重建 AltText（`ConsoleImagePart.cs:44-59`），命中支同样
+                // 带着它；绘制侧 sprite 取不到 / 未创建时按 `:168,175-182` 画这串。
+                // 少了这个字段，缺帧回落（headless 的 drawChildImage、Canvas 的 drawImage /
+                // drawDivImage）就没有可画的文案 —— 官方那屏有字、端口这屏全空。
+                //
+                // 只在尺寸源已接线（宿主能判「图元在不在」）时填：未接线是登记过的「见方
+                // 占位」档，这一档连 miss 都判不了，altText 保持 null 让缺帧回落退化为接入前
+                // 的静默。R12-DIVW2 起缺帧面（尺寸命中、帧拿不到）在展平期就落 TEXT
+                // （[emitImageAltText] 同一条单出口）—— 帧判定已接线（frameAvailable 答 false）
+                // 的标签根本走不到本命中支；未接帧判定的来源（frameAvailable 缺省 true）仍按
+                // 本支展平成图，altText 供绘制侧回落用。生产 HTML 路恒带尺寸源（见 ConsoleFeed），
+                // 因此线上行为不缺这一支。
+                altText = if (sizeSource != null) imageAltText(attrs) else null,
             ),
+        )
+    }
+
+    /**
+     * `<img>` 的 AltText 重建（spec: `ConsoleImagePart.cs:44-59`，格式 `Utils.AddTagArg`
+     * `:457-462` / `AddTagMixedNumArg` `:364-371`）。
+     *
+     * **单源**：[emitImage] 命中支的 [InlineGraphic.Image.altText] 与 [emitImageAltText]
+     * 的 miss 回落文案是同一份重建结果 —— 同一标签在「命中但缺帧」与「图元 miss」两条
+     * 链上必须逐字符同串（原版只有构造期那一次 `stringBuilder` 拼装）。
+     * 属性值取展平层解析出的原文（[parseAttrs] 不解实体），百分比按脚本字号归一
+     * （`Config.FontSize` 语义，见 [InlineGraphic.imgAltText] 的 KDoc）。
+     */
+    private fun imageAltText(attrs: Map<String, String>): String {
+        fun pair(raw: String?): Pair<Long, Boolean>? =
+            mixedNum(raw)?.let { it.num.toLong() to it.isPx }
+        return InlineGraphic.imgAltText(
+            resource = attrs["src"] ?: "",
+            buttonResource = attrs["srcb"]?.takeIf { it.isNotEmpty() },
+            mappingResource = attrs["srcm"]?.takeIf { it.isNotEmpty() },
+            height = pair(attrs["height"]),
+            width = pair(attrs["width"]),
+            ypos = pair(attrs["ypos"]),
+            fontSizePx = if (scriptFontPixelSize > 0) scriptFontPixelSize else metrics.fontPixelSize,
         )
     }
 
@@ -785,18 +885,8 @@ class HtmlRunFlatten(
         // miss 的 img 也是 pos 组的首段内容（与 [emitShapeAltText] 同判：标签本身入 list 即建按钮）。
         padForPos()
         flushCurrentText()
-        fun pair(raw: String?): Pair<Long, Boolean>? =
-            mixedNum(raw)?.let { it.num.toLong() to it.isPx }
-        val alt = InlineGraphic.imgAltText(
-            resource = attrs["src"] ?: "",
-            buttonResource = attrs["srcb"]?.takeIf { it.isNotEmpty() },
-            mappingResource = attrs["srcm"]?.takeIf { it.isNotEmpty() },
-            height = pair(attrs["height"]),
-            width = pair(attrs["width"]),
-            ypos = pair(attrs["ypos"]),
-            fontSizePx = if (scriptFontPixelSize > 0) scriptFontPixelSize else metrics.fontPixelSize,
-        )
-        out.add(TextRun(alt, fore, back, styleMask, fontName, RunKind.TEXT))
+        // 重建口径是 [imageAltText] 的单源（与命中支的 altText 字段同一串）。
+        out.add(TextRun(imageAltText(attrs), fore, back, styleMask, fontName, RunKind.TEXT))
     }
 
     /**
@@ -1010,6 +1100,12 @@ class HtmlRunFlatten(
      * 单块（纯色条、`PRINT_RECT` 那种大块）不参与合并，口径与改前逐像素一致。
      */
     private fun appendRectBand(x: Float, y: Float, w: Float, h: Float, colorArgb: Int) {
+        // 条带**开始**前先把前面的文本落成段：`flushRectBands` 走 `emitGraphicRun`
+        // （不碰 text 缓冲），若文本还攒在手里，矩形会抢在文本之前出段，把
+        // `HTML_PRINT " " + HTML_RECT_BAR(...)` 这类「文本 + 条」混排的段序颠倒
+        // （语料 `UI_Components_&_Tables.ERB:1303` 等 5 处直印条）。core 的折行预算
+        // 按原序累加，段序也必须按原序。放在这里覆盖 x==0 与 x!=0 两条入口。
+        if (rectBands.isEmpty() && text.isNotEmpty()) flushCurrentText()
         if (x != 0f) {
             flushRectBands()
             rectBands.add(RectBand(x, y, w, h, colorArgb))

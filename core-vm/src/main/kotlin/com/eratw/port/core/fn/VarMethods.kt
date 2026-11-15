@@ -1,5 +1,7 @@
 package com.eratw.port.core.fn
 
+import com.eratw.port.core.compat.EngineProfileData
+import com.eratw.port.core.compat.NicknameKeywordPolicy
 import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.ExprEvalException
@@ -14,6 +16,7 @@ import com.eratw.port.core.lexer.LexError
 import com.eratw.port.core.lexer.LexEndWith
 import com.eratw.port.core.stmt.toExprToken
 import com.eratw.port.core.expr.ExprParser
+import com.eratw.port.core.expr.toCodeEE
 import com.eratw.port.core.vars.SystemLayout
 import com.eratw.port.core.vars.VariableStore
 
@@ -763,7 +766,7 @@ private fun getVarValue(c: BuiltinContext, argExprs: List<Expr?>, wantStr: Boole
         throw CodeEE("函数 $fn：${e.message}")
     } catch (e: ExprEvalException) {
         // 动态解析失败统一按 CodeEE 报告（spec: FunctionMethodCreator.cs:377-436 GetVarMethod）
-        throw CodeEE("函数 $fn：${e.message}")
+        throw e.toCodeEE(messagePrefix = "函数 $fn：")
     } catch (e: ExprParseException) {
         throw CodeEE("函数 $fn：${e.message}")
     }
@@ -786,8 +789,33 @@ private fun getVarValue(c: BuiltinContext, argExprs: List<Expr?>, wantStr: Boole
  * 查找序与 C# 一致：用户变量查 ERD 表（`NAME` / `NAME@[dimSuffix]`），系统变量查
  * 内建 29 槽 CSV 表（[SystemLayout.keywords]）。未命中返回 null，调用方按原版
  * 折成 -1 / 空串，**不抛错**。
+ *
+ * `NAME`/`CALLNAME`/`RELATION`/`NICKNAME`/`MASTERNAME` 走第一跳 `relationDic`
+ * （spec: `ConstantData.cs:867-877`）：前三名四树都路由；后两名只在
+ * [com.eratw.port.core.compat.NicknameKeywordPolicy.WITH_NICKNAME_MASTERNAME] 档路由
+ * （v24 的 `GetKeywordDictionary` 有这两个 case，:876-877；em/snake/cs 没有，
+ * :1075-1076 / :1454-1455 / :1091-1092）。未路由 = 第一跳缺席 ⇒ null ⇒ -1，
+ * 与 v24 之外的 `TryKeywordToInteger` 失败分支同值。注意查的是**整张** relationDic：
+ * `GETNUM(MASTERNAME, "Alice")` 在 v24 命中 Name 列也返回编号（C# 四名共用一个字典）。
+ *
+ * 名单本体不在本文件：路由组 / 门控组各读生成物常量
+ * [EngineProfileData.RELATION_ROUTED_KEYWORDS] / [EngineProfileData.RELATION_GATED_KEYWORDS]
+ * （input yaml `dialect.getnum_nickname_mastername.keywords`，E4），与装载期折叠面
+ * `relationFoldTables` 同一对常量。
  */
 private fun VariableStore.keywordIndexOf(varName: String, dimSuffix: Long?, keyword: String): Long? {
+    val upperName = varName.uppercase()
+    when {
+        // 名单单源：input yaml `dialect.getnum_nickname_mastername.keywords` → 生成物常量
+        // （与装载期折叠面 `relationFoldTables` 读同一对常量，E4）。
+        upperName in EngineProfileData.RELATION_ROUTED_KEYWORDS -> return relationIndex(keyword)
+        upperName in EngineProfileData.RELATION_GATED_KEYWORDS ->
+            return if (config.nicknameKeywords == NicknameKeywordPolicy.WITH_NICKNAME_MASTERNAME) {
+                relationIndex(keyword)
+            } else {
+                null
+            }
+    }
     if (userVar(varName) != null) {
         return userKeywordTableBySuffix(varName, dimSuffix)?.get(keyword)?.toLong()
     }

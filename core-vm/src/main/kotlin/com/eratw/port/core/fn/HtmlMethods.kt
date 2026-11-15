@@ -302,6 +302,11 @@ data class ConsolePrintedLine(
  *   同时喂 sink 与 [BuiltinHost.fontSize]）。0（缺省）= 不接图形，读数与收口前逐位一致。
  * @param imageSizeOf `<img>` 缺 `width` 时按基图纵横比推宽的尺寸源（[ImageSizePx]）；
  *   null（缺省）= 宿主未接线，缺 width 的图元计 0 格（见 [consolePrintedLine] 的 KDoc）。
+ * @param frameAvailableOf 绘制帧可用查询（MODERN-R12-WIRE）：尺寸表命中而绘制时帧拿不到
+ *   ⇒ 图元按 AltText 文本量宽（缺帧面判据唯一名下 = `CellWidth.imgWidthPxOrNull`）；
+ *   null（缺省）= 宿主未接线，宽度保持图宽旧读数。生产装配点从 sink 现取
+ *   （[com.eratw.port.core.proc.ConsoleBuiltinHost] 喂 `sink?.frameAvailableOf`），
+ *   与折行/行内游标同一份数据源。
  * @param fontSize 回读链的**配置字号**（`Config.FontSize`，`ConfigData.cs:66` 缺省 18）：
  *   [htmlSegmentReadback] 重建 `<img>` 的 AltText 时，非 px 的 height/width/ypos 按
  *   `num * fontSize / 100` 归一。缺省 = 出厂 18（未接线调用点与改动前读数逐值相同）。
@@ -319,6 +324,7 @@ internal fun consolePrintedLines(
     imageSizeOf: ((String) -> ImageSizePx?)? = null,
     fontSize: Long = BuiltinHost.DEFAULT_FONT_SIZE,
     focusColor: Int = LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
+    frameAvailableOf: ((String) -> Boolean)? = null,
 ): List<ConsolePrintedLine> = object : AbstractList<ConsolePrintedLine>() {
     override val size: Int get() = lines.size
     override fun get(index: Int): ConsolePrintedLine = consolePrintedLine(
@@ -328,6 +334,7 @@ internal fun consolePrintedLines(
         imageSizeOf,
         fontSize,
         focusColor,
+        frameAvailableOf,
     )
 }
 
@@ -443,6 +450,7 @@ internal fun consolePrintedLine(
     imageSizeOf: ((String) -> ImageSizePx?)? = null,
     fontSize: Long = BuiltinHost.DEFAULT_FONT_SIZE,
     focusColor: Int = LineBufferConsoleSink.DEFAULT_FOCUS_COLOR,
+    frameAvailableOf: ((String) -> Boolean)? = null,
 ): ConsolePrintedLine {
     val segments = line.segments
     // 两套口径分开算，别混用（混用会把按钮列坐标算坏）：
@@ -479,10 +487,13 @@ internal fun consolePrintedLine(
     // HTML 段走 [CellWidth.visibleHtmlCells]（图形感知；[graphicFontPx] 为 0 时只算文本），
     // 非 HTML 段仍是 [CellWidth.of]。旧写法对 HTML 段量 `visible[i]`（剥标签后的文本），
     // `<img>`/`<shape>` 记 0 格 ⇒ 段列偏小、按钮开在错段（见函数 KDoc 的「段列坐标」节）。
+    // [frameAvailableOf] 与折行/游标同一数据源喂入（MODERN-R12-WIRE）：缺帧面在回读列坐标
+    // 与 sink 排版两侧同尺 —— 漏喂这参，回读列保持图宽而 sink 折行按 AltText 文本宽，
+    // HTML_GETPRINTEDSTR / GETDISPLAYLINE 的按钮包裹位置就与屏上错位。
     val widths = IntArray(segments.size) { i ->
         val seg = segments[i]
         if (seg.kind == LineBufferConsoleSink.Kind.HTML) {
-            CellWidth.visibleHtmlCells(seg.text, graphicFontPx, imageSizeOf)
+            CellWidth.visibleHtmlCells(seg.text, graphicFontPx, imageSizeOf, frameAvailableOf)
         } else {
             CellWidth.displayCells(seg.text)
         }

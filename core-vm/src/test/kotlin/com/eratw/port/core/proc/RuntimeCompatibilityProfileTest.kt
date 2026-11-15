@@ -1,6 +1,12 @@
 package com.eratw.port.core.proc
 
 import com.eratw.port.core.code.ResolverPolicy
+import com.eratw.port.core.compat.EngineDialect
+import com.eratw.port.core.compat.EngineFamily
+import com.eratw.port.core.compat.EngineProfileData
+import com.eratw.port.core.compat.NicknameKeywordPolicy
+import com.eratw.port.core.compat.RelationMasternamePolicy
+import com.eratw.port.core.compat.StringCompareDialect
 import java.lang.reflect.Modifier
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -8,15 +14,16 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 /**
- * M1-0：`RuntimeCompatibilityProfile` 的形状与默认值闸（era-arch-v61u.md §9）。
+ * `RuntimeCompatibilityProfile` 的形状与默认值闸（era-arch-v61u.md §9；ENGC-2 扩到十个字段）。
  *
- * 这一批**只落类型**，所以断言只能是「形状对不对、缺省值是不是现行行为」——接线后的
- * 行为对拍归 M1/M2-2。闸的三条主张：
+ * 断言只覆盖「形状对不对、缺省值是不是现行行为」——行为对拍归各消费点（ENGC-3/5）。闸的
+ * 三条主张：
  *
  * 1. **profile 只装枚举**：出现 Boolean/String/List 字段 = 长出自由旋钮，正是反模式；
- * 2. **六个 facet + 版本声明就是全部字段**：加第七个字段必须显式改这里（评审点）；
+ * 2. **十个 facet + 版本声明就是全部字段**：加第十一个字段必须显式改这里（评审点）；
  * 3. **版本不泄进策略**：4.980/4.981 两档只许差 `corpusVersion`，Modern 只许翻转
- *    `functionResolution` —— 任何「读版本号在消费点分叉」都会先在这里红。
+ *    `functionResolution`（家族与方言也不许动，D8）—— 任何「读版本号在消费点分叉」都会
+ *    先在这里红。
  */
 class RuntimeCompatibilityProfileTest {
 
@@ -29,17 +36,21 @@ class RuntimeCompatibilityProfileTest {
         "lazyLoading",
         "reload",
         "saveLoad",
+        "engineFamily",
+        "stringCompare",
+        "nicknameKeywords",
+        "relationMastername",
     )
 
     @Test
-    fun `profile 的字段恰好是六个 facet 加版本声明且全部是枚举`() {
+    fun `profile 的字段恰好是十个 facet 加版本声明且全部是枚举`() {
         // 实例字段 = data class 的属性；Companion 的工厂常量是 static 字段，不算 facet。
         val fields = RuntimeCompatibilityProfile::class.java.declaredFields
             .filterNot { it.isSynthetic || Modifier.isStatic(it.modifiers) }
         assertEquals(
             expectedFields.sorted(),
             fields.map { it.name }.sorted(),
-            "字段集合 = §9 的六个 facet + corpusVersion（多一个字段就是多一个旋钮）",
+            "字段集合 = §9 的十个 facet + corpusVersion（多一个字段就是多一个旋钮）",
         )
         for (f in fields) {
             assertTrue(
@@ -69,6 +80,61 @@ class RuntimeCompatibilityProfileTest {
             assertEquals(LazyLoadingPolicy.EAGER_ONLY, p.lazyLoading, "Legacy 档：$p")
             assertEquals(ReloadPolicy.RE_REGISTER, p.reload, "Legacy 档：$p")
             assertEquals(SaveLoadPolicy.RESET_THEN_PARSE, p.saveLoad, "Legacy 档：$p")
+            // ENGC-2/4 的四项：eraTW 档恒为 snake 的已取证方言（4.981 实跑口径）。
+            assertEquals(EngineFamily.SNAKE_4981, p.engineFamily, "Legacy 档：$p")
+            assertEquals(StringCompareDialect.FIXED, p.stringCompare, "Legacy 档：$p")
+            assertEquals(NicknameKeywordPolicy.NAME_CALLNAME_ONLY, p.nicknameKeywords, "Legacy 档：$p")
+            assertEquals(RelationMasternamePolicy.EXCLUDED, p.relationMastername, "Legacy 档：$p")
+        }
+    }
+
+    @Test
+    fun `缺省构造逐字段等于 LEGACY_ERATW_4981`() {
+        // ENGC-2 的第一验收项：新字段全部带缺省 ⇒ 装配方不传的任何旧调用点行为不变。
+        assertEquals(
+            RuntimeCompatibilityProfile.LEGACY_ERATW_4981,
+            RuntimeCompatibilityProfile(CorpusVersion.V4_981, ResolverPolicy.LEGACY_LAST_WINS),
+        )
+    }
+
+    @Test
+    fun `LEGACY 档与构造默认参的三个方言 facet 吃生成物 DIALECT`() {
+        // CONTRACT-ENGCPL §3.1 E3：三个方言值只有一个出处（input yaml → 生成物 DIALECT）。
+        // 手抄回调 = 换引擎必须重抄，本用例先红。
+        val family = EngineProfiles.DEFAULT_TARGET.family
+        val dialect = EngineProfileData.DIALECT.getValue(family)
+        for (p in listOf(RuntimeCompatibilityProfile.LEGACY_ERATW_4980, RuntimeCompatibilityProfile.LEGACY_ERATW_4981)) {
+            assertEquals(family, p.engineFamily, "Legacy 档的家族：$p")
+            assertEquals(dialect.stringCompare, p.stringCompare, "Legacy 档的比较方言：$p")
+            assertEquals(dialect.nicknameKeywords, p.nicknameKeywords, "Legacy 档的昵称面：$p")
+            assertEquals(dialect.relationMastername, p.relationMastername, "Legacy 档的 RELATION 逆引面：$p")
+        }
+        val bare = RuntimeCompatibilityProfile(CorpusVersion.V4_981, ResolverPolicy.LEGACY_LAST_WINS)
+        assertEquals(
+            dialect,
+            EngineDialect(bare.stringCompare, bare.nicknameKeywords, bare.relationMastername),
+            "构造默认参必须逐字段等于 DIALECT[缺省家族]",
+        )
+        assertEquals(family, bare.engineFamily, "构造默认家族必须等于缺省档家族")
+    }
+
+    @Test
+    fun `现代档不改变引擎家族与方言`() {
+        // D8：Modern 改的是符号解析，不是运行哪家引擎。
+        for (v in CorpusVersion.values()) {
+            val modern = RuntimeCompatibilityProfile.modern(v)
+            assertEquals(EngineFamily.SNAKE_4981, modern.engineFamily, "Modern($v) 的家族")
+            assertEquals(StringCompareDialect.FIXED, modern.stringCompare, "Modern($v) 的比较方言")
+            assertEquals(
+                NicknameKeywordPolicy.NAME_CALLNAME_ONLY,
+                modern.nicknameKeywords,
+                "Modern($v) 的昵称关键字面",
+            )
+            assertEquals(
+                RelationMasternamePolicy.EXCLUDED,
+                modern.relationMastername,
+                "Modern($v) 的 RELATION 逆引口径",
+            )
         }
     }
 

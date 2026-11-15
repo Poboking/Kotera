@@ -66,6 +66,10 @@ import org.junit.jupiter.api.io.TempDir
  * 出现对账清单里的差/缺/多。故凡**随池面走**的读数一律 `when (CorpusProfile)` 取列
  * （见 [CorpusColumns]），不再写死 4.981 一列 —— 两个根都必须是绿的。
  * 随样本字节走的读数（540 条全局条目、25 条全局档条目、168 个角色块等）两根同值，保留单常量并注明。
+ *
+ * 唯一例外是 4.981 列的写回条数：L15（`RT2-UNCLAIMED-B1`，ADR-005 例外，
+ * `specs/save-format.md` §7）起**未认领顶层键**也被原样回写 ⇒ 749→751
+ * （`P_AdjList`/`P_AdjListDone`）。该列因此另带两条语义锁，逐项依据见 [columnsOf]。
  */
 class SaveRoundTripTest {
 
@@ -217,6 +221,23 @@ class SaveRoundTripTest {
     }
 
     /**
+     * 语义锁 ①：未认领顶层键（[unclaimedPassthroughKeys]）必须**原样回写** —— 存在性 + 值逐项相等。
+     *
+     * 为什么不能只数条数：`writtenGlobalCount = 751` 是「540 − 3 + 212 + 2」的净值，
+     * 把它改要求成 749 就能「消红」，而 749 恰好是撤掉 L15 例外后的读数 ——
+     * 本锁把「这两个键被带回写回档」钉成独立判据（回退 L15 后 `b[k]` 为 null 即红），
+     * 防止未来为了计数器变绿去撤已裁定的 ADR-005 例外。
+     */
+    private fun assertUnclaimedPassthrough(orig: SaveData, back: SaveData) {
+        val o = byKey(orig.variables)
+        val b = byKey(back.variables)
+        for (k in unclaimedPassthroughKeys) {
+            assertNotNull(o[k], "样本档应含未认领顶层键 $k（否则本锁没有判据）")
+            assertEquals(o[k], b[k], "未认领键 $k 应被原样回写（ADR-005 例外，spec §7）")
+        }
+    }
+
+    /**
      * 4.981 语料升版后，老档（4.980 时代）经 4.981 变量池写回被改形/丢弃的**对账清单**
      * （= [CorpusColumns.globalOrigSideDrift] 的 4.981 列；4.980 列是空集，见 [columnsOf]）。
      * 每条都有语料出处，全部是「池按 4.981 注册面重写」的预期行为、不是引擎回归：
@@ -243,6 +264,23 @@ class SaveRoundTripTest {
         "差 BIRD_COND", "差 BIRD_FAVORITE", "差 BIRD_ID",
         "差 GLOBAL_BONUS", "差 NEW_SAVE_MARK",
     )
+
+    /**
+     * 4.981 池面里**不注册**、但由 L15（`RT2-UNCLAIMED-B1`，ADR-005 例外）**原样回写**的顶层键。
+     *
+     * 出处：4.980 语料 `魔改内容/qol/qol_skipmove.ERH:2/:4` 的 `#DIM SAVEDATA` 全局声明，
+     * 在 4.981 语料里整文件移除（4.981 全库无同名声明）⇒ 变量池里没有它们；
+     * L15 改了读侧（`FileSystemOps.loadData` 捕获未认领顶层条目）与写回
+     * （`SaveUnclaimedPassthrough` 段尾原样回写，闸 = `registry.def == null && userVar == null`），
+     * 故写回档里它们仍在。原版相反（`VariableData.cs:1374-1381` 未知键读掉即丢、
+     * `:1260-1273` 写侧只遍历声明表）⇒ 这是**已裁定的有意偏离**（`specs/save-format.md` §7）。
+     *
+     * 与 [SAVE_CORPUS_DRIFT] 的关系：那份清单冻结在 2026-11-06 的形态、仍列着这两条「缺」
+     * （它的条目文本是 detekt 冻结签名的一部分，改一个字符就要动 baseline，故不改）；
+     * [columnsOf] 的 4.981 列把它们从允许集**扣掉**，于是「回写回归 ⇒ 又出现缺」仍照旧判红，
+     * 本常量另配两条语义锁断言「值逐项等于原档」。
+     */
+    private val unclaimedPassthroughKeys: List<String> = listOf("P_AdjList", "P_AdjListDone")
 
     /**
      * 角色面的同源对账清单：
@@ -299,10 +337,24 @@ class SaveRoundTripTest {
     )
 
     /**
-     * 两列读数。4.980 列 = 本路 2026-11-06 在 `ERATW_GAMEDIR=…/eratw-画蛇添足版eratw4.980`
+     * 两列读数。4.980 列 = savecorpus 波 2026-11-06 在 `ERATW_GAMEDIR=…/eratw-画蛇添足版eratw4.980`
      * 下**实读**（写回 save00.sav：`back.variables.size`=540、`diffBlocks` 原档侧空、
      * 角色块差异空、额外角色字段空；写回 global.sav：25→25 无差异、`GLOBAL_BONUS` 12→12）；
-     * 4.981 列 = 合流头实测的原钉值（本路未改读数）。
+     * 4.981 列 = **751 = 749 + 2**，两项依据如下（2026-11-14 L34 在 4.981 根实读 751）：
+     *
+     * 1. `749`（save 族 2026-11-01 落 540→749 时的读数）= 540 − 3 + 212：样本档 540 条里
+     *    3 条在 4.981 全局面**缺**（`P_AdjList`/`P_AdjListDone` 的声明随
+     *    `魔改内容/qol/qol_skipmove.ERH` 整文件移除；`MP_GRADE` 改 `CHARADATA`），
+     *    另 212 条是 4.981 新注册的全局 `SAVEDATA` 面（写侧按池面落格 ⇒ 写出面「多」）。
+     * 2. `+2` = L15 `RT2-UNCLAIMED-B1`（2026-11-14，ADR-005 例外，
+     *    `specs/save-format.md` §7）：读侧把**未认领顶层键**捕获、段尾原样回写 ⇒
+     *    `P_AdjList`/`P_AdjListDone` 由「缺」变「保留」；`MP_GRADE` 因名字仍注册
+     *    （只是不再进全局段）不进回写集 ⇒ 净 +2。
+     *
+     * 原版**不会**回写未知键（`VariableData.cs:1260-1273` 写侧只遍历声明表、
+     * `:1374-1381` 读侧未知键读掉即丢），故 +2 是**有意偏离**；[真实存档经变量池写盘后逐项一致]
+     * 因此带两条语义锁，断言这两条的值与原档逐项相等 —— 数量断言只是读数，
+     * 回退 L15 会让锁先红，避免「为了 749 变绿而撤掉已裁定的例外」。
      */
     private fun columnsOf(profile: CorpusProfile): CorpusColumns = when (profile) {
         // 4.980 列：样本档与池同代 ⇒ 写回逐项全等。实读出处见本函数 KDoc。
@@ -315,10 +367,12 @@ class SaveRoundTripTest {
             globalBonusTailZeros = 0,
             note = "4.980 池面 = 样本同代，写回应逐项全等（2026-11-06 实读）",
         )
-        // 4.981 列：池按新增 SAVEDATA 面重写样本 ⇒ 下表逐条对账（合流头实测）。
+        // 4.981 列：池按新增 SAVEDATA 面重写样本 + L15 未认领键回写 ⇒ 下表逐条对账（751 = 749 + 2）。
         CorpusProfile.V4_981 -> CorpusColumns(
-            writtenGlobalCount = 749,
-            globalOrigSideDrift = SAVE_CORPUS_DRIFT,
+            writtenGlobalCount = 751,
+            // `SAVE_CORPUS_DRIFT` 冻结在 2026-11-06 的形态，仍列着两条已由 L15 回写覆盖的「缺」；
+            // 这里把它们**扣掉**，使「回写回归 ⇒ 原档侧又出现缺」照旧落进下面的子集判定（红）。
+            globalOrigSideDrift = SAVE_CORPUS_DRIFT - unclaimedPassthroughKeys.map { "缺 $it" }.toSet(),
             charaOrigSideDrift = CHARA_CORPUS_DRIFT,
             extraCharaFields = EXTRA_CHARA_FIELDS_981,
             globalSaveDiffLines = setOf(
@@ -328,7 +382,7 @@ class SaveRoundTripTest {
                 "全局 多 KOJO_PRESET_NAME",
             ),
             globalBonusTailZeros = 4,
-            note = "4.981 池面把 4.980 时代样本按新注册面重写（对账清单见 SAVE_CORPUS_DRIFT 等）",
+            note = "4.981 池面把 4.980 时代样本按新注册面重写，并回写未认领顶层键（751 = 749 + 2）",
         )
     }
 
@@ -536,6 +590,8 @@ class SaveRoundTripTest {
         )
         assertEquals("RANDDATA", orig.variables.first { it.key == "RANDDATA" }.key, "真档全局块含 RANDDATA")
 
+        assertUnclaimedPassthrough(orig, back) // 语义锁 ①：751 只是计数，值相等才是语义
+
         // 角色块：原档的每个条目都必须原样写回（角色面语料漂移见 CHARA_CORPUS_DRIFT）
         val charDiffs = ArrayList<String>()
         for (i in 0 until orig.characters.size) {
@@ -568,6 +624,14 @@ class SaveRoundTripTest {
         assertEquals(text, back.text, "描述文本")
 
         // 写出的档必须被现有探测路径判 OK（类别 / 游戏码 / 版本三重校验）
+        assertProbeOk(written, text)
+    }
+
+    /**
+     * 写出的档必须被现有探测路径（[SaveDataProbe.checkBytes]）判 OK：
+     * 类别 / 游戏码 / 版本三重校验，且探测到的描述等于写入的描述。
+     */
+    private fun assertProbeOk(written: ByteArray, text: String) {
         val probe = SaveDataProbe.checkBytes(written, SaveFileKind.NORMAL, GameBaseData(gameCode = 7153L))
         assertEquals(EraDataState.OK, probe.state, "写出的 save20.sav 应被 CHKDATA 判 OK：${probe.mes}")
         assertEquals(text, probe.mes, "探测到的描述应等于写入的描述")

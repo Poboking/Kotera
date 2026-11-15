@@ -1,0 +1,59 @@
+; ---------------------------------------------------------------------------
+; RANDSF 语料镜像片段（261111 语料 ERB/魔改内容/Misc.ERB 的 RANDSF 函数原文照抄）。
+;
+; 目的：证明 RANDSF 在本引擎编译链上与官方定义同语义 —— 它是语料自带的 ERB 用户
+; 函数（#FUNCTION），不是内建；引擎只需支持用户函数的表达式位重入执行。
+; 镜像段逐字来源 = Misc.ERB 1 基 320-343 行（@RANDSF 函数头到 RETURNF）；注释块
+; 同步照抄。全局见证变量 R1..R6 与驱动函数 RANDSF_DRIVER 是本测试新增。
+; ---------------------------------------------------------------------------
+
+#DIM R1
+#DIM R2
+#DIM R3
+#DIM R4
+#DIM R5
+#DIM R6
+
+;-------------------------------------------------
+;函数名:@RANDSF(ARG,ARG:1)
+;概　要:带符号的随机偏移值生成
+;参　数:ARG   = 随机幅度参数
+;          ＞0 时，每次生成 0～ARG 的随机值并累加
+;          ＜0 时，以 1/(1-ARG) 的概率累加 1
+;       ARG:1 = 随机次数（权重）
+;          绝对值表示随机执行次数
+;          符号决定返回值的正负
+;返回值:返回根据 ARG 与 ARG:1 生成的随机偏移值,可能为正数或负数
+;-------------------------------------------------
+@RANDSF(ARG,ARG:1)
+#LOCALSIZE 1
+#LOCALSSIZE 1
+#DIM RESULT_SIGN
+#FUNCTION
+LOCAL = 0
+RESULT_SIGN = 1
+IF ARG:1 < 0
+	ARG:1 = -ARG:1
+	RESULT_SIGN *= -1
+ENDIF
+IF ARG > 0
+	WHILE ARG:1 > 0
+		ARG:1 --
+		LOCAL += RAND:(1+ARG)
+	WEND
+ELSEIF ARG < 0
+	WHILE ARG:1 > 0
+		ARG:1 --
+		SIF !RAND:(1-ARG)
+			LOCAL += 1
+	WEND
+ENDIF
+RETURNF LOCAL * RESULT_SIGN
+
+@RANDSF_DRIVER
+R1 = RANDSF(40, 5)
+R2 = RANDSF(-10, 100)
+R3 = RANDSF(5, -3)
+R4 = RANDSF(40, 0)
+R5 = RANDSF(0, 5)
+R6 = RANDSF(1, 3)

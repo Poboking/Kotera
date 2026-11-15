@@ -1,7 +1,59 @@
 package com.eratw.port.core.expr
 
+import com.eratw.port.core.compat.StringCompareDialect
+
 /** 求值期错误。对应原版 CodeEE（ExpressionParser.cs 各处 throw）。 */
-class ExprEvalException(message: String) : RuntimeException(message)
+class ExprEvalException(
+    message: String,
+    /**
+     * 算术错误（除零 / 取模）的**取证面**，逐字段口径见 [com.eratw.port.core.err.CodeEE] 的同名参数。
+     *
+     * 为什么本异常也要带（而不是在 `Binary` 里直接抛 CodeEE）：表达式层**没有**函数名 / 行号 /
+     * pc / 源文件这四样现场，就地抛 CodeEE 会得到一个「有位置但只有半截」的异常
+     * （`ProcessRuntime.stampPosition` 见到 `line >= 0` 就直接返回、不再补文件），
+     * 现场反而比现在更差。所以仍按既有链路 `ExprEvalException` → 捕获点
+     * [toCodeEE] 转 CodeEE，只把这三个字段随异常带走。
+     *
+     * ## 求值序约束（为什么 operandA 常为 null）
+     * `DIV`/`MOD` 的原版求值序是**先取除数、判零抛错、再取被除数**
+     * （spec: OperatorMethodManager.cs:121-157，`DivIntInt` 在 :131 先取 `arguments[1]`、
+     * :132-135 判零、:136 才取 `arguments[0]`）。抛错时被除数**尚未求值**：
+     * 为了取证再补一次 `left.getIntValue()`，会在 `RAND:10 / 0`、`计数++ / 0` 这类形态上
+     * 多消耗一次 RNG / 多写一次变量 —— 那是改变求值语义，不是取证。故只在左子树**无副作用**
+     * （见 `Expr.isSideEffectFree`）时才补读，否则留 null。
+     */
+    val operandA: Long? = null,
+    /** 除数；口径同 [operandA]。 */
+    val operandB: Long? = null,
+    /** 二元表达式源码形态重建；口径同 [operandA]。 */
+    val exprText: String? = null,
+) : RuntimeException(message)
+
+/**
+ * 求值期错误 → 带现场的 [com.eratw.port.core.err.CodeEE]，并把算术取证面（[operandA] /
+ * [operandB] / [exprText]）原样带走。
+ *
+ * 所有「捕获 `ExprEvalException` 再转 CodeEE」的站点都该走本函数，而不是各自
+ * `CodeEE(e.message ?: ...)` —— 后者会把取证字段静默丢在一层之外，症状是
+ * 「抛点填了、报告里没有」。
+ */
+fun ExprEvalException.toCodeEE(
+    fallbackMessage: String = "表达式求值失败",
+    funcName: String? = null,
+    line: Int = -1,
+    pc: Int = -1,
+    scriptFile: String? = null,
+    messagePrefix: String = "",
+): com.eratw.port.core.err.CodeEE = com.eratw.port.core.err.CodeEE(
+    messagePrefix + (message ?: fallbackMessage),
+    funcName,
+    line,
+    pc,
+    scriptFile = scriptFile,
+    operandA = operandA,
+    operandB = operandB,
+    exprText = exprText,
+)
 
 /**
  * 求值时变量存取的唯一入口（M2 提供真实实现，测试用假实现注入）。
@@ -287,4 +339,15 @@ interface EvalContext {
 
     /** 系统行输出（仅 `-(-9223372036854775808)` 溢出警告用到）。spec: OperatorMethodManager.cs:561-564 */
     fun printSystemLine(message: String) {}
+
+    /**
+     * 字符串关系比较方言（ENGC-4，[com.eratw.port.core.expr.strCompare] 的唯一消费者）：
+     * `LEGACY_BOTH_LT` = v24 的 `>=`/`<=` 都编译成 `(compare < 0)`（spec:
+     * OperatorMethod.cs:487,518）；`FIXED` = `>=`/`<=` 用 `c >= 0` / `c <= 0`
+     * （snake spec: :547,578；em :478,509）。
+     *
+     * 缺省 [StringCompareDialect.FIXED] = 4.981 实跑口径（eraTW 零干扰）；显式目标档由
+     * 装配方经 [com.eratw.port.core.proc.RuntimeCompatibilityProfile.stringCompare] 下传。
+     */
+    val stringCompareDialect: StringCompareDialect get() = StringCompareDialect.FIXED
 }

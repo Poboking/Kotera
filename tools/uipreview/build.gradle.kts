@@ -4,6 +4,10 @@
 // 入口用 application 插件：installDist 后 tools/uipreview/build/install/uipreview/bin/uipreview <子命令>。
 plugins {
     alias(libs.plugins.kotlin.jvm)
+    // 壳层预览（2026-11-11）：Compose 件的桌面渲染口（Compose Desktop/Skiko）——
+    // 画布帧走本模块既有 AWT 链，Compose 壳层（右栏常用区/指令盘/设置卡）走这两件。
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.compose.multiplatform)
     application
 }
 
@@ -48,4 +52,40 @@ tasks.withType<Test>().configureEach {
     // 才生效 —— Gradle 命令行 -D 只落在 daemon，必须在这里转交给 worker。
     System.getProperties().filterKeys { it is String && it.startsWith("eratw.") }
         .forEach { (k, v) -> systemProperty(k as String, v as String) }
+}
+
+// ---------------------------------------------------------------------------
+// 壳层预览源（2026-11-11）：把 app 里**零 Android 依赖**的两个 Compose 件原样拷进本模块编译。
+//
+// 为什么是「拷源码」而不是「依赖 app 模块」：app 是 Android 模块（AGP），纯 JVM 工具模块
+// 依赖不了它；而这两件本身只用 androidx.compose 的公共 API，Compose Multiplatform 的桌面
+// 产物提供**同名同包**的实现 ⇒ 同一份源码在两端都能编译，单一来源、不维护副本。
+// ---------------------------------------------------------------------------
+val shellPreviewSrc = layout.buildDirectory.dir("generated/shell-preview/kotlin")
+val copyShellPreviewSources by tasks.registering(Sync::class) {
+    from("../../app/src/main/kotlin/com/eratw/port/android/RailOptionRules.kt")
+    from("../../app/src/main/kotlin/com/eratw/port/android/QuickMacroUi.kt")    // 设置页三张长名单卡（2026-11-12 紧凑化预览）：卡片源码逐件拷入，不维护副本。
+    // 这些件都只用 Compose 公共 API + core-vm 的配置表，Android 侧没有依赖。
+    from("../../app/src/main/kotlin/com/eratw/port/android/SettingsStrings.kt")
+    from("../../app/src/main/kotlin/com/eratw/port/android/SettingsCardKit.kt")
+    from("../../app/src/main/kotlin/com/eratw/port/android/SettingsListPolicy.kt")
+    from("../../app/src/main/kotlin/com/eratw/port/android/RailFilterCard.kt")
+    from("../../app/src/main/kotlin/com/eratw/port/android/RailPinnedCard.kt")
+    from("../../app/src/main/kotlin/com/eratw/port/android/RailQuickMacroCard.kt")
+    from("../../app/src/main/kotlin/com/eratw/port/android/MacroDraft.kt")
+    from("../../app/src/main/kotlin/com/eratw/port/android/ui/EratwInk.kt")
+    into(shellPreviewSrc)
+}
+kotlin {
+    sourceSets["main"].kotlin.srcDir(shellPreviewSrc)
+    sourceSets["test"].kotlin.srcDir(shellPreviewSrc)
+}
+tasks.named("compileKotlin") { dependsOn(copyShellPreviewSources) }
+tasks.named("compileTestKotlin") { dependsOn(copyShellPreviewSources) }
+
+dependencies {
+    // Compose Desktop（当前 OS 的 Skiko 产物）：只在 test 面用（渲染验证），不进 CLI 运行时。
+    implementation(compose.desktop.currentOs)
+    implementation(compose.material3)
+    implementation(compose.foundation)
 }

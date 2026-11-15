@@ -6,17 +6,17 @@
 # rust-meta-parity 的代价读数：Kotlin / Rust 两腿 × 小语料 / 全量语料。
 # 用法：bash build/meta-parity/run.sh [small|full|all]
 set -u
-export JAVA_HOME='C:\DSH\eratw-安卓移植计划\.tooling\jdk-17.0.20.1+1'
+export JAVA_HOME='<JDK17>'
 export PATH="$JAVA_HOME/bin:$PATH"
-RS="C:/DSH/eratw-android-fixbug-haruki/eratw-android/tools/erbcc-rs"
-REPO_WIN='C:\DSH\eratw-android-fixbug-haruki\eratw-android'
+RS="${ERATW_ERBCC_RS:-../tools/erbcc-rs}"
+REPO_WIN='<REPO>'
 LIB="$RS/../erbcc/build/install/erbcc/lib"
 CPWIN="$LIB/annotations-13.0.jar;$LIB/core-vm-0.1.0-SNAPSHOT.jar;$LIB/erbcc-0.1.0-SNAPSHOT.jar;$LIB/kotlin-stdlib-2.0.20.jar"
 JAVA_EXE="$JAVA_HOME/bin/java.exe"
 SMALL_CASE="$RS/build/meta-parity/small-case"
 SMALL_CORPUS="$RS/tests/data/rust-sidecar-fuzz/corpus/ERB"
 FULL_CASE="$RS/build/baseline/full"
-FULL_CORPUS_WIN='C:\DSH\eratw-安卓移植计划\eratw-画蛇添足版eratw4.980\ERB'
+FULL_CORPUS_WIN='<CORPUS-ERB>'
 
 mkdir -p "$SMALL_CASE"
 rm -rf "$SMALL_CASE/erbc.v1"

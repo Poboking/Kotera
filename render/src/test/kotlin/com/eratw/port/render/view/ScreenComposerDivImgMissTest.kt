@@ -16,14 +16,16 @@ import kotlin.test.assertTrue
  * div 子行里的 `<img>` 图元 **miss**：尺寸源接进 `ScreenComposer` 后按 AltText 当文本画
  * （`ConsoleImagePart.cs:60-65` + `:104-115`）。
  *
- * 判据与可观测量：
- * - 未接尺寸源（[ScreenComposer] 的缺省）⇒ 展平成 IMAGE 段、绘制侧查不到 sprite 就
- *   静默跳过（`ConsoleImagePart.cs:168` 的 `IsCreated` 守卫；headless 对图形段本来不铺墨）
+ * 判据与可观测量（三档形态，MODERN-R9-B 起齐备）：
+ * - 未接尺寸源（[ScreenComposer] 的缺省）⇒ 展平成 IMAGE 段、`altText` 恒 null ⇒ 绘制侧
+ *   查不到 sprite 保持静默（`ConsoleImagePart.cs:168` 守卫不成立、且生产侧没给文案）
  *   ⇒ **整段无墨**；
  * - 接上尺寸源且查表未命中 ⇒ 展平成 TEXT 段、内容是重建的 AltText，行走普通字形路径
- *   ⇒ 行条上出现前景色字形块。
+ *   ⇒ 行条上出现前景色字形块；
+ * - **尺寸已知、帧仍取不到**（sprite 名查不到 / 未创建，`ConsoleImagePart.cs:168,175-182`）
+ *   ⇒ 绘制侧把 `altText` 当文本画在裸 PointX / 裸 pointY ⇒ 同样出现字形块。
  *
- * 这条差别正是「同一标签在两条链读数一致」的可视化面：core 的折行/回读把 miss 的 img
+ * 后两条的差别正是「同一标签在两条链读数一致」的可视化面：core 的折行/回读把 miss 的 img
  * 记成 AltText 的格数，渲染侧也必须真的把它当文本铺出来，而不是留一段空白。
  */
 class ScreenComposerDivImgMissTest {
@@ -102,6 +104,20 @@ class ScreenComposerDivImgMissTest {
         assertTrue(
             (20 until 60).any { canvas.pixelAt(it, 13) == fore },
             "文案有 40+ 格，第 20 像素之后仍应有字形（不是被当成一张方图或一段空白）",
+        )
+    }
+
+    @Test
+    fun `尺寸已知但帧仍取不到时画 AltText`() {
+        // 第三档：尺寸源命中 ⇒ IMAGE 段带 altText（HtmlRunFlatten.emitImage），但 sprite 表
+        // 里没有这张图 ⇒ 原版 `aSprite == null` 的回落支（ConsoleImagePart.cs:168,175-182）。
+        val known = HtmlRunFlatten.ImageSizeSource { (20 shl 16) or 20 }
+        val canvas = compose(known, "<img src='NO_SUCH' width='20px' height='20px'>")
+        // 裸列游标 0 + 行顶 10 + GLYPH_INSET 2：首字形 `<` 落在 (0..8, 12..26)。
+        assertEquals(fore, canvas.pixelAt(1, 13), "帧取不到：画重建出来的 `<img …>` 文案")
+        assertTrue(
+            (20 until 60).any { canvas.pixelAt(it, 13) == fore },
+            "整串画出（不是只出首字形）",
         )
     }
 

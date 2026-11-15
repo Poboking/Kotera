@@ -141,6 +141,24 @@ object ErbcArtifacts {
          * 干净产物传空列表，manifest 字节保持原样。
          */
         degraded: List<CompileFailure> = emptyList(),
+        /**
+         * 被 [com.eratw.port.core.policy.ErbPatchPolicy] 整体禁载的 `.ERB` 相对路径。
+         * 非空时 manifest 追加 `disabled-erb N` + 逐条 `disabled-erb-file <rel>`，让
+         * 「产物里没有这些脚本」跟着 APK 走、可被出包闸与事后取证读到；干净产物传空表，
+         * manifest 字节保持原样（同 [degraded] 的纪律）。
+         */
+        disabledErb: List<String> = emptyList(),
+        /**
+         * M2-5 尾部签名段（函数键大写 → 完整签名规范串，`SignatureExport.export` 产出），
+         * 经 `BootMetaWriter` 第 5 参落进 `program.meta` 的 `end` 之后旁路块。
+         *
+         * P15S 接线：生产 `cmdCompile` 传 `CompileResult.signatures` ⇒ 标准 4.981 产物
+         * 自带 base 签名真目录，MODERN 档显式覆盖的签名闸从「恒空串 fail-closed」变为
+         * 可放行（消费链 = `ModChainAssembly.signatureDirectoryOfFile` 有界尾读 →
+         * `BaseSignatureCatalog.parse` → `signatureHashOf`）。缺省空表整段省略，meta
+         * 字节与本参数加入之前逐字节相同（关态不变式，旧调用点/测试零变化）。
+         */
+        signatures: Map<String, String> = emptyMap(),
     ): WriteReport {
         // 目录名版本号：冻结的跨模块路径常量（见 KDoc），非容器版本；容器真实版本走 manifest。
         val artifactDirVersion = ErbcFormat.VERSION_1
@@ -179,7 +197,7 @@ object ErbcArtifacts {
         var meta: HashEntry? = null
         if (bootMetadata != null) {
             val path = artifactDir.resolve(BootMetaWriter.FILE_NAME)
-            val report = BootMetaWriter.write(path, bootMetadata, artifact.sha256)
+            val report = BootMetaWriter.write(path, bootMetadata, artifact.sha256, signatures = signatures)
             metaPath = path
             meta = HashEntry("erbc.v$artifactDirVersion/${BootMetaWriter.FILE_NAME}", report.size.toLong(), report.sha256)
         }
@@ -205,6 +223,7 @@ object ErbcArtifacts {
         val compiler = ErbcCompilerDigest.compute(compilerRoot)
         val manifest = manifestText(
             corpusRoot, artifacts, sources, compiler.digest, compiler.fileCount, stats, degraded,
+            disabledErb,
         )
         val manifestPath = artifactDir.resolve("manifest.txt")
         AtomicWrite.write(manifestPath, manifest.toByteArray(Charsets.UTF_8))
@@ -223,8 +242,9 @@ object ErbcArtifacts {
      * （源条目按相对路径排序、产物条目按给定序），不含任何运行期状态。
      *
      * 编译器指纹两行（[ErbcCompilerDigest] 口径，固定排在 `erbcc` 之后）：
-     * - `compiler-digest <64 位小写十六进制>`：`core-vm/src/main/kotlin` 整树 `.kt` 的
-     *   确定性 SHA-256；同一源码树两次编译相同，编译器改一个字节就变；
+     * - `compiler-digest <64 位小写十六进制>`：`core-vm/src/main/kotlin` +
+     *   `tools/erbcc/src/main/kotlin` 两棵整树 `.kt` 的确定性 SHA-256；
+     *   同一源码树两次编译相同，编译器改一个字节就变；
      * - `compiler-sources <N>`：参与计算的文件数（只为人读，判据只认 digest）。
      * 这两行是「编译器改了没重编」的唯一可检出判据：语料摘要与产物摘要在这种情形下全都一致。
      *
@@ -255,6 +275,7 @@ object ErbcArtifacts {
         compilerSources: Int,
         stats: CompileStats? = null,
         degraded: List<CompileFailure> = emptyList(),
+        disabledErb: List<String> = emptyList(),
     ): String {
         val sb = StringBuilder()
         sb.append("# erbc compile manifest —— 确定性构建清单（同一语料两次编译逐字节相同）\n")
@@ -304,6 +325,15 @@ object ErbcArtifacts {
                 val oneLine = d.message.replace('\r', ' ').replace('\n', ' ')
                 sb.append("degraded ").append(d.file).append(':').append(d.line)
                     .append(' ').append(oneLine).append('\n')
+            }
+        }
+        // 补丁整体禁载留痕：只在真的排除过文件时写（干净产物字节不变，老对拍用例不受影响）。
+        // 排序固定（相对路径），同一语料两次编译仍逐字节相同；这些文件仍在上面的 source 行里，
+        // 但一条脚本语句都没进产物，故必须单独留痕而不是从清单里抹掉。
+        if (disabledErb.isNotEmpty()) {
+            sb.append("disabled-erb ").append(disabledErb.size).append('\n')
+            for (rel in disabledErb.sorted()) {
+                sb.append("disabled-erb-file ").append(rel.replace('\r', ' ').replace('\n', ' ')).append('\n')
             }
         }
         return sb.toString()

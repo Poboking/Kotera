@@ -1,10 +1,16 @@
 package com.eratw.port.vmdbg
 
+import com.eratw.port.core.snapshot.RuntimeSnapshot
+import com.eratw.port.core.snapshot.RuntimeSnapshot.Value
+import com.eratw.port.core.snapshot.RuntimeSnapshotSections
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -76,6 +82,71 @@ class CmdSnapAnalyzeTest {
         for (k in 0 until 8) b[k] = ((magic ushr (8 * k)) and 0xFFL).toByte()
         for (k in 0 until 4) b[8 + k] = ((version ushr (8 * k)) and 0xFF).toByte()
         return b
+    }
+
+    // ------------------------------------------------------------------
+    // v1 夹具（MODERN-R11-R1SNAP）：手工构造分节，不经会话采集
+    // ------------------------------------------------------------------
+
+    private fun v1Section(name: String, vararg fields: Pair<String, Value>): RuntimeSnapshot.Section =
+        RuntimeSnapshot.Section(name, linkedMapOf(*fields))
+
+    private fun v1Bytes(savedUserVars: Long = 5): ByteArray = RuntimeSnapshot.encode(
+        RuntimeSnapshot.Snapshot(
+            RuntimeSnapshot.Header(
+                buildStamp = "unit-v1",
+                createdAt = "2026-11-09T00:00:00Z",
+                saveIdentity = "slot-1",
+            ),
+            listOf(
+                v1Section(
+                    RuntimeSnapshotSections.VM,
+                    "callDepth" to Value.Int64(2),
+                    "pc" to Value.Text("unavailable"),
+                ),
+                v1Section(
+                    RuntimeSnapshotSections.VARS,
+                    "bytes" to Value.Blob(byteArrayOf(1, 2, 3, 4)),
+                    "encoding" to Value.Text("binary"),
+                    "savedUserVars" to Value.Int64(savedUserVars),
+                ),
+                v1Section(
+                    RuntimeSnapshotSections.RNG,
+                    "state" to Value.IntList(List(625) { it.toLong() }),
+                    "cursor" to Value.Int64(624),
+                ),
+                v1Section(
+                    RuntimeSnapshotSections.DISPLAY,
+                    "tail" to Value.TextList(listOf("hello")),
+                    "lineCount" to Value.Int64(3),
+                ),
+                v1Section(
+                    RuntimeSnapshotSections.RESOURCES,
+                    "gfx.entries" to Value.Int64(0),
+                ),
+                v1Section(
+                    RuntimeSnapshotSections.EVENTS,
+                    "lines" to Value.TextList(listOf("evt-1")),
+                    "count" to Value.Int64(1),
+                ),
+            ),
+        ),
+    )
+
+    private fun writeV1(name: String, bytes: ByteArray): Path {
+        Files.createDirectories(work)
+        val p = work.resolve(name)
+        Files.write(p, bytes)
+        return p
+    }
+
+    /** 解压 v1 外壳、篡改解压后正文、重压：保留魔数以便仍被判为 v1，制造内部坏档。 */
+    private fun mutateV1(encoded: ByteArray, block: (ByteArray) -> Unit): ByteArray {
+        val raw = GZIPInputStream(ByteArrayInputStream(encoded)).use { it.readBytes() }
+        block(raw)
+        val out = ByteArrayOutputStream()
+        GZIPOutputStream(out).use { it.write(raw) }
+        return out.toByteArray()
     }
 
     // ------------------------------------------------------------------
@@ -225,6 +296,117 @@ class CmdSnapAnalyzeTest {
         val (code, text) = run("snapshot", "diff", snap.toString(), tmp.resolve("nope.dbg").toString())
         assertEquals(2, code, text)
         assertTrue("status=MISSING" in text, text)
+    }
+
+    // ------------------------------------------------------------------
+    // v1 容器（MODERN-R11-R1SNAP S1 / S2）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun v0SnapshotStillUsesSidecarPathNotV1() {
+        val snap = captureSnapshot()
+        val (code, text) = run("snapshot", "validate", snap.toString())
+        assertEquals(0, code, text)
+        assertTrue("container=rtsnap1" !in text, "v0 主文件不得被误判进 v1 分支: $text")
+        assertTrue("status=PASS" in text, text)
+    }
+
+    @Test
+    fun validateV1PassesWithSectionFacts() {
+        val p = writeV1("v1.rtsnap.gz", v1Bytes())
+        val (code, text) = run("snapshot", "validate", p.toString())
+        assertEquals(0, code, text)
+        assertTrue("status=PASS" in text, text)
+        assertTrue("container=rtsnap1" in text, text)
+        assertTrue("version=1" in text, text)
+        assertTrue("sections=vm,vars,rng,display,resources,events" in text, text)
+        assertTrue("section.vars.fields=3" in text, text)
+    }
+
+    @Test
+    fun validateV1WrongVersionIsExit3NotCrash() {
+        val bad = mutateV1(v1Bytes()) { raw ->
+            raw[7] = 2
+            raw[8] = 0
+            raw[9] = 0
+            raw[10] = 0
+        }
+        val p = writeV1("v1-bad-version.rtsnap.gz", bad)
+        val (code, text) = run("snapshot", "validate", p.toString())
+        assertEquals(3, code, text)
+        assertTrue("status=INVALID" in text, text)
+        assertTrue("problem=" in text, text)
+    }
+
+    @Test
+    fun validateV1BadHeaderLengthIsExit3NotCrash() {
+        val bad = mutateV1(v1Bytes()) { raw ->
+            raw[11] = 0x7F
+            raw[12] = 0x7F
+            raw[13] = 0x7F
+            raw[14] = 0x7F
+        }
+        val p = writeV1("v1-bad-header.rtsnap.gz", bad)
+        val (code, text) = run("snapshot", "validate", p.toString())
+        assertEquals(3, code, text)
+        assertTrue("status=INVALID" in text, text)
+        assertTrue("headerLen" in text, text)
+    }
+
+    @Test
+    fun expandV1PrintsSectionsAndVarsEncoding() {
+        val p = writeV1("v1.rtsnap.gz", v1Bytes())
+        val (code, text) = run("snapshot", "expand", p.toString())
+        assertEquals(0, code, text)
+        assertTrue("status=PASS" in text, text)
+        assertTrue("container=rtsnap1" in text, text)
+        assertTrue("--- section vars" in text, text)
+        assertTrue("vars.bytes=" in text, text)
+        assertTrue("vars.encoding=binary" in text, text)
+        assertTrue("display.lineCount=3" in text, text)
+    }
+
+    @Test
+    fun expandV1OutWritesFile() {
+        val p = writeV1("v1.rtsnap.gz", v1Bytes())
+        val target = tmp.resolve("v1-expanded.txt")
+        val (code, text) = run("snapshot", "expand", p.toString(), "--out", target.toString())
+        assertEquals(0, code, text)
+        assertTrue("status=PASS out=" in text, text)
+        assertTrue("--- section vars" in Files.readString(target, Charsets.UTF_8))
+    }
+
+    @Test
+    fun diffV1SameReportsConsistent() {
+        val p = writeV1("v1.rtsnap.gz", v1Bytes())
+        val (code, text) = run("snapshot", "diff", p.toString(), p.toString())
+        assertEquals(0, code, text)
+        assertTrue("status=PASS" in text, text)
+        assertTrue("一致" in text, text)
+        assertTrue("same=true" in text, text)
+    }
+
+    @Test
+    fun diffV1OneVariableDiffReportsFirstField() {
+        val pa = writeV1("a.rtsnap.gz", v1Bytes(savedUserVars = 5))
+        val pb = writeV1("b.rtsnap.gz", v1Bytes(savedUserVars = 6))
+        val (code, text) = run("snapshot", "diff", pa.toString(), pb.toString())
+        assertEquals(0, code, text)
+        assertTrue("status=PASS" in text, text)
+        assertTrue("first.section=vars" in text, text)
+        assertTrue("first.path=savedUserVars" in text, text)
+        assertTrue("same=false" in text, text)
+    }
+
+    @Test
+    fun diffV1BadSideIsExit3NotCrash() {
+        val pa = writeV1("a.rtsnap.gz", v1Bytes())
+        val bad = mutateV1(v1Bytes()) { raw -> raw[7] = 2 }
+        val pb = writeV1("b-bad.rtsnap.gz", bad)
+        val (code, text) = run("snapshot", "diff", pa.toString(), pb.toString())
+        assertEquals(3, code, text)
+        assertTrue("status=INVALID" in text, text)
+        assertTrue("problem.b=" in text, text)
     }
 
     // ------------------------------------------------------------------

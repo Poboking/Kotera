@@ -52,7 +52,7 @@ class FloatCorpusE2ETest {
      *
      * 断言 12 而不是 12.5，钉的是 `TOINT` 的**向零截断**；断言 125 钉的是 `LOCALF`
      * 真值 12.5（若中途回落整数通道，累加会截成 1.0/轮 ⇒ 10，或干脆报「未定义的变量」）。
-     * `C`/`D` 顺手钉住同一轮循环里整数写通道没被浮点累加带偏（原文 1254 的清零语句照跑）。
+     * `C`/`D` 顺手钉住同一轮循环里整数写通道没被浮点累加带偏（原文 1269 的清零语句照跑）。
      */
     @Test
     fun `语料抄写 LOCALF 累加十间真值 12 与 12_5`() {
@@ -114,7 +114,9 @@ class FloatCorpusE2ETest {
     // ------------------------------------------------------------------
 
     /**
-     * 逐字核对 魔法相关函数.ERB 的 `倍率` 块（:3188-:3190 声明面、:3214-:3223 浮点块）。
+     * 逐字核对 魔法相关函数.ERB 的 `倍率` 块（261111 实测：:3239-:3242 声明面、:3270-:3286 浮点块；
+     * 261017 时代为 :3188-:3190 与 :3214-:3223 —— 2026-11-14 语料换代后上游扩了第二段
+     * `战斗回归` 1.1 倍环（:3275-:3279）与真分支的 `高难开局` 倍率（:3281-:3282））。
      *
      * 这条是「抄得像」的对账闸：第 1 段的期望值全部由这些行推出，原文一旦改动（升版、
      * 换语料包），这里先红，而不是让下面的实跑用例默默断言一个过期数字。
@@ -122,49 +124,67 @@ class FloatCorpusE2ETest {
     @Test
     fun `语料原文 倍率块逐字对账`() {
         require4981Corpus()
-        assertCorpusLine(MAGIC_FN, 3188, "@永恒回归_倍率更新")
-        assertCorpusLine(MAGIC_FN, 3189, "#DIM DYNAMIC 乘数")
-        assertCorpusLine(MAGIC_FN, 3190, "#DIMF DYNAMIC 倍率")
-        assertCorpusLine(MAGIC_FN, 3214, "倍率 = 1.0")
-        assertCorpusLine(MAGIC_FN, 3215, "WHILE 乘数 > 0")
-        assertCorpusLine(MAGIC_FN, 3216, "倍率 *= 1.2")
-        assertCorpusLine(MAGIC_FN, 3217, "乘数 --")
-        assertCorpusLine(MAGIC_FN, 3218, "WEND")
-        assertCorpusLine(MAGIC_FN, 3219, "IF 倍率 > 1.0")
-        assertCorpusLine(MAGIC_FN, 3221, "ELSE")
-        assertCorpusLine(MAGIC_FN, 3223, "ENDIF")
+        assertCorpusLine(MAGIC_FN, 3239, "@永恒回归_倍率更新")
+        assertCorpusLine(MAGIC_FN, 3240, "#DIM DYNAMIC 乘数")
+        assertCorpusLine(MAGIC_FN, 3241, "#DIMF DYNAMIC 倍率")
+        assertCorpusLine(MAGIC_FN, 3242, "#DIM DYNAMIC 战斗回归")
+        assertCorpusLine(MAGIC_FN, 3270, "倍率 = 1.0")
+        assertCorpusLine(MAGIC_FN, 3271, "WHILE 乘数 > 0")
+        assertCorpusLine(MAGIC_FN, 3272, "倍率 *= 1.2")
+        assertCorpusLine(MAGIC_FN, 3273, "乘数 --")
+        assertCorpusLine(MAGIC_FN, 3274, "WEND")
+        assertCorpusLine(MAGIC_FN, 3275, "战斗回归 -= 4")
+        assertCorpusLine(MAGIC_FN, 3276, "WHILE 战斗回归 > 0")
+        assertCorpusLine(MAGIC_FN, 3277, "倍率 *= 1.1")
+        assertCorpusLine(MAGIC_FN, 3278, "战斗回归 --")
+        assertCorpusLine(MAGIC_FN, 3279, "WEND")
+        assertCorpusLine(MAGIC_FN, 3280, "IF 倍率 > 1.0")
+        assertCorpusLine(MAGIC_FN, 3281, "SIF TALENT:MASTER:高难开局")
+        assertCorpusLine(MAGIC_FN, 3282, "倍率 *= 2")
+        assertCorpusLine(MAGIC_FN, 3284, "ELSE")
+        assertCorpusLine(MAGIC_FN, 3286, "ENDIF")
     }
 
     /**
-     * **真实语料原文逐字实跑**：把 :3188-:3190 与 :3214-:3219、:3221、:3223 现读出来
+     * **真实语料原文逐字实跑**：把 :3239-:3242 与 :3270-:3280、:3284、:3286 现读出来
      * 拼成可执行片段真跑一遍 VM，断言与第 1 段同一组数值。
      *
      * 插进去的装置线只有四条，逐条注明顶替了原文哪一段：
-     * - `乘数 = 3`：顶替原文 :3196-:3213（LIMIT/LOG10/M_CFLAG/ABL/MAXBASE 一整套角色池读数）；
-     * - `A = 1` / `A = 0`：顶替原文 :3220/:3222 的 `M_FLAG:永恒回归_倍率 = …`（CSV 关键字下标）；
+     * - `乘数 = 3`：顶替原文 :3243-:3269（LIMIT/LOG10/M_CFLAG/ABL/MAXBASE 一整套角色池读数）；
+     * - `战斗回归 = 0`：同段的战斗回归源值（语料从战斗能力池推导）；0 ⇒ `战斗回归 -= 4` 后为负、
+     *   第二段 1.1 倍环（:3276-:3279）整段跳过，1.1^0 恒等，不改变本闸要钉的 1.2^3 读数；
+     * - `A = 1` / `A = 0`：顶替原文 :3281-:3283（SIF 高难开局 / 倍率 *= 2 / M_FLAG:关键字 =
+     *   TOINT(倍率)+5）与 :3285（M_FLAG = 0）—— M_FLAG/TALENT 的 CSV 关键字下标要真表才能解；
      * - 末三条见证：把浮点读数搬到内建整型变量 A..D 上，好按名读回。
-     * 浮点相关语句本身（`倍率 = 1.0` / `倍率 *= 1.2` / `乘数 --` / `WHILE` / `WEND` /
-     * `IF 倍率 > 1.0` / `ELSE` / `ENDIF`）**一个字符都没改**，连原文 :3219 行尾的制表符
-     * 都在 trim 前保留原样（装置按行喂，行首缩进由解析器忽略）。
+     * 浮点相关语句本身（`倍率 = 1.0` / `倍率 *= 1.2` / `倍率 *= 1.1` / `乘数 --` / `战斗回归 --` /
+     * 两个 `WHILE`/`WEND` / `IF 倍率 > 1.0` / `ELSE` / `ENDIF`）**一个字符都没改**，
+     * 连原文 :3280 行尾的制表符都在 trim 前保留原样（装置按行喂，行首缩进由解析器忽略）。
      */
     @Test
     fun `语料原文 倍率块逐字实跑真值 1728`() {
         require4981Corpus()
         val program = listOf(
-            corpusLine(MAGIC_FN, 3188),   // @永恒回归_倍率更新
-            corpusLine(MAGIC_FN, 3189),   // #DIM DYNAMIC 乘数
-            corpusLine(MAGIC_FN, 3190),   // #DIMF DYNAMIC 倍率
-            "乘数 = 3",                    // 装置线：顶替原文 :3196-:3213
-            corpusLine(MAGIC_FN, 3214),   // 倍率 = 1.0
-            corpusLine(MAGIC_FN, 3215),   // WHILE 乘数 > 0
-            corpusLine(MAGIC_FN, 3216),   // 倍率 *= 1.2
-            corpusLine(MAGIC_FN, 3217),   // 乘数 --
-            corpusLine(MAGIC_FN, 3218),   // WEND
-            corpusLine(MAGIC_FN, 3219),   // IF 倍率 > 1.0
-            "A = 1",                       // 装置线：真分支（原文写 M_FLAG:关键字）
-            corpusLine(MAGIC_FN, 3221),   // ELSE
-            "A = 0",                       // 装置线：假分支
-            corpusLine(MAGIC_FN, 3223),   // ENDIF
+            corpusLine(MAGIC_FN, 3239),   // @永恒回归_倍率更新
+            corpusLine(MAGIC_FN, 3240),   // #DIM DYNAMIC 乘数
+            corpusLine(MAGIC_FN, 3241),   // #DIMF DYNAMIC 倍率
+            corpusLine(MAGIC_FN, 3242),   // #DIM DYNAMIC 战斗回归
+            "乘数 = 3",                    // 装置线：顶替原文 :3243-:3269
+            "战斗回归 = 0",                // 装置线：同上段；0 ⇒ 1.1 倍环整段跳过
+            corpusLine(MAGIC_FN, 3270),   // 倍率 = 1.0
+            corpusLine(MAGIC_FN, 3271),   // WHILE 乘数 > 0
+            corpusLine(MAGIC_FN, 3272),   // 倍率 *= 1.2
+            corpusLine(MAGIC_FN, 3273),   // 乘数 --
+            corpusLine(MAGIC_FN, 3274),   // WEND
+            corpusLine(MAGIC_FN, 3275),   // 战斗回归 -= 4
+            corpusLine(MAGIC_FN, 3276),   // WHILE 战斗回归 > 0
+            corpusLine(MAGIC_FN, 3277),   // 倍率 *= 1.1
+            corpusLine(MAGIC_FN, 3278),   // 战斗回归 --
+            corpusLine(MAGIC_FN, 3279),   // WEND
+            corpusLine(MAGIC_FN, 3280),   // IF 倍率 > 1.0
+            "A = 1",                       // 装置线：真分支（原文 :3281-:3283）
+            corpusLine(MAGIC_FN, 3284),   // ELSE
+            "A = 0",                       // 装置线：假分支（原文 :3285）
+            corpusLine(MAGIC_FN, 3286),   // ENDIF
             "B = TOINT(倍率 * 1000)",      // 见证
             "C = TOINT(-倍率 * 1000)",     // 见证：一元取负
             "D = 乘数",                     // 见证
@@ -185,14 +205,14 @@ class FloatCorpusE2ETest {
     fun `语料原文 LOCALF块逐字对账`() {
         require4981Corpus()
         assertCorpusLine(USE_MAGIC, 4, "#DIM DYNAMIC 经验获取量")
-        assertCorpusLine(USE_MAGIC, 1248, "LOCALF = 0.0")
-        assertCorpusLine(USE_MAGIC, 1250, "LOCALF += YOGORE:(LOCAL) * 0.01")
-        // :1254 行尾带中文注释，对账按「注释前的语句本体」比。
+        assertCorpusLine(USE_MAGIC, 1263, "LOCALF = 0.0")
+        assertCorpusLine(USE_MAGIC, 1265, "LOCALF += YOGORE:(LOCAL) * 0.01")
+        // :1269（261017=:1254）行尾带中文注释，对账按「注释前的语句本体」比。
         assertTrue(
-            corpusLine(USE_MAGIC, 1254).startsWith("YOGORE:(LOCAL) = 0"),
-            "语料 $USE_MAGIC:1254 应为 YOGORE 清零句；实得「${corpusLine(USE_MAGIC, 1254)}」",
+            corpusLine(USE_MAGIC, 1269).startsWith("YOGORE:(LOCAL) = 0"),
+            "语料 $USE_MAGIC:1269 应为 YOGORE 清零句；实得「${corpusLine(USE_MAGIC, 1269)}」",
         )
-        assertCorpusLine(USE_MAGIC, 1256, "经验获取量 = TOINT(LOCALF)")
+        assertCorpusLine(USE_MAGIC, 1271, "经验获取量 = TOINT(LOCALF)")
         assertCorpusLine(DIM_ERH, 250, "#DIM SAVEDATA YOGORE, 2000")
     }
 
@@ -201,7 +221,7 @@ class FloatCorpusE2ETest {
      * `YOGORE:(LOCAL) = 0` / `经验获取量 = TOINT(LOCALF)` 四句直接取自语料文件，
      * `#DIM` 两句同样取自语料（DIM.ERH:250 与 使用魔法.ERB:4）。
      *
-     * 装置线：`FOR LOCAL, 0, 10` 顶替原文 :1249 的 `GET_CURRENT_MAP()` 上下界（`FOR` 终值不含，
+     * 装置线：`FOR LOCAL, 0, 10` 顶替原文 :1264（261017=:1249）的 `GET_CURRENT_MAP()` 上下界（`FOR` 终值不含，
      * 预填 `YOGORE:(LOCAL) = 125` 让每轮的加数成为可精确对值的常量。
      */
     @Test
@@ -214,12 +234,12 @@ class FloatCorpusE2ETest {
             "FOR LOCAL, 0, 10",            // 装置线：顶替原文 :1249 的地图上下界（终值不含 ⇒ 10 轮）
             "YOGORE:(LOCAL) = 125",        // 装置线：预填污垢度
             "NEXT",
-            corpusLine(USE_MAGIC, 1248),  // LOCALF = 0.0
+            corpusLine(USE_MAGIC, 1263),  // LOCALF = 0.0
             "FOR LOCAL, 0, 10",            // 装置线
-            corpusLine(USE_MAGIC, 1250),  // LOCALF += YOGORE:(LOCAL) * 0.01
-            corpusLine(USE_MAGIC, 1254),  // YOGORE:(LOCAL) = 0  ; 设置房间清洁度为最高…
+            corpusLine(USE_MAGIC, 1265),  // LOCALF += YOGORE:(LOCAL) * 0.01
+            corpusLine(USE_MAGIC, 1269),  // YOGORE:(LOCAL) = 0  ; 设置房间清洁度为最高…
             "NEXT",
-            corpusLine(USE_MAGIC, 1256),  // 经验获取量 = TOINT(LOCALF)
+            corpusLine(USE_MAGIC, 1271),  // 经验获取量 = TOINT(LOCALF)
             "A = 经验获取量",               // 见证
             "B = TOINT(LOCALF * 10)",      // 见证
         )
@@ -230,7 +250,7 @@ class FloatCorpusE2ETest {
         )
         assertEquals(12L, intOf(store, "A"), "经验获取量 = TOINT(12.5) = 12")
         assertEquals(125L, intOf(store, "B"), "TOINT(LOCALF * 10) = 125 ⇒ LOCALF 精确 12.5")
-        assertEquals(0L, store.readInt("YOGORE", longArrayOf(3)), "原文 :1254 的清零句必须真落库")
+        assertEquals(0L, store.readInt("YOGORE", longArrayOf(3)), "原文 :1269 的清零句必须真落库")
     }
 
     /**

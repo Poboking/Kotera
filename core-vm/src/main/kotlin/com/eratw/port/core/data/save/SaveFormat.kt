@@ -55,6 +55,19 @@ import java.util.zip.GZIPInputStream
  * [encodePayload] 重新编码的结果与读入时的 payload 做**逐字节比较**——编码器一旦有偏差
  * 就会退回重新压缩，测试随即失败。改动过的存档用 `Deflater` + 与原版相同的 GZip 头
  * （`1f 8b 08 00 00000000 00 0a`）重新压缩，.NET 侧可正常读取。
+ *
+ * ## 未认领键的原始切片（L15 / L17 / L23 / L28 / ADR-005 例外）
+ *
+ * `read(bytes, keepKey)` 丢掉的未知条目会以原始字节截进 [SaveData.unclaimedVariables]
+ * （顶层）与 [SaveData.unclaimedCharacterVariables]（角色块，按块内 `NO` 分桶；每条另带
+ * 块内相位 `SYSTEM`（`Separator` 之前）/ `USER`（之后）），`write` 时分别在**变量段的 `EOF`
+ * 之前**与**原块内对应的相位位置**（系统切片落 `Separator` 之前、用户切片落之后）原样回写。
+ * 因此「带未知键的档」重写后看起来不再是原字节（顶层切片被挪到段尾），但切片本身逐字节不变、
+ * 相位与读入时相同；无未知键的档仍走上面的幂等短路、输出逐字节不变。
+ *
+ * EM 段（Map / Xml / DT）另有一层：`read(bytes, keepKey, emKeepKey)` 在给了 EM 接受谓词时，
+ * 被拒的容器名同样保留「类型字节 + 容器名 + 值」的原始切片（[SaveData.unclaimedEmData]），
+ * 写侧在 EM 段的 `EOF` 之前回写；不给谓词的旧签名逐字不变。
  */
 object SaveFormat {
     /** 未压缩分支魔数（EraBinaryDataWriter.cs:43）。 */
@@ -70,6 +83,11 @@ object SaveFormat {
     private const val TAG_SEPARATOR = 0xFD
     private const val TAG_EOC = 0xFE
     private const val TAG_EOF = 0xFF
+    private const val TAG_INT_ARRAY3 = 3
+    private const val TAG_STR = 16
+    private const val TAG_STR_ARRAY = 17
+    private const val TAG_STR_ARRAY2D = 18
+    private const val TAG_STR_ARRAY3D = 19
     private const val TAG_MAP = 32
     private const val TAG_XML = 33
     private const val TAG_DT = 34
@@ -86,6 +104,13 @@ object SaveFormat {
     /** GZip 头（实测 .NET 8：MTIME=0、XFL=0、OS=0x0A）。 */
     private val GZIP_HEADER = byteArrayOf(0x1f, 0x8b.toByte(), 0x08, 0x00, 0, 0, 0, 0, 0, 0x0a)
 
+    /**
+     * 角色块的身份键（L17）：原版 `CharacterData` 的 `NO`（`SystemLayout.charaInt0D` 第 2 项，
+     * `VariableCode.NO_VAR`），块内恒为整数标量条目（真档实测块首 `ISASSI/NO`）。
+     * 未认领切片的桶键取它的**数值**，不取块位置 —— 角色顺序/数量变化时位置会挂错人。
+     */
+    private const val CHARA_NO_KEY = "NO"
+
     // ==================================================================
     // 读
     // ==================================================================
@@ -100,9 +125,50 @@ object SaveFormat {
      *   本来就被丢弃，按它建数组既白花上百 MiB，又会被预算闸误判成坏档
      *   （2026-10-29 玩家档 save39.sav 实测：全量声明 306.8 MiB > 256 MiB 上限）。
      *   只读装置与逐字节回写（[write]）用 `null`，行为不变。
+     *
+     * **未认领条目的原始切片**（L15 / L17 / L23 / L28 / ADR-005 例外）：`keepKey` 判 false 的条目
+     * 在丢弃值的同时把「类型字节 + 键名 + 值」的原始字节截进 [SaveData.unclaimedVariables]
+     * （顶层）或按块内 `NO` 分桶的 [SaveData.unclaimedCharacterVariables]（普通存档的角色块，
+     * L17 第二波；每条另记块内相位 `Separator` 前/后，L23），不解析、不重编码，写侧在已知
+     * 条目之后、段尾标记之前按原相位原样回写（见 [UnclaimedSaveEntry] / [UnclaimedCharaBlock]）。
+     * `keepKey = null` 时不筛键，两个字段恒空（未知键就是普通条目）；`CHARVAR` 角色档不捕获。
+     *
+     * **EM 段未认领条目**（L28）：见三参重载 [read]（`emKeepKey`）。本二参重载**不**筛 EM 段，
+     * 行为与 L28 之前逐字相同（全部解析进 [SaveData.emData]，由 `EmDataPools.restore` 按接受集丢弃）。
+     *
      * @throws SaveFormatException 魔数/版本不符、payload 截断、标签非法
      */
-    fun read(bytes: ByteArray, keepKey: ((String) -> Boolean)? = null): SaveData {
+    fun read(bytes: ByteArray, keepKey: ((String) -> Boolean)? = null): SaveData =
+        decode(bytes, keepKey, emKeepKey = null)
+
+    /**
+     * L28 重载：除 [keepKey] 之外再给 **EM 段（`Map/Xml/DT`）接受集谓词** [emKeepKey]。
+     *
+     * @param emKeepKey 判 true 的容器名照常解析进 [SaveData.emData]；判 false 的条目
+     *   **只走标签、不建值对象**，原始编码切片按原序进 [SaveData.unclaimedEmData]。
+     *   `null` = 不过滤（与二参重载等价）。只有 `NORMAL` / `GLOBAL` 类别有 EM 段。
+     *
+     * **为什么是三参重载而不是给上面那个加第三个缺省参数**：Kotlin 的尾随 lambda 永远绑定到
+     * **最后一个**形参。加参会把全仓 `read(bytes) { 变量谓词 }` 的谓词悄悄挪到 `emKeepKey`
+     * 上（编译照样过），实测立刻打红 6 例（`SaveUnknownKeySkipTest` 3 例、
+     * `SaveUnclaimedNoWriteBackTest` 1 例、`RestoreReportUnclaimedTest` 1 例、
+     * `SaveUpgradeSemanticsTest` 1 例）；
+     * 重载让旧调用点的绑定与语义都不变，也不要求改别人 lane 的文件（如 `CharaFileIO`）。
+     *
+     * @throws SaveFormatException 同 [read]
+     */
+    fun read(
+        bytes: ByteArray,
+        keepKey: ((String) -> Boolean)?,
+        emKeepKey: ((String) -> Boolean)?,
+    ): SaveData = decode(bytes, keepKey, emKeepKey)
+
+    /** [read] 的唯一实现（两个重载只差「EM 段筛不筛」）。 */
+    private fun decode(
+        bytes: ByteArray,
+        keepKey: ((String) -> Boolean)?,
+        emKeepKey: ((String) -> Boolean)?,
+    ): SaveData {
         val head = readContainer(bytes)
         val c = Cursor(head.payload)
         val typeCode = c.u8()
@@ -113,27 +179,43 @@ object SaveFormat {
         val text = c.readString()
 
         val characters: List<List<SaveEntry>>
-        if (fileType == SaveFileKind.NORMAL || fileType == SaveFileKind.CHARVAR) {
-            val n = c.i64()
-            if (n < 0 || n > MAX_CHARA) throw SaveFormatException("角色数异常：$n")
-            characters = List(n.toInt()) { readCharacterBlock(c, keepKey) }
-        } else {
-            characters = emptyList()
-        }
+        val droppedChara = ArrayList<String>()
+        // L17（ADR-005 例外第二波）：普通存档的角色块未认领条目按块捕获（随后按块内 `NO` 分桶）。
+        // CHARVAR（角色档）与 `keepKey == null`（全量读）不捕获：前者是「追加角色」语义，
+        // 后者没有「未认领」概念（未知键就是普通条目）。
+        val chara = readCharacters(
+            c, fileType, keepKey, droppedChara,
+            capture = fileType == SaveFileKind.NORMAL && keepKey != null,
+        )
+        characters = chara.blocks
+        val charaBuckets = chara.buckets
+        val charaRejected = chara.rejected
 
         val variables: List<SaveEntry>
+        val droppedTop = ArrayList<String>()
+        // L15（ADR-005 例外）：顶层 normal/global 域的未认领条目保留原始编码切片（原序）。
+        // char 域（readCharacterBlock）与 EM 段（readEntries 的 dropped=null 调用）刻意不传本表。
+        val unclaimedTop = ArrayList<UnclaimedSaveEntry>()
         if (fileType != SaveFileKind.CHARVAR) {
-            variables = readEntries(c, keepKey)
+            variables = readEntries(c, keepKey, droppedTop, unclaimedTop)
         } else {
             variables = emptyList()
         }
 
-        val emData: List<SaveEntry> =
-            if ((fileType == SaveFileKind.NORMAL || fileType == SaveFileKind.GLOBAL) && c.hasMore()) {
-                readEntries(c, keepKey)
+        val emData: List<SaveEntry>
+        // L28（ADR-005 例外第三波）：EM 段的未认领容器名保留原始编码切片（原序）。
+        // 惰性构造 —— `emKeepKey == null`（二参重载）时不分配、不链外，行为与改动前逐字相同。
+        val emCapture = emKeepKey?.let { EmCapture(it, ArrayList()) }
+        if ((fileType == SaveFileKind.NORMAL || fileType == SaveFileKind.GLOBAL) && c.hasMore()) {
+            // EM 段由各扩展池消费，不属「变量未声明」面，丢弃的键不进报告。
+            emData = if (emCapture == null) {
+                readEntries(c, keepKey, null)
             } else {
-                emptyList()
+                readEntries(c, keepKey, null, em = emCapture)
             }
+        } else {
+            emData = emptyList()
+        }
 
         return SaveData(
             fileType = fileType,
@@ -145,9 +227,16 @@ object SaveFormat {
             emData = emData,
             compressed = head.gzip,
             version = head.version,
+            droppedVariables = droppedTop,
+            droppedCharacterVariables = droppedChara,
             sourceFile = bytes.copyOf(),
             sourcePayload = head.payload,
-        )
+        ).also {
+            it.unclaimedVariables = unclaimedTop
+            it.unclaimedCharacterVariables = charaBuckets
+            it.unclaimedCharacterDroppedKeys = charaRejected
+            if (emCapture != null) it.unclaimedEmData = emCapture.slices
+        }
     }
 
     /**
@@ -428,50 +517,243 @@ object SaveFormat {
 
     /** 只编码 payload（不含 16 字节头 / GZip 外壳）。测试用，也是幂等判据的比较对象。 */
     fun encodePayload(data: SaveData): ByteArray {
-        val o = Out()
-        o.u8(data.fileType.ordinal)
-        o.i64(data.uniqueCode)
-        o.i64(data.scriptVersion)
-        o.str(data.text)
+        val baos = ByteArrayOutputStream(1 shl 16)
+        writePayload(SaveWriter(Out(baos)), data)
+        return baos.toByteArray()
+    }
+
+    /**
+     * payload 的**唯一**发射器：`SaveData` 回放（[encodePayload] / [writeTo]）与
+     * `SaveCapture.emit*` 的流式入口共用同一段字节序列，两条入口不可能分叉。
+     *
+     * 段序 = `VariableEvaluator.SaveToStreamBinary`（:2591-2606）：头四个字段 → 角色块
+     * （每块条目 + [SaveData.unclaimedCharacterVariables] 里**同一 `NO`** 的原始切片 + `EOC`，
+     * CHARVAR 末尾再补一个 `EOF`）→ 变量段 → [SaveData.unclaimedVariables]
+     * 原始切片 → `EOF` → EM 段 → [SaveData.unclaimedEmData] 原始切片 → `EOF`。
+     * 未认领切片的三个插入点（角色块 = L17/L23；变量段的 `EOF` 前 = L15；EM 段的 `EOF` 前 = L28）
+     * 都只**追加**原始字节：已知条目的字节与顺序完全不动；三个载体都为空时与改动前逐字节相同。
+     * 角色块切片按 [UnclaimedCharaEntry.phase] 放置：SYSTEM 落 `Separator` 之前、USER 落之后。
+     */
+    private fun writePayload(w: SaveWriter, data: SaveData) {
+        w.fileType(data.fileType)
+        w.i64(data.uniqueCode)
+        w.i64(data.scriptVersion)
+        w.str(data.text)
 
         if (data.fileType == SaveFileKind.NORMAL || data.fileType == SaveFileKind.CHARVAR) {
-            o.i64(data.characters.size.toLong())
+            w.count(data.characters.size)
             for (block in data.characters) {
-                for (e in block) o.entry(e)
-                o.u8(TAG_EOC)
+                // L17 / L23：同一 `NO` 的未认领切片按相位插回块内，`EOC` 之前。
+                writeCharaBlock(w, block, data.unclaimedCharacterVariables)
+                w.eoc()
             }
             // 角色存档（CHARVAR）在最后一个角色块后还有 EOF：SaveChara 末尾 WriteEOF()
             // （VariableEvaluator.cs:2270）。LoadChara 只读 num 个角色、不消费它（:2308-2314），
             // 但 PC 产出的 chara 文件确实带这一字节，补上才能 write(read(f))==f。
-            if (data.fileType == SaveFileKind.CHARVAR) o.u8(TAG_EOF)
+            if (data.fileType == SaveFileKind.CHARVAR) w.eof()
         }
         if (data.fileType != SaveFileKind.CHARVAR) {
-            for (e in data.variables) o.entry(e)
-            o.u8(TAG_EOF)
+            for (e in data.variables) w.entry(e)
+            // L15：顶层未认领条目的原始编码切片，已知变量之后、EOF 之前（本段唯一插入点）。
+            for (u in data.unclaimedVariables) w.raw(u.bytes)
+            w.eof()
         }
         if (data.fileType == SaveFileKind.NORMAL || data.fileType == SaveFileKind.GLOBAL) {
-            for (e in data.emData) o.entry(e)
-            o.u8(TAG_EOF)
+            for (e in data.emData) w.entry(e)
+            // L28（ADR-005 例外第三波）：EM 段未认领容器名的原始编码切片，
+            // 已知 EM 条目之后、本段 EOF 之前（EM 段唯一插入点）。
+            for (u in data.unclaimedEmData) w.raw(u.bytes)
+            w.eof()
         }
-        return o.toByteArray()
+    }
+
+    /**
+     * 一个角色块的全部条目 + 未认领切片回写点（L17 / L23，ADR-005 例外第二波）。
+     *
+     * 绑定键 = **该块内 `NO` 条目的数值**（[charaNoOf]）；桶缺失（当前 store 已没有这个
+     * 角色 / 该块身份不可判定）就只写已知条目 —— 这里没有「按块位置找桶」这条路。
+     *
+     * 相位放置（原版 `CharacterData.SaveToStreamBinary`，CharacterData.cs:601-687）：
+     * - SYSTEM 切片落在块内 `Separator` **之前**（块里没有 `Separator` 时即块尾，与 L17 相同）；
+     * - USER 切片落在 `Separator` **之后**（已知用户条目之后）；块里没有 `Separator` 而存在
+     *   USER 切片 ⇒ **补一个 `Separator`** 再写 —— 否则读侧 `LoadFromStreamBinary` 会把它们
+     *   当系统项（`CharacterData.cs:702-720`），同名变量将来被重新声明时落错查找分支而被丢。
+     *
+     * 空表零成本：`unclaimedCharacterVariables` 缺省空 ⇒ 每个块只多一次 `isEmpty()` 判断，
+     * 无未知键的档与 L15 逐字节相同。
+     */
+    private fun writeCharaBlock(
+        w: SaveWriter,
+        block: List<SaveEntry>,
+        buckets: Map<Long, List<UnclaimedCharaEntry>>,
+    ) {
+        val bucket = if (buckets.isEmpty()) emptyList() else charaNoOf(block)?.let { buckets[it] } ?: emptyList()
+        val system = bucket.filter { it.phase == CharaPhase.SYSTEM }
+        val user = bucket.filter { it.phase == CharaPhase.USER }
+        var systemWritten = false
+        var hasSeparator = false
+        for (e in block) {
+            if (!systemWritten && e is SaveEntry.Separator) {
+                for (u in system) w.raw(u.bytes)
+                systemWritten = true
+            }
+            if (e is SaveEntry.Separator) hasSeparator = true
+            w.entry(e)
+        }
+        // 没有 Separator 的块：系统切片落在块尾（= EOC 之前），与 L17 的位置相同。
+        if (!systemWritten) for (u in system) w.raw(u.bytes)
+        if (user.isEmpty()) return
+        // 块里没有 Separator 而存在用户相位切片 ⇒ 补一个，否则会被读成系统相位。
+        if (!hasSeparator) w.separator()
+        for (u in user) w.raw(u.bytes)
     }
 
     // ==================================================================
     // payload 读取细节
     // ==================================================================
 
-    private fun readCharacterBlock(c: Cursor, keepKey: ((String) -> Boolean)?): List<SaveEntry> {
+    /** [read] 的角色段产物：块列表 + L17 分桶结果（未捕获时三个字段都空）。 */
+    private class CharaSection(
+        val blocks: List<List<SaveEntry>>,
+        val buckets: Map<Long, List<UnclaimedCharaEntry>>,
+        val rejected: List<String>,
+    )
+
+    /**
+     * EM 段未认领切片的捕获参数（L28）：接受集谓词 + 原始切片出口（保持读入原序）。
+     *
+     * 打成一包是为了让 [readEntries] 的形参表停在 detekt `LongParameterList` 阈值以下；
+     * 拓扑上它只是「EM 段的两个配套值」，与 [CharaSection] 的产物聚合同一手法。
+     *
+     * @property keep 容器名是否在当前装载接受集里（`Save* ∪ Global*`）
+     * @property slices 被拒条目的原始编码切片出口
+     */
+    private class EmCapture(
+        val keep: (String) -> Boolean,
+        val slices: MutableList<UnclaimedSaveEntry>,
+    )
+
+    /**
+     * 读角色段（`FileType=NORMAL/CHARVAR` 的「角色数 + 每块条目 + EOC」）。
+     *
+     * @param capture 是否捕获未认领切片的原始编码并按块内 `NO` 分桶（L17）。只有普通存档且给了
+     *   `keepKey` 时为 true：CHARVAR 是「追加角色」语义（按 `NO` 回写会串进别人的角色档），
+     *   全量读则没有「未认领」概念（未知键就是普通条目）。
+     */
+    private fun readCharacters(
+        c: Cursor,
+        fileType: SaveFileKind,
+        keepKey: ((String) -> Boolean)?,
+        dropped: MutableList<String>,
+        capture: Boolean,
+    ): CharaSection {
+        if (fileType != SaveFileKind.NORMAL && fileType != SaveFileKind.CHARVAR) {
+            return CharaSection(emptyList(), emptyMap(), emptyList())
+        }
+        val n = c.i64()
+        if (n < 0 || n > MAX_CHARA) throw SaveFormatException("角色数异常：$n")
+        val captured = if (capture) ArrayList<UnclaimedCharaBlock>() else null
+        val blocks = List(n.toInt()) { readCharacterBlock(c, keepKey, dropped, captured) }
+        val rejected = ArrayList<String>()
+        val buckets = if (captured == null) {
+            emptyMap()
+        } else {
+            SaveUnclaimedPassthrough.bucketByNo(captured, rejected)
+        }
+        return CharaSection(blocks, buckets, rejected)
+    }
+
+    private fun readCharacterBlock(
+        c: Cursor,
+        keepKey: ((String) -> Boolean)?,
+        dropped: MutableList<String>?,
+        charaBlocks: MutableList<UnclaimedCharaBlock>? = null,
+    ): List<SaveEntry> {
         val list = ArrayList<SaveEntry>()
+        // L17：本块内未认领条目的原始切片（惰性分配 —— 干净档一个字节都不链外）。
+        var slices: MutableList<UnclaimedCharaEntry>? = null
+        // L23：块内相位 —— 原版 `CharacterData.LoadFromStreamBinary` 的 `bool userDefineData`
+        // （CharacterData.cs:692），`case Separator:` 之后置 true（:718-720）。
+        var phase = CharaPhase.SYSTEM
         while (true) {
             if (!c.hasMore()) throw SaveFormatException("角色块在 EOC 前截断（偏移 ${c.pos}）")
+            // 类型字节的位置：原始切片从这里开始（与 readEntries 的 L15 捕获同口径）。
+            val entryStart = c.pos
             val tag = c.u8()
             when (tag) {
-                TAG_EOC -> return list
-                TAG_SEPARATOR -> list.add(SaveEntry.Separator)
-                TAG_EOF -> return list // 原版对缺失 EOC 的旧档宽容；照读
-                else -> c.entryWithTag(tag, keepKey)?.let(list::add)
+                TAG_EOC, TAG_EOF -> {
+                    // 原版对缺失 EOC 的旧档宽容（CharacterData.cs:672-674），照读；两种收尾同口径。
+                    finishCharaBlock(charaBlocks, list, slices)
+                    return list
+                }
+
+                TAG_SEPARATOR -> {
+                    list.add(SaveEntry.Separator)
+                    phase = CharaPhase.USER
+                }
+
+                else -> {
+                    val droppedBefore = dropped?.size ?: 0
+                    val entry = c.entryWithTag(tag, keepKey, dropped)
+                    if (entry != null) {
+                        list.add(entry)
+                    } else if (charaBlocks != null) {
+                        val key = charaSliceKey(dropped, droppedBefore)
+                        slices = appendCharaSlice(c, entryStart, key, slices, phase)
+                    }
+                }
             }
         }
+    }
+
+    /** 块收尾：本块有未认领切片才登记（无切片的块不占内存、不参与分桶）。 */
+    private fun finishCharaBlock(
+        charaBlocks: MutableList<UnclaimedCharaBlock>?,
+        entries: List<SaveEntry>,
+        slices: List<UnclaimedCharaEntry>?,
+    ) {
+        val captured = slices ?: return
+        if (charaBlocks == null || captured.isEmpty()) return
+        charaBlocks.add(UnclaimedCharaBlock(charaNoOf(entries), captured))
+    }
+
+    /**
+     * 把一个被 `keepKey` 拒绝的条目截进本块的切片桶（L17），并记下当时的块内相位（L23）。
+     *
+     * `entryWithTag` 只有 keepKey 拒绝这一条 null 出口，[key] 是该出口刚追加进 dropped 的键名
+     * （null = 本次实际没有丢弃任何条目）；切片 = 类型字节（[entryStart]）到值末尾（`c.pos`），
+     * 不解析、不重编码。
+     */
+    private fun appendCharaSlice(
+        c: Cursor,
+        entryStart: Int,
+        key: String?,
+        existing: MutableList<UnclaimedCharaEntry>?,
+        phase: CharaPhase,
+    ): MutableList<UnclaimedCharaEntry>? {
+        if (key == null) return existing
+        val bucket = existing ?: ArrayList<UnclaimedCharaEntry>()
+        bucket.add(UnclaimedCharaEntry(key, c.slice(entryStart, c.pos), phase))
+        return bucket
+    }
+
+    /** 本次 `entryWithTag` 是否刚丢弃了一条（[before] 之后新增的键名；没有则 null）。 */
+    private fun charaSliceKey(dropped: MutableList<String>?, before: Int): String? =
+        if (dropped != null && dropped.size > before) dropped[before] else null
+
+    /**
+     * 角色块的身份键 `NO`（L17）：块内**恰好一条** `NO` 才算得出，其余一律 null（fail-closed）。
+     *
+     * 判 null 的三种形态：块内没有 `NO`（旧档/被 `keepKey` 拒绝）、不止一条 `NO`（重复条目）、
+     * 唯一那条不是整数标量（`NO` 在二进制档里恒为 `EraSaveDataType.Int`，见
+     * `CharaFileIO.emitSystemCharaEntry` 的 C_INT0 分支与真档实测「块首 27 条系统条目」）。
+     * 调用方拿到 null 就**整块丢弃切片** —— 绝不按块位置兜底：角色顺序/数量变化会把
+     * 切片挂到别人身上。
+     */
+    private fun charaNoOf(block: List<SaveEntry>): Long? {
+        val noEntries = block.filter { it.key == CHARA_NO_KEY }
+        if (noEntries.size != 1) return null
+        return (noEntries[0] as? SaveEntry.IntValue)?.value
     }
 
     /**
@@ -498,24 +780,72 @@ object SaveFormat {
      * 底层 `BinaryReader` 越界会抛 `EndOfStreamException`；不存在「无声结束」这条路。
      * 早期移植版 `if (!c.hasMore()) return list` 会把截断档读成「变量只装了一半」的合法结果，
      * 现与 [readCharacterBlock] 同口径改为抛 [SaveFormatException]。
+     *
+     * @param unclaimed 顶层变量段的未认领切片出口（L15）；null = 该段不捕获
+     * @param em EM 段（`Map/Xml/DT`）的未认领切片出口（L28，见 [EmCapture]）；
+     *   只对 EM 段传值，变量段传 null ⇒ EM 标签在那里照旧全部解析
      */
-    private fun readEntries(c: Cursor, keepKey: ((String) -> Boolean)?): List<SaveEntry> {
+    private fun readEntries(
+        c: Cursor,
+        keepKey: ((String) -> Boolean)?,
+        dropped: MutableList<String>?,
+        unclaimed: MutableList<UnclaimedSaveEntry>? = null,
+        em: EmCapture? = null,
+    ): List<SaveEntry> {
         val list = ArrayList<SaveEntry>()
         while (true) {
             if (!c.hasMore()) {
                 throw SaveFormatException("变量块/EM 块在 EOF 前截断（偏移 ${c.pos}）")
             }
+            // 类型字节的位置：未认领条目的原始切片从这里开始（L15 / L28）。
+            val entryStart = c.pos
             val tag = c.u8()
-            when (tag) {
-                TAG_EOF -> return list
-                TAG_SEPARATOR, TAG_EOC -> throw SaveFormatException(
+            if (tag == TAG_EOF) return list
+            if (tag == TAG_SEPARATOR || tag == TAG_EOC) {
+                throw SaveFormatException(
                     "变量块/EM 块里出现 ${if (tag == TAG_EOC) "EOC(0xFE)" else "Separator(0xFD)"}" +
                         "（偏移 ${c.pos - 1}）—— 原版 VariableData.cs:4207-4208 抛 AbnormalData",
                 )
-                else -> c.entryWithTag(tag, keepKey)?.let(list::add)
+            }
+            // L28：EM 段被接受集拒绝的容器名 —— 只走标签、截原始切片，不进下面的解析分支。
+            if (captureRejectedEm(c, tag, entryStart, em)) continue
+            val droppedBefore = dropped?.size ?: 0
+            val entry = c.entryWithTag(tag, keepKey, dropped)
+            if (entry != null) {
+                list.add(entry)
+            } else if (unclaimed != null && dropped != null && dropped.size > droppedBefore) {
+                // entryWithTag 只有 keepKey 拒绝这一条 null 出口，键名刚刚追加进 dropped；
+                // 切片 = 类型字节（entryStart）到值末尾（c.pos），不解析、不重编码（L15）。
+                unclaimed.add(
+                    UnclaimedSaveEntry(dropped[droppedBefore], c.slice(entryStart, c.pos)),
+                )
             }
         }
     }
+
+    /**
+     * L28：EM 段条目若被接受集拒绝，把「类型字节 + 容器名 + 值」截进 [EmCapture.slices]。
+     *
+     * @return true = 本条已作为未认领切片消费（调用方 `continue`，不再解析值）
+     *
+     * 与 [entryWithTag] 分开的理由：那道口子的形参表被 detekt 的 `CyclomaticComplexMethod` /
+     * `LongMethod` baseline 以**完整签名**冻结，加参会让旧基线失配；这里用 [Cursor.peekString]
+     * 只读地取容器名再判，判过之后 `entryWithTag` 照旧从同一位置重读。
+     */
+    private fun captureRejectedEm(c: Cursor, tag: Int, entryStart: Int, em: EmCapture?): Boolean {
+        if (em == null || !isEmTag(tag)) return false
+        val key = c.peekString()
+        val rejected = !em.keep(key)
+        if (rejected) {
+            c.readString()
+            c.skipValue(tag, key)
+            em.slices.add(UnclaimedSaveEntry(key, c.slice(entryStart, c.pos)))
+        }
+        return rejected
+    }
+
+    /** EM 段（Map / Xml / DataTable）的三种标签：`EraSaveDataType` 的 32 / 33 / 34。 */
+    private fun isEmTag(tag: Int): Boolean = tag == TAG_MAP || tag == TAG_XML || tag == TAG_DT
 
     /**
      * 多维数组的元素总数：**逐维**做溢出安全乘法，同时过三道闸 ——
@@ -596,17 +926,23 @@ object SaveFormat {
 
     /**
      * 读一条变量记录；[keepKey] 判 false 时返回 null（值已按 [skipValue] 走完、不建数组）。
+     * 被丢弃的键名追加进 [dropped]（M1-2 的「未声明键」报告；null = 该段不报告）。
      *
      * 键名本身总是读掉：未知变量与已知变量在流里的形状完全相同，只有值要不要留下不同。
      */
-    private fun Cursor.entryWithTag(tag: Int, keepKey: ((String) -> Boolean)? = null): SaveEntry? {
+    private fun Cursor.entryWithTag(
+        tag: Int,
+        keepKey: ((String) -> Boolean)? = null,
+        dropped: MutableList<String>? = null,
+    ): SaveEntry? {
         val key = readString()
         // 扩展段（Map/Xml/DT）的键**不是变量名**：它们是 `SAVEMAP`/`SAVEXML`/`SAVEDATA`
         // 声明的名字，走 ConstantData 的表而不是变量注册表 ⇒ 用「变量名是否已知」筛会误删
         // （SaveEmPoolTest / SaveRoundTripAuditTest 实证）。它们本来也不按存档尺寸建大数组，
-        // 不参与那条预算，故一律保留。
+        // 不参与那条预算，故一律保留；EM 名字的接受集筛选在 [readEntries] 里做（L28）。
         val variableEntry = tag != TAG_MAP && tag != TAG_XML && tag != TAG_DT
         if (keepKey != null && variableEntry && !keepKey(key)) {
+            dropped?.add(key)
             skipValue(tag, key)
             return null
         }
@@ -953,7 +1289,7 @@ object SaveFormat {
             // 而大文件的初始缓冲不该一次吃满（ByteArrayOutputStream 会立刻分配）。
             val hint = ((bytes.size - off).toLong() * 4).coerceIn(64L, 1L shl 20).toInt()
             val out = ByteArrayOutputStream(hint)
-            val buf = ByteArray(1 shl 16)
+            val buf = ByteArray(DEFLATE_BUFFER_BYTES)
             var total = 0L
             while (true) {
                 val n = ins.read(buf)
@@ -1001,7 +1337,7 @@ object SaveFormat {
         try {
             def.setInput(payload)
             def.finish()
-            val buf = ByteArray(1 shl 16)
+            val buf = ByteArray(DEFLATE_BUFFER_BYTES)
             while (!def.finished()) {
                 val n = def.deflate(buf)
                 if (n > 0) out.write(buf, 0, n)
@@ -1011,7 +1347,7 @@ object SaveFormat {
         }
         val crc = CRC32().apply { update(payload) }.value
         writeU32(out, crc)
-        writeU32(out, payload.size.toLong() and 0xFFFF_FFFFL)
+        writeU32(out, payload.size.toLong() and U32_MASK)
     }
 
     // ==================================================================
@@ -1183,6 +1519,19 @@ object SaveFormat {
             return String(chars)
         }
 
+        /**
+         * 只读地取一个字符串再退回游标（L28：EM 段先判接受集、再决定「解析值」还是「截切片」）。
+         *
+         * 长度前缀与 UTF-16 码元在 [readString] 里已做校验；退回后由 [entryWithTag] / [skipValue]
+         * 从同一位置重读。只用于 EM 段的容器名（每档几条、名字短），不做通用服务。
+         */
+        fun peekString(): String {
+            val saved = pos
+            val s = readString()
+            pos = saved
+            return s
+        }
+
         private fun readS7(): Int {
             var n = 0
             var shift = 0
@@ -1235,19 +1584,30 @@ object SaveFormat {
         private fun need(n: Int) {
             if (pos + n > b.size) throw SaveFormatException("payload 截断（偏移 $pos 需要 $n 字节）")
         }
+
+        /**
+         * 取 payload 的 `[from, to)` 原始字节（L15：未认领条目的编码切片）。
+         * 只做字节拷贝，不解析、不重编码 —— 写侧原样直写即可逐字节保真。
+         */
+        fun slice(from: Int, to: Int): ByteArray = b.copyOfRange(from, to)
     }
 
-    private class Out {
-        private val buf = ByteArrayOutputStream(1 shl 16)
+    internal class Out(private val sink: java.io.OutputStream) {
 
-        fun u8(v: Int) = buf.write(v and 0xFF)
+        fun u8(v: Int) = sink.write(v and 0xFF)
+
+        /**
+         * 原样直写一段已编码字节（L15：未认领条目的原始切片）。
+         * 调用方交进来的就是 read 截下的字节，这里不解析、不重排。
+         */
+        fun raw(b: ByteArray) = sink.write(b)
 
         fun i32(v: Int) {
-            for (i in 0 until 4) buf.write((v ushr (8 * i)) and 0xFF)
+            for (i in 0 until 4) sink.write((v ushr (8 * i)) and 0xFF)
         }
 
         fun i64(v: Long) {
-            for (i in 0 until 8) buf.write(((v ushr (8 * i)) and 0xFF).toInt())
+            for (i in 0 until 8) sink.write(((v ushr (8 * i)) and 0xFF).toInt())
         }
 
         fun varInt(v: Long) {
@@ -1256,7 +1616,7 @@ object SaveFormat {
                 v in Short.MIN_VALUE..Short.MAX_VALUE -> {
                     u8(208)
                     val s = v.toInt()
-                    buf.write(s and 0xFF); buf.write((s ushr 8) and 0xFF)
+                    sink.write(s and 0xFF); sink.write((s ushr 8) and 0xFF)
                 }
                 v in Int.MIN_VALUE..Int.MAX_VALUE -> {
                     u8(209)
@@ -1277,7 +1637,7 @@ object SaveFormat {
          */
         fun dbl(v: Double) {
             val bits = v.toRawBits()
-            for (i in 0 until 8) buf.write(((bits ushr (8 * i)) and 0xFF).toInt())
+            for (i in 0 until 8) sink.write(((bits ushr (8 * i)) and 0xFF).toInt())
         }
 
         fun str(s: String) {
@@ -1286,21 +1646,22 @@ object SaveFormat {
             while (true) {
                 val x = n and 0x7F
                 n = n ushr 7
-                if (n != 0) buf.write(x or 0x80) else { buf.write(x); break }
+                if (n != 0) sink.write(x or 0x80) else { sink.write(x); break }
             }
             for (ch in s) {
                 val c = ch.code
-                buf.write(c and 0xFF)
-                buf.write((c ushr 8) and 0xFF)
+                sink.write(c and 0xFF)
+                sink.write((c ushr 8) and 0xFF)
             }
         }
 
+        /** 已物化的条目回放（`SaveData` 入口）。字段顺序与访问器版逐字相同。 */
         fun entry(e: SaveEntry) {
             when (e) {
                 is SaveEntry.IntValue -> { u8(0); str(e.key); varInt(e.value) }
-                is SaveEntry.IntArray1 -> { u8(1); str(e.key); int1(e.values) }
-                is SaveEntry.IntArray2 -> { u8(2); str(e.key); int2(e) }
-                is SaveEntry.IntArray3 -> { u8(3); str(e.key); int3(e) }
+                is SaveEntry.IntArray1 -> { u8(1); str(e.key); int1(e.values.size) { e.values[it] } }
+                is SaveEntry.IntArray2 -> { u8(2); str(e.key); int2(e.dim0, e.dim1) { e.values[it] } }
+                is SaveEntry.IntArray3 -> { u8(3); str(e.key); int3(e.dim0, e.dim1, e.dim2) { e.values[it] } }
                 is SaveEntry.FloatValue -> { u8(TAG_FLOAT); str(e.key); dbl(e.value) }
                 is SaveEntry.FloatArray1 -> {
                     u8(TAG_FLOAT_ARRAY); str(e.key); i32(e.values.size)
@@ -1308,33 +1669,38 @@ object SaveFormat {
                 }
                 is SaveEntry.FloatArray2 -> {
                     u8(TAG_FLOAT_ARRAY2D); str(e.key); i32(e.dim0); i32(e.dim1)
-                    for (i in 0 until e.dim0 * e.dim1) dbl(e.values[i])
+                    for (v in e.values) dbl(v)
                 }
                 is SaveEntry.FloatArray3 -> {
                     u8(TAG_FLOAT_ARRAY3D); str(e.key); i32(e.dim0); i32(e.dim1); i32(e.dim2)
-                    for (i in 0 until e.dim0 * e.dim1 * e.dim2) dbl(e.values[i])
+                    for (v in e.values) dbl(v)
                 }
                 is SaveEntry.StrValue -> { u8(16); str(e.key); str(e.value) }
-                is SaveEntry.StrArray1 -> { u8(17); str(e.key); str1(e.values) }
-                is SaveEntry.StrArray2 -> { u8(18); str(e.key); str2(e) }
-                is SaveEntry.StrArray3 -> { u8(19); str(e.key); str3(e) }
+                is SaveEntry.StrArray1 -> { u8(17); str(e.key); str1(e.values.size) { e.values[it] } }
+                is SaveEntry.StrArray2 -> { u8(18); str(e.key); str2(e.dim0, e.dim1) { e.values[it] } }
+                is SaveEntry.StrArray3 -> { u8(19); str(e.key); str3(e.dim0, e.dim1, e.dim2) { e.values[it] } }
                 is SaveEntry.MapValue -> {
                     u8(TAG_MAP); str(e.key); i32(e.entries.size)
                     for ((k, v) in e.entries) { str(k); str(v) }
                 }
                 is SaveEntry.XmlValue -> { u8(TAG_XML); str(e.key); str(e.xml) }
-                is SaveEntry.DataTableValue -> {
-                    u8(TAG_DT); str(e.key); str(e.schemaXml); str(e.dataXml)
-                }
+                is SaveEntry.DataTableValue -> { u8(TAG_DT); str(e.key); str(e.schemaXml); str(e.dataXml) }
                 SaveEntry.Separator -> u8(TAG_SEPARATOR)
             }
         }
 
-        /** 0 游程压缩的 1D 整数数组（EraBinaryDataWriter.cs:203-223）。 */
-        fun int1(a: LongArray) {
-            i32(a.size)
+        /**
+         * 0 游程压缩的 1D 整数数组（EraBinaryDataWriter.cs:203-223），**访问器版**。
+         *
+         * 入参是 `(Int) -> Long` 而不是 `LongArray`：调用方交活列的 `get`，本函数边读边写。
+         * 这正是原版 `WriteWithKey(key, value.GetArray())`（VariableData.cs:3987）的形态 ——
+         * 写侧从不需要一份列副本（`GetArray()` 直接 `return array`，:76/:168/:268）。
+         */
+        fun int1(size: Int, get: (Int) -> Long) {
+            i32(size)
             var run = 0
-            for (v in a) {
+            for (i in 0 until size) {
+                val v = get(i)
                 if (v == 0L) { run++; continue }
                 if (run > 0) { u8(0xF0); varInt(run.toLong()); run = 0 }
                 varInt(v)
@@ -1342,49 +1708,55 @@ object SaveFormat {
             u8(TAG_EOF)
         }
 
-        fun int2(e: SaveEntry.IntArray2) {
-            i32(e.dim0); i32(e.dim1)
+        fun int2(dim0: Int, dim1: Int, get: (Int) -> Long) {
+            i32(dim0); i32(dim1)
             var run = 0; var zeroRows = 0
-            for (i in 0 until e.dim0) {
-                for (j in 0 until e.dim1) {
-                    val v = e.values[i * e.dim1 + j]
+            for (i in 0 until dim0) {
+                for (j in 0 until dim1) {
+                    val v = get(i * dim1 + j)
                     if (v == 0L) { run++; continue }
                     if (zeroRows > 0) { u8(0xF1); varInt(zeroRows.toLong()); zeroRows = 0 }
                     if (run > 0) { u8(0xF0); varInt(run.toLong()); run = 0 }
                     varInt(v)
                 }
-                if (run == e.dim1) zeroRows++ else u8(0xE0)
+                if (run == dim1) zeroRows++ else u8(0xE0)
                 run = 0
             }
             u8(TAG_EOF)
         }
 
-        fun int3(e: SaveEntry.IntArray3) {
-            i32(e.dim0); i32(e.dim1); i32(e.dim2)
-            var run = 0; var zeroRows = 0; var zeroPlanes = 0
-            for (i in 0 until e.dim0) {
-                for (j in 0 until e.dim1) {
-                    for (k in 0 until e.dim2) {
-                        val v = e.values[(i * e.dim1 + j) * e.dim2 + k]
-                        if (v == 0L) { run++; continue }
-                        if (zeroPlanes > 0) { u8(0xF2); varInt(zeroPlanes.toLong()); zeroPlanes = 0 }
-                        if (zeroRows > 0) { u8(0xF1); varInt(zeroRows.toLong()); zeroRows = 0 }
-                        if (run > 0) { u8(0xF0); varInt(run.toLong()); run = 0 }
-                        varInt(v)
-                    }
-                    if (run == e.dim2) zeroRows++ else u8(0xE0)
-                    run = 0
+        fun int3(dim0: Int, dim1: Int, dim2: Int, get: (Int) -> Long) {
+            i32(dim0); i32(dim1); i32(dim2)
+            val st = RunLengthState()
+            for (i in 0 until dim0) {
+                for (j in 0 until dim1) {
+                    int3Row(dim2, (i * dim1 + j) * dim2, get, st)
+                    if (st.run == dim2) st.zeroRows++ else u8(0xE0)
+                    st.run = 0
                 }
-                if (zeroRows == e.dim1) zeroPlanes++ else u8(0xE1)
-                zeroRows = 0
+                if (st.zeroRows == dim1) st.zeroPlanes++ else u8(0xE1)
+                st.zeroRows = 0
             }
             u8(TAG_EOF)
         }
 
-        fun str1(a: Array<String?>) {
-            i32(a.size)
+        /** [int3] 的一行（3 级嵌套拆到本函数，字节序不变）。 */
+        private fun int3Row(dim2: Int, base: Int, get: (Int) -> Long, st: RunLengthState) {
+            for (k in 0 until dim2) {
+                val v = get(base + k)
+                if (v == 0L) { st.run++; continue }
+                if (st.zeroPlanes > 0) { u8(0xF2); varInt(st.zeroPlanes.toLong()); st.zeroPlanes = 0 }
+                if (st.zeroRows > 0) { u8(0xF1); varInt(st.zeroRows.toLong()); st.zeroRows = 0 }
+                if (st.run > 0) { u8(0xF0); varInt(st.run.toLong()); st.run = 0 }
+                varInt(v)
+            }
+        }
+
+        fun str1(size: Int, get: (Int) -> String?) {
+            i32(size)
             var run = 0
-            for (s in a) {
+            for (i in 0 until size) {
+                val s = get(i)
                 if (s.isNullOrEmpty()) { run++; continue }
                 if (run > 0) { u8(0xF0); varInt(run.toLong()); run = 0 }
                 u8(0xD8); str(s)
@@ -1392,48 +1764,265 @@ object SaveFormat {
             u8(TAG_EOF)
         }
 
-        fun str2(e: SaveEntry.StrArray2) {
-            i32(e.dim0); i32(e.dim1)
+        fun str2(dim0: Int, dim1: Int, get: (Int) -> String?) {
+            i32(dim0); i32(dim1)
             var run = 0; var zeroRows = 0
-            for (i in 0 until e.dim0) {
-                for (j in 0 until e.dim1) {
-                    val s = e.values[i * e.dim1 + j]
+            for (i in 0 until dim0) {
+                for (j in 0 until dim1) {
+                    val s = get(i * dim1 + j)
                     if (s.isNullOrEmpty()) { run++; continue }
                     if (zeroRows > 0) { u8(0xF1); varInt(zeroRows.toLong()); zeroRows = 0 }
                     if (run > 0) { u8(0xF0); varInt(run.toLong()); run = 0 }
                     u8(0xD8); str(s)
                 }
-                if (run == e.dim1) zeroRows++ else u8(0xE0)
+                if (run == dim1) zeroRows++ else u8(0xE0)
                 run = 0
             }
             u8(TAG_EOF)
         }
 
-        fun str3(e: SaveEntry.StrArray3) {
-            i32(e.dim0); i32(e.dim1); i32(e.dim2)
-            var run = 0; var zeroRows = 0; var zeroPlanes = 0
-            for (i in 0 until e.dim0) {
-                for (j in 0 until e.dim1) {
-                    for (k in 0 until e.dim2) {
-                        val s = e.values[(i * e.dim1 + j) * e.dim2 + k]
-                        if (s.isNullOrEmpty()) { run++; continue }
-                        if (zeroPlanes > 0) { u8(0xF2); varInt(zeroPlanes.toLong()); zeroPlanes = 0 }
-                        if (zeroRows > 0) { u8(0xF1); varInt(zeroRows.toLong()); zeroRows = 0 }
-                        if (run > 0) { u8(0xF0); varInt(run.toLong()); run = 0 }
-                        u8(0xD8); str(s)
-                    }
-                    if (run == e.dim2) zeroRows++ else u8(0xE0)
-                    run = 0
+        fun str3(dim0: Int, dim1: Int, dim2: Int, get: (Int) -> String?) {
+            i32(dim0); i32(dim1); i32(dim2)
+            val st = RunLengthState()
+            for (i in 0 until dim0) {
+                for (j in 0 until dim1) {
+                    str3Row(dim2, (i * dim1 + j) * dim2, get, st)
+                    if (st.run == dim2) st.zeroRows++ else u8(0xE0)
+                    st.run = 0
                 }
-                if (zeroRows == e.dim1) zeroPlanes++ else u8(0xE1)
-                zeroRows = 0
+                if (st.zeroRows == dim1) st.zeroPlanes++ else u8(0xE1)
+                st.zeroRows = 0
             }
             u8(TAG_EOF)
         }
 
-        fun toByteArray(): ByteArray = buf.toByteArray()
+        /** [str3] 的一行（3 级嵌套拆到本函数，字节序不变）。 */
+        private fun str3Row(dim2: Int, base: Int, get: (Int) -> String?, st: RunLengthState) {
+            for (k in 0 until dim2) {
+                val s = get(base + k)
+                if (s.isNullOrEmpty()) { st.run++; continue }
+                if (st.zeroPlanes > 0) { u8(0xF2); varInt(st.zeroPlanes.toLong()); st.zeroPlanes = 0 }
+                if (st.zeroRows > 0) { u8(0xF1); varInt(st.zeroRows.toLong()); st.zeroRows = 0 }
+                if (st.run > 0) { u8(0xF0); varInt(st.run.toLong()); st.run = 0 }
+                u8(0xD8); str(s)
+            }
+        }
+
+        /** 3 维数组的零游程状态（`int3` / `str3` 共用；一次发射内有效）。 */
+        private class RunLengthState {
+            var run = 0
+            var zeroRows = 0
+            var zeroPlanes = 0
+        }
     }
 
+    /**
+     * 存档写侧的**条目发射口**（SAVE-STREAM 波，2026-11-13）：`SaveCapture` / `CharaFileIO`
+     * 只认这个面。于是「payload 怎么排字节」只有一份实现（[Out.entry] 与下面的方法逐字同源），
+     * 调用方拿不到编码细节，也就造不出第二种排法。
+     *
+     * 数组条目全部走访问器（`(Int) -> T`）：不要求调用方先把活列物化成
+     * `LongArray` / `Array<String?>`。段级标记（角色数 / `EOC` / `EOF`）与头字段也在这里。
+     */
+    internal class SaveWriter(private val o: Out) {
+
+        fun fileType(kind: SaveFileKind) = o.u8(kind.ordinal)
+
+        fun i64(v: Long) = o.i64(v)
+
+        fun str(s: String) = o.str(s)
+
+        /** 角色数（原版 `WriteInt64(CharacterList.Count)`，VariableEvaluator.cs:2598）。 */
+        fun count(n: Int) = o.i64(n.toLong())
+
+        fun eoc() = o.u8(TAG_EOC)
+
+        fun eof() = o.u8(TAG_EOF)
+
+        fun intValue(key: String, value: Long) { o.u8(0); o.str(key); o.varInt(value) }
+
+        fun int1(key: String, size: Int, get: (Int) -> Long) { o.u8(1); o.str(key); o.int1(size, get) }
+
+        fun int2(key: String, dim0: Int, dim1: Int, get: (Int) -> Long) {
+            o.u8(2); o.str(key); o.int2(dim0, dim1, get)
+        }
+
+        fun int3(key: String, dim0: Int, dim1: Int, dim2: Int, get: (Int) -> Long) {
+            o.u8(TAG_INT_ARRAY3); o.str(key); o.int3(dim0, dim1, dim2, get)
+        }
+
+        fun floatValue(key: String, value: Double) { o.u8(TAG_FLOAT); o.str(key); o.dbl(value) }
+
+        fun float1(key: String, size: Int, get: (Int) -> Double) {
+            o.u8(TAG_FLOAT_ARRAY); o.str(key); o.i32(size)
+            for (i in 0 until size) o.dbl(get(i))
+        }
+
+        fun float2(key: String, dim0: Int, dim1: Int, get: (Int) -> Double) {
+            o.u8(TAG_FLOAT_ARRAY2D); o.str(key); o.i32(dim0); o.i32(dim1)
+            for (i in 0 until dim0 * dim1) o.dbl(get(i))
+        }
+
+        fun float3(key: String, dim0: Int, dim1: Int, dim2: Int, get: (Int) -> Double) {
+            o.u8(TAG_FLOAT_ARRAY3D); o.str(key); o.i32(dim0); o.i32(dim1); o.i32(dim2)
+            for (i in 0 until dim0 * dim1 * dim2) o.dbl(get(i))
+        }
+
+        /** null 值写空串（EraBinaryDataWriter.cs:334-344）。 */
+        fun strValue(key: String, value: String?) { o.u8(TAG_STR); o.str(key); o.str(value ?: "") }
+
+        fun str1(key: String, size: Int, get: (Int) -> String?) { o.u8(TAG_STR_ARRAY); o.str(key); o.str1(size, get) }
+
+        fun str2(key: String, dim0: Int, dim1: Int, get: (Int) -> String?) {
+            o.u8(TAG_STR_ARRAY2D); o.str(key); o.str2(dim0, dim1, get)
+        }
+
+        fun str3(key: String, dim0: Int, dim1: Int, dim2: Int, get: (Int) -> String?) {
+            o.u8(TAG_STR_ARRAY3D); o.str(key); o.str3(dim0, dim1, dim2, get)
+        }
+
+        /**
+         * MAP 条目：直接遍历**活表**（插入序即落盘序；原版 .NET Dictionary 无删除时同序）。
+         * 旧实现先 `m.map { it.key to it.value }` 复制成 `List<Pair>`，又是一笔与表同大的分配。
+         */
+        fun mapValue(key: String, entries: Map<String, String>) {
+            o.u8(TAG_MAP); o.str(key); o.i32(entries.size)
+            for ((k, v) in entries) { o.str(k); o.str(v) }
+        }
+
+        fun xmlValue(key: String, xml: String) { o.u8(TAG_XML); o.str(key); o.str(xml) }
+
+        fun dataTableValue(key: String, schemaXml: String, dataXml: String) {
+            o.u8(TAG_DT); o.str(key); o.str(schemaXml); o.str(dataXml)
+        }
+
+        fun separator() = o.u8(TAG_SEPARATOR)
+
+        /** 已物化条目回放（`SaveData` 入口）。 */
+        fun entry(e: SaveEntry) = o.entry(e)
+
+        /** 未认领条目的原始编码切片原样直写（L15：已知变量之后、`EOF` 之前）。 */
+        fun raw(bytes: ByteArray) = o.raw(bytes)
+    }
+
+    /**
+     * **流式容器写口**（SAVE-STREAM 波）：16 字节头 → payload 逐条目直写 [out]。
+     *
+     * 与 [writeTo] 的差别只有一处：payload 不在堆里成型。`writeTo` 的 [encodePayload] 会物化
+     * 一整份 `ByteArray`（逐字节幂等判据 `sourcePayload` 全量比对要用它），而 `SAVEDATA`
+     * 从变量池现抓的档没有 `sourceFile` / `sourcePayload`，那份物化纯属白花 ——
+     * 玩家机上就是它在 88%~93% 水位时撑爆最后一次分配（`SaveCapture` 的池级复制同一笔）。
+     *
+     * 压缩壳与 [gzipTo] 逐字节同源：同壳头 [GZIP_HEADER]、raw deflate、收尾 CRC32 + ISIZE；
+     * [GzipSink] 只把「一次性 setInput 整份 payload」换成「边写边 setInput」，deflate 参数与
+     * 输出缓冲宽度不变、且**不中途 flush** ⇒ 输出只取决于输入字节序列。
+     *
+     * @param body 发射 payload 的内容（头四个字段之后的部分由调用方按段序发）
+     */
+    internal fun writeStreaming(
+        compressed: Boolean,
+        out: java.io.OutputStream,
+        body: (SaveWriter) -> Unit,
+    ) {
+        writeU64(out, if (compressed) MAGIC_GZIP else MAGIC_PLAIN)
+        writeU32(out, VERSION.toLong())
+        writeU32(out, 0L)
+        if (compressed) {
+            val gz = GzipSink(out)
+            try {
+                val buffered = java.io.BufferedOutputStream(gz, STREAM_BUFFER_BYTES)
+                body(SaveWriter(Out(buffered)))
+                buffered.flush()
+                gz.finish()
+            } finally {
+                // 成功时是幂等空操作（finish() 已置 ended）；异常时释放 native deflate 状态
+                // 且**不补** CRC/ISIZE。没有这一句，每次「抓取/编码失败」都会漏掉一个
+                // Deflater 的 native 缓冲，而失败恰恰是玩家机上会连着发生几次的事
+                // （SAVEDATA 连试三次）；用 finally 而不是 catch，异常照原样上抛。
+                gz.abort()
+            }
+        } else {
+            val buffered = java.io.BufferedOutputStream(out, STREAM_BUFFER_BYTES)
+            body(SaveWriter(Out(buffered)))
+            buffered.flush()
+        }
+    }
+
+    /**
+     * 增量 GZip 写口：raw deflate 边进边出，CRC32 与 ISIZE 随写累计。
+     *
+     * 字节口径必须与 [gzipTo] 一致（同 [GZIP_HEADER]、同 `Deflater(DEFAULT_COMPRESSION, true)`、
+     * 同 64 KiB 输出缓冲、不调 flush）：deflate 的输出只取决于输入字节序列，与 `setInput`
+     * 的切分无关。`SaveStreamByteIdentityTest` 用「流式 vs 物化」逐字节对拍钉住这件事。
+     */
+    private class GzipSink(private val out: java.io.OutputStream) : java.io.OutputStream() {
+
+        private val def = java.util.zip.Deflater(java.util.zip.Deflater.DEFAULT_COMPRESSION, true)
+        private val crc = java.util.zip.CRC32()
+        private val buf = ByteArray(DEFLATE_BUFFER_BYTES)
+        private val one = ByteArray(1)
+        private var size = 0L
+        private var ended = false
+
+        init {
+            out.write(GZIP_HEADER)
+        }
+
+        override fun write(b: Int) {
+            one[0] = b.toByte()
+            write(one, 0, 1)
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            if (len <= 0) return
+            crc.update(b, off, len)
+            size += len
+            def.setInput(b, off, len)
+            drain()
+        }
+
+        private fun drain() {
+            while (!def.needsInput()) {
+                val n = def.deflate(buf)
+                if (n > 0) out.write(buf, 0, n)
+            }
+        }
+
+        /** 正常收尾：写完 deflate 尾巴 + CRC32 + ISIZE，然后释放 native 状态。 */
+        fun finish() {
+            if (ended) return
+            ended = true
+            def.finish()
+            while (!def.finished()) {
+                val n = def.deflate(buf)
+                if (n > 0) out.write(buf, 0, n)
+            }
+            writeU32(out, crc.value)
+            writeU32(out, size and U32_MASK)
+            def.end()
+        }
+
+        /**
+         * 异常收尾（**不**写 CRC/ISIZE，产物已作废）：只把 native deflate 状态还给 zlib。
+         *
+         * 与 [finish] 分开的理由：异常路径绝不能再往流里补一串看起来像合法尾巴的字节 ——
+         * 那会让「写了一半的档」看起来能读。这里只做释放，且与 [finish] 一样幂等。
+         */
+        fun abort() {
+            if (ended) return
+            ended = true
+            def.end()
+        }
+    }
+
+    /** 流式写的中间缓冲宽度（8 KiB）：够摊薄逐字节 `write`，又不与 payload 同量级。 */
+    private const val STREAM_BUFFER_BYTES = 1 shl 13
+
+    /** deflate 输出缓冲（64 KiB）：与 gzipTo 用同一宽度，流式与一次性产物才可比。 */
+    private const val DEFLATE_BUFFER_BYTES = 1 shl 16
+
+    /** UInt32 掩码（CRC32 与 ISIZE 都按无符号 32 位落盘）。 */
+    private const val U32_MASK = 0xFFFF_FFFFL
     // ==================================================================
     // 定长整数
     // ==================================================================

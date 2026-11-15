@@ -305,7 +305,7 @@ u32 word[instructionCount × 4]     顺序恒为 op, a, b, c
 | `_STK_PUSH_STR(203)` / `_STK_PUSH_VAR_I/S(207/208)` / `_STK_PLUS_VAR_I(209)` / `_STK_STORE_VAR_I/S(210/211)` 的 a | `< stringCount` |
 | `_EVAL_INT(27)` / `_EVAL_STR(28)` / `_EVAL_INT_JZ(246)` 的 a | 需 `HAS_EXPRESSIONS` 且 `< exprCount` |
 | `_RETF(244)` 的 a | `NONE_REF` 放行；否则需 `HAS_EXPRESSIONS` 且 `< exprCount` |
-| `_CALL(22)` 的 a | `< funcCount`（带基线时按 `functionBase` 折回） |
+| `_CALL(22)` 的 a | `< funcCount`（带基线时按 `functionBase` 折回）；负值域例外：== `CallSentinels` 两哨兵值（`CALL_SUPER_SENTINEL` = `Int.MIN_VALUE` / `TRY_CALL_SUPER_SENTINEL` = `Int.MIN_VALUE + 1`，仅 Mod 包编译档产出）放行进链接期 `CallRelocation` 还原，其余负值照拒 |
 | `op ∈ 29..197`（marker）的 a | 需 `HAS_STATEMENTS` 且 `< statementCount` |
 | `entryPc`、每个 `labelPc` | `< instructionCount` |
 

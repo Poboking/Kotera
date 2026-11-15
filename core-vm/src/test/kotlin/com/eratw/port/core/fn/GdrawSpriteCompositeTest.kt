@@ -30,11 +30,15 @@ import kotlin.test.assertTrue
  *    动画 sprite 的换算 = `SpriteAnime.cs:148-172`，取帧与空帧守卫 = `:90-119` / `:92-95`；
  *    源外采样 = 透明（GDI+ `DrawImage` 的越界口径，dotnet 对拍读数见 `GraphicsMethodsTest`
  *    的「GDRAWG 源矩形越界」用例）。
- * 2. 颜色矩阵：脚本侧元素 `/ 256f`（`FunctionMethodCreator.cs:9432` / `:9459`）；
- *    通道换位、偏移行、夹取与舍入 = **2026-10-23 本机 System.Drawing（GDI+）实测**，逐条读数
- *    登记在 [GraphicsBuffer.applyColorMatrix] 的 KDoc。本文件的 `0xFF462327`（= 255,70,35,39）、
- *    `0xFFA46464`（= 255,164,100,100）、`0xFF00FF32`（= 255,0,255,50）、保持 0、保持
- *    `0xFF0A141E` 都是那批实测值，**不是**拿移植侧实现算出来的数当期望。
+ * 2. 颜色矩阵：**索引口径 = 复刻目标蛇版 4.981 的 Skia 滤镜**（行 = 目标通道、
+ *    第 5 列是偏移、第 5 行忽略），出处见 [GraphicsBuffer.applyColorMatrix] 的 KDoc；
+ *    脚本侧元素 `/ 256f`（`FunctionMethodCreator.cs:9432` / `:9459`、蛇版
+ *    `Creator.Method.cs:7050-7060`）。夹取与舍入档位仍取 2026-10-23 本机 System.Drawing
+ *    实测——对角阵转置不变，换位/偏移用例按新口径改索引后读数相同，故那批期望不变。
+ *    本文件的 `0xFF462327`
+ *    （= 255,70,35,39）、`0xFFA46464`（= 255,164,100,100）、`0xFF00FF32`（= 255,0,255,50）、
+ *    保持 0、保持 `0xFF0A141E` 都是那批实测值，**不是**拿移植侧实现算出来的数当期望；
+ *    布娃娃回归用例另按 4.981 语料矩阵钉目标色，是对旧 GDI+ 口径的反向证明。
  * 3. alpha 合成 = GDI+ 默认 `CompositingMode.SourceOver`（全仓无赋值点 ⇒ 用默认值）：
  *    实测 源(A128,R200,G100,B50) 叠 目标(A255,R10,G20,B30) ⇒ (A255,R105,G60,B40)。
  *
@@ -306,10 +310,10 @@ class GdrawSpriteCompositeTest {
 
     /**
      * 7 参形态：颜色矩阵（`ReadColormatrix`，spec: FunctionMethodCreator.cs:9402-9464，
-     * 元素尺度 `/ 256f` 在 :9432）。
-     * 期望值出自 2026-10-23 本机 GDI+ 实测：源 (255,200,100,50) 过「夜」预设
-     * （对角 90/90/200/256）⇒ (255,70,35,39) = `round(200*90/256)` / `round(100*90/256)` /
-     * `round(50*200/256)`，alpha 保持 255。
+     * 元素尺度 `/ 256f` 在 :9432；蛇版 `Creator.Method.cs:7025-7060` 同式）。
+     * 「夜」是对角阵，两种索引口径下读数相同，故仍取 2026-10-23 本机 GDI+ 实测：
+     * 源 (255,200,100,50) 过「夜」预设（对角 90/90/200/256）⇒ (255,70,35,39)
+     * = `round(200*90/256)` / `round(100*90/256)` / `round(50*200/256)`，alpha 保持 255。
      */
     @Test
     fun `7参颜色矩阵逐通道换算与语料夜预设`() {
@@ -339,20 +343,70 @@ class GdrawSpriteCompositeTest {
     }
 
     /**
-     * 颜色矩阵的**偏移行**（第 4 行）：`out[dst] = Σ 源通道 × m[源][dst] + m[4][dst]`。
-     * 同批实测：`m[4][0] = 64/256` 对源 R=100 ⇒ `round((100/255 + 0.25) * 255)` = 164，
-     * 其余通道原样；把同一个 0.25 写在 `m[0][4]` 不产生任何偏移 ⇒ 偏移住在第 4 行。
+     * 颜色矩阵的**偏移列**（每行第 5 列）：`out[dst] = Σ 源通道 × m[dst][源] + m[dst][4]`。
+     * `m[0][4] = 64/256` 对源 R=100 ⇒ `round((100/255 + 0.25) * 255)` = 164，其余通道原样。
+     * 反向证明：把同样的 0.25 写进第 5 行 `m[4][0]` 完全不产生偏移——蛇版
+     * `GraphicsImage.cs:512-517` 只把前 4 行喂给 Skia 滤镜；1.824 的 GDI+ 口径才会读它。
      */
     @Test
-    fun `颜色矩阵的偏移住在第四行`() {
+    fun `颜色矩阵的偏移住在第五列且第五行被忽略`() {
         val h = GdcHarness()
         h.fill(30, 1, 1, 0xFF646464.toInt())
         assertEquals(1L, h.call("SPRITECREATE", "SPRO", 30))
-        h.declareMatrix("CM", GdcHarness.matrixWith(4 * 5 + 0, 64L))
+        h.declareMatrix("CM", GdcHarness.matrixWith(0 * 5 + 4, 64L))
         h.fill(31, 1, 1, 0)
 
         assertEquals(1L, h.callRef("GDRAWSPRITE", 31, "SPRO", 0, 0, 1, 1, h.matrixRef("CM")))
         assertEquals(0xFFA46464.toInt(), h.pixel(31, 0, 0))
+
+        h.declareMatrix("CM5", GdcHarness.matrixWith(4 * 5 + 0, 64L))
+        h.fill(32, 1, 1, 0)
+        assertEquals(1L, h.callRef("GDRAWSPRITE", 32, "SPRO", 0, 0, 1, 1, h.matrixRef("CM5")))
+        assertEquals(0xFF646464.toInt(), h.pixel(32, 0, 0))
+    }
+
+    /**
+     * 玩家反馈「布娃娃系统颜色基本上只有蓝绿跟饱和度」的根因回归。
+     *
+     * 语料 `ERB/BBAS_MOB/MOB_SYSTEM_HELPERS.ERB:195-208` 的 `画像合成_COLORMATRIX_GS`
+     * 给蓝色一色底图染色：行 = 输出通道，第 3 列取底图蓝通道，第 5 列无偏移。
+     * 旧实现按 1.824 GDI+ 口径（行 = 源通道）读这份矩阵 ⇒ `out[R] == out[G]` 恒成立，
+     * 且输出只由目标色的 B 分量决定，红/橙/黄/肤色全部塌成灰蓝（只剩明暗变化）。
+     * 蛇版 4.981 的 Skia 口径应逐通道还原目标色（脚本尺度 256 对通道 255，允许 ±1）。
+     * 调色板取值来自 `ERB/BBAS_MOB/MOB_ELEMENTS.ERB` 的 `MOB_COLOR_INIT`。
+     */
+    @Test
+    fun `布娃娃染色矩阵按蛇版Skia口径还原目标色`() {
+        val blueBase = 0xFF0000FF.toInt()
+        for (target in listOf(0xE3051C, 0xEC6202, 0xFFDA00, 0xF2C09A, 0x007CBC, 0xFFFFFF, 0x000000)) {
+            val out = GraphicsBuffer.applyColorMatrix(blueBase, toMatrix(mobColorMatrixScript(target)))
+            val r = (out shr 16) and 0xFF
+            val g = (out shr 8) and 0xFF
+            val b = out and 0xFF
+            val tr = (target shr 16) and 0xFF
+            val tg = (target shr 8) and 0xFF
+            val tb = target and 0xFF
+            val hex = target.toString(16)
+            assertTrue(kotlin.math.abs(r - tr) <= 1, "#$hex 的 R：$r vs $tr")
+            assertTrue(kotlin.math.abs(g - tg) <= 1, "#$hex 的 G：$g vs $tg")
+            assertTrue(kotlin.math.abs(b - tb) <= 1, "#$hex 的 B：$b vs $tb")
+            assertEquals(0xFF, (out ushr 24) and 0xFF, "#$hex 的 alpha 应保持不透明")
+            if (tr != tg) assertTrue(r != g, "旧 GDI+ 口径下 R 恒等于 G，#$hex 应当能出红")
+        }
+
+        // 反向证明：B 相同、R/G 不同的两色输出必须不同（旧口径下输出只由 B 决定，完全相同）
+        val a = GraphicsBuffer.applyColorMatrix(blueBase, toMatrix(mobColorMatrixScript(0xE3051C)))
+        val b = GraphicsBuffer.applyColorMatrix(blueBase, toMatrix(mobColorMatrixScript(0x681C1C)))
+        assertTrue(a != b, "旧 GDI+ 口径下这两色输出相同，新口径应能区分")
+
+        // 端到端：真走 GDRAWSPRITE 7 参链路，而不是只测纯函数
+        val h = GdcHarness()
+        h.fill(30, 1, 1, blueBase)
+        assertEquals(1L, h.call("SPRITECREATE", "MOBBLUE", 30))
+        h.declareMatrix("CM", mobColorMatrixScript(0xE3051C))
+        h.fill(31, 1, 1, 0)
+        assertEquals(1L, h.callRef("GDRAWSPRITE", 31, "MOBBLUE", 0, 0, 1, 1, h.matrixRef("CM")))
+        assertEquals(0xFFE2051C.toInt(), h.pixel(31, 0, 0))
     }
 
     /**
@@ -626,17 +680,18 @@ class GdrawSpriteCompositeTest {
     }
 
     /**
-     * [GraphicsBuffer.applyColorMatrix] 的直接对拍：通道换位（行 = 源、列 = 目标）与
-     * 夹取/舍入档位，全部是 2026-10-23 本机 System.Drawing 的实测读数。
+     * [GraphicsBuffer.applyColorMatrix] 的直接对拍：通道换位（行 = 目标通道）与夹取/舍入档位。
+     * 期望值仍取 2026-10-23 本机 System.Drawing 的实测读数（对角阵转置不变；换位用例按新
+     * 口径把矩阵元素从 `m[0][1]` 改到 `m[1][0]` 后读数相同）。
      */
     @Test
     fun `矩阵换算的通道换位与夹取舍入`() {
-        // m[0][0] = 0 且 m[0][1] = 1（第 1 行仍是单位行）：实测 (255,200,100,50) ⇒ (255,0,255,50)
-        // ⇒ 源 R 送进目标 G（G' = 源R + 源G = 200 + 100 = 300 → 夹到 1.0 → 255）；
-        // 若按「行 = 目标通道」写就会得到 R' = 源G = 100（实测否掉了这一种）。
+        // 行 = 目标通道：把源 R 额外送进目标 G ⇒ m[1][0] = 1，同时 m[0][0] = 0 让目标 R 归零。
+        // 实测 (255,200,100,50) ⇒ (255,0,255,50)：G' = 源R + 源G = 200 + 100 → 夹到 1.0 → 255。
+        // 反向：按 1.824 GDI+ 的「行 = 源通道」读，这一格会把源 G 送进目标 R ⇒ R' = 100。
         val swap = GdcHarness.IDENTITY.copyOf()
         swap[0 * 5 + 0] = 0L
-        swap[0 * 5 + 1] = 256L
+        swap[1 * 5 + 0] = 256L
         val m = toMatrix(swap)
         assertEquals(0xFF00FF32.toInt(), GraphicsBuffer.applyColorMatrix(0xFFC86432.toInt(), m))
 
@@ -653,9 +708,9 @@ class GdrawSpriteCompositeTest {
         // 负值夹 0（m[0][0] = -256 = -1.0）、超过 1 夹 255（m[0][0] = 512 = 2.0）
         assertEquals(0, GraphicsBuffer.applyColorMatrix(0xFFC86432.toInt(), toMatrix(GdcHarness.matrixWith(0, -256L))) shr 16 and 0xFF)
         assertEquals(0xFF, GraphicsBuffer.applyColorMatrix(0xFFC86432.toInt(), toMatrix(GdcHarness.matrixWith(0, 512L))) shr 16 and 0xFF)
-        // 换算作用在直通值上：源 A=0、RGB 非 0，配「A 行偏移 +128/256」⇒ 实测得到
+        // 换算作用在直通值上：源 A=0、RGB 非 0，配「A 行第 5 列偏移 +128/256」⇒ 实测得到
         // 与 (A128,R200,G100,B50) 直接合成完全一致的读数（若矩阵作用在预乘值上 RGB 会是 0）
-        val am = toMatrix(GdcHarness.IDENTITY.copyOf().also { it[4 * 5 + 3] = 128L })
+        val am = toMatrix(GdcHarness.IDENTITY.copyOf().also { it[3 * 5 + 4] = 128L })
         assertEquals(0x80C86432.toInt(), GraphicsBuffer.applyColorMatrix(0x00C86432, am))
     }
 
@@ -666,8 +721,8 @@ class GdrawSpriteCompositeTest {
     /**
      * 11 参形态：第 11 位是颜色矩阵（:7270 的 `ReadColormatrix(..., 10)` ⇒ 报错口径的
      * 「第 11 个参数」），两个矩形在矩阵之前读（:7261-7262）。
-     * 期望值与 GDRAWSPRITE 7 参同源：2026-10-23 本机 GDI+ 实测，
-     * 源 (255,200,100,50) 过「夜」⇒ (255,70,35,39) = `0xFF462327`。
+     * 期望值与 GDRAWSPRITE 7 参同源：2026-10-23 本机 GDI+ 实测的「夜」对角阵
+     * （两种索引口径同值），源 (255,200,100,50) ⇒ (255,70,35,39) = `0xFF462327`。
      */
     @Test
     fun `GDRAWG 11参矩阵按夜预设逐通道换算`() {
@@ -765,6 +820,24 @@ class GdrawSpriteCompositeTest {
 
         // 矩阵位同理：dst 不存在时第 11 位连看都不看（给了个非法矩阵也不抛）
         assertEquals(0L, h.callRef("GDRAWG", 999, 40, 0, 0, 1, 1, 0, 0, 1, 1, 256))
+    }
+
+    /**
+     * 语料 `ERB/BBAS_MOB/MOB_SYSTEM_HELPERS.ERB:195-208` 的 `画像合成_COLORMATRIX_GS`
+     * 5x5 脚本矩阵（尺度 256）。每行系数和 = 256，第 3 列取底图蓝通道；第 5 行的
+     * `4:4 = 256` 是 1.824 时代的齐次项残留，蛇版 Skia 滤镜只取前 4 行、不读它。
+     */
+    private fun mobColorMatrixScript(target: Int): LongArray {
+        val r = (target shr 16) and 0xFF
+        val g = (target shr 8) and 0xFF
+        val b = target and 0xFF
+        return longArrayOf(
+            (256L - r) / 2, (256L - r) / 2, r.toLong(), 0L, 0L,
+            (256L - g) / 2, (256L - g) / 2, g.toLong(), 0L, 0L,
+            (256L - b) / 2, (256L - b) / 2, b.toLong(), 0L, 0L,
+            0L, 0L, 0L, 256L, 0L,
+            0L, 0L, 0L, 0L, 256L,
+        )
     }
 
     /** 行主序 25 个脚本值（尺度 256 = 1.0）→ [GraphicsBuffer.applyColorMatrix] 的 Float 表。 */

@@ -24,10 +24,12 @@ import kotlin.test.assertTrue
  *
  * 原版口径（C#）：表达式层二元/一元运算全在 `OperatorMethodManager`：
  * * 加减乘 = 普通 `long` 运算，**unchecked 回绕**（spec: OperatorMethodManager.cs:24/:57/:71）；
- * * 整除 `DivIntInt`（:129-137）：先查 0（:132-135 抛 DivideByZero），再
- *   `arguments[0] / intValue`（:136）—— .NET long 整除**向零截断**；
- *   `long.MinValue / -1` 是 .NET 唯一溢出的整除，抛 OverflowException；
- * * 取余 `ModIntInt`（:148-156）：`%`（:155）—— 符号随被除数，`MinValue % -1` 得 0 不抛；
+ * * 整除 `DivIntInt`：1.824（`OperatorMethodManager.cs:129-137`）先查 0 抛 DivideByZero；
+ *   **4.981 已改为** `OperatorMethod.cs:374` → `SafeArithmetic.SafeDivide`（:67-77），
+ *   `b == 0` 时打「零除: a / 0」警告并**返回 0**，不再中断。非零时仍是 .NET long
+ *   整除**向零截断**；`long.MinValue / -1` 仍是唯一溢出的整除，抛 OverflowException；
+ * * 取余 `ModIntInt`：4.981 `OperatorMethod.cs:388` → `SafeModulo`（:79-88）同法钳制，
+ *   警告用反斜杠「零除: a \ 0」；非零时 `%` 符号随被除数，`MinValue % -1` 得 0 不抛；
  * * 取负 `MinusInt`（:559-566）：操作数是 MinValue 时**打一行系统提示**后仍返回
  *   `-MinValue`（回绕成 MinValue，:565）；
  * * `POWER` **语句**（spec: Process.cs:1350-1370）与 `POWER` **方法**
@@ -40,7 +42,7 @@ import kotlin.test.assertTrue
  */
 class VmArithmeticAuditTest {
 
-    private fun arith(op: String, l: Long, r: Long): Long {
+    private fun arith(op: String, l: Long, r: Long, host: VmHost = StringHost()): Long {
         val p = Assembler.assemble(
             """
             .func main slots=3
@@ -50,7 +52,7 @@ class VmArithmeticAuditTest {
               _RET R2
             """.trimIndent(),
         )
-        return VirtualMachine(p, StringHost()).run()
+        return VirtualMachine(p, host).run()
     }
 
     private fun neg(v: Long): Long {
@@ -143,14 +145,26 @@ class VmArithmeticAuditTest {
     }
 
     @Test
-    fun `除零与取余零都抛 CodeEE`() {
-        // C# DivIntInt/ModIntInt 的零检查（OperatorMethodManager.cs:132-135 / :151-154），
-        // 文案取官方 Error.DivideByZero（Lang.cs:1326 / 语料根 emuera.zhs.xml:236 /
-        // reference 表 emuera-zhs.xml:286），与表达式通道（Expr.kt）同一真源。
-        val div = assertFailsWith<CodeEE> { arith("_DIV", 1, 0) }
-        assertEquals("除数为0的除法运算", div.message, "实际文案: ${'$'}{div.message}")
-        val mod = assertFailsWith<CodeEE> { arith("_MOD", 1, 0) }
-        assertEquals("除数为0的除法运算", mod.message, "实际文案: ${'$'}{mod.message}")
+    fun `除零与取余零按 4_981 钳制为零并各打一行警告`() {
+        // 4.981 SafeArithmetic.cs:67-84：b == 0 → PrintWarning + return 0，不抛 CodeEE。
+        // 这是 2026-11-12 版本漂移订正：旧断言钉的是 1.824
+        // OperatorMethodManager.cs:132-135 / :151-154 的 DivideByZero 硬错。
+        val divHost = StringHost()
+        assertEquals(0L, arith("_DIV", 10, 0, divHost), "_DIV 钳制返回 0")
+        assertEquals("零除: 10 / 0\n", divHost.output.toString(), "警告带被除数与运算符")
+
+        val modHost = StringHost()
+        assertEquals(0L, arith("_MOD", 10, 0, modHost), "_MOD 钳制返回 0")
+        assertEquals("零除: 10 \\ 0\n", modHost.output.toString(), "取余支按 4.981 用反斜杠")
+    }
+
+    @Test
+    fun `非零除数仍按 C# 语义且 MinValue 溢出照抛`() {
+        // 零回归：钳制只作用于 b == 0，不得碰正常算术（MinValue / -1 的硬错在
+        // `最小整数除以负一抛 CodeEE 而取余得零` 里另钉）。
+        assertEquals(3L, arith("_DIV", 7, 2))
+        assertEquals(1L, arith("_MOD", 7, 2))
+        assertEquals(0L, arith("_DIV", 0, 7))
     }
 
     // ------------------------------------------------------------------
@@ -200,5 +214,65 @@ class VmArithmeticAuditTest {
         assertEquals(1L, powerMethod(0, 0))
         assertFailsWith<CodeEE> { powerMethod(2, 63) }
         assertFailsWith<CodeEE> { powerMethod(2, 100) }
+    }
+
+    // ------------------------------------------------------------------
+    // ROUND：蛇版 4.981 数学扩展（Creator.Method.cs:4544-4577，Creator.cs:100 注册）；
+    // 语料 261111 的 DLC/小游戏/锻税.ERB 四处实算使用（语料换代 2026-11-14 落地）。
+    // ------------------------------------------------------------------
+
+    /** 整型路：`ctx.callFunction("ROUND", [IntV])` 读数。 */
+    private fun roundMethod(x: Long): Long =
+        (roundCall(Value.IntV(x)) as Value.IntV).v
+
+    /** 浮点路：任一实参 FloatV ⇒ 整体返回 FloatV（HasFloatArg 分流，:4570-4576）。 */
+    private fun roundMethodF(x: Double): Double =
+        (roundCall(Value.FloatV(x)) as Value.FloatV).v
+
+    private fun roundCall(arg: Value): Value {
+        val store = VariableStore()
+        val ctx = BuiltinEvalContext(TestEvalContext(store), store, object : BuiltinHost {})
+        return ctx.callFunction("ROUND", listOf(arg))
+    }
+
+    @Test
+    fun `ROUND 整型路原样返回`() {
+        // 整型实参按 ToDouble 后 Math.Round 恒等（整数无小数位），返回 SingleLongTerm（:4574-4575）。
+        assertEquals(2L, roundMethod(2))
+        assertEquals(0L, roundMethod(0))
+        assertEquals(-3L, roundMethod(-3))
+        assertEquals(1234567890123L, roundMethod(1234567890123L))
+    }
+
+    @Test
+    fun `ROUND 浮点路 half 远离零`() {
+        // MidpointRounding.AwayFromZero（:4562）：±0.5/±2.5 这类可精确表示的 half 一律远离零，
+        // 与 java.lang.Math.round 的「half 向上」不同 —— 这正是用 BigDecimal+HALF_UP 复刻的原因。
+        assertEquals(3.0, roundMethodF(2.5), "2.5 → 3（远离零）")
+        assertEquals(-3.0, roundMethodF(-2.5), "-2.5 → -3（远离零）")
+        assertEquals(1.0, roundMethodF(0.5), "0.5 → 1")
+        assertEquals(-1.0, roundMethodF(-0.5), "-0.5 → -1")
+        assertEquals(2.0, roundMethodF(2.4))
+        assertEquals(3.0, roundMethodF(2.6))
+        assertEquals(-2.0, roundMethodF(-2.4))
+        assertEquals(-3.0, roundMethodF(-2.6))
+    }
+
+    @Test
+    fun `ROUND 浮点路非 half 精确值按 BigDecimal 全精度判定`() {
+        // 0.49999999999999994 是小于 0.5 的最大 double：java.lang.Math.round 会把它错抬成 1，
+        // BigDecimal(d) 是 double 的精确十进制展开 ⇒ HALF_UP 判 < 0.5 → 0，与 C# Math.Round 一致。
+        assertEquals(0.0, roundMethodF(0.49999999999999994))
+        assertEquals(1.0, roundMethodF(0.5000000000000001))
+        // 语料实算形态：锻税.ERB:3250 `TOINT(ROUND(值 * 1.0 * 加值 / 100))` 的一般非 half 值。
+        assertEquals(137.0, roundMethodF(136.6))
+    }
+
+    @Test
+    fun `ROUND 整型路 Int64 越界抛错`() {
+        // GetIntValue（:4558-4566）：Math.Round 后 (dret >= long.MaxValue) || (dret <= long.MinValue)
+        // 抛 CodeEE —— ToDouble(Long.MAX_VALUE) = 2^63 = 9.223372036854776E18，恰撞上界 ⇒ 抛。
+        assertFailsWith<CodeEE> { roundMethod(Long.MAX_VALUE) }
+        assertFailsWith<CodeEE> { roundMethod(Long.MIN_VALUE) }
     }
 }

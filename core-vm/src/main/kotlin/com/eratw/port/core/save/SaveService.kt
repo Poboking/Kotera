@@ -40,6 +40,8 @@ import com.eratw.port.core.entity.VirtualCharaNoRegistry
  *
  * [captureGlobalBundle] 的实体载荷恒空（§8：SAVEGLOBAL 不带实体载荷，实体按槽走）。
  * 分成两个入口而不是一个布尔开关，是为了让「实体永不进 global.rt2」在调用点显式可见。
+ * 恢复侧同理分两个入口：槽档 [restoreBundle]（并注册表 + 灌实体）与 global
+ * [restoreGlobalBundle]（只交还分片）——global 束喂进槽恢复口（或反之）都会当场拒绝。
  *
  * 本类无文件 IO、无可变全局；内核/注册表/投射器由宿主构造注入（AGENTS §2.4）。
  */
@@ -141,6 +143,51 @@ class SaveService(
         pkgRegistry.mergeSnapshot(bundle.registrySnapshot)
         kernel.restore(EntityPayloadCodec.decode(bundle.entityGraphPayload))
         return RestoreOutcome.Applied
+    }
+
+    /**
+     * global.rt2 的恢复读数（LOADGLOBAL 侧车交还专用）。与槽档 [RestoreOutcome] 分开成
+     * 第二个 sealed 而不是复用它，是因为「Applied」在两条路上**做过的写**不同：
+     * 槽档 Applied = 注册表已并 + 实体已灌；global Applied = 只把分片交还宿主，
+     * 注册表与内核一字未动。复用同名会让读数方把「没灌」误读成「灌了」。
+     */
+    sealed interface GlobalRestoreOutcome {
+        /** 绑定吻合且容器是 global 形状：分片交还宿主（每包一片，本类不解释载荷）。 */
+        data class Applied(val chunks: List<PackageChunk>) : GlobalRestoreOutcome
+
+        /** 三元组失配：未做任何交还，宿主上警告（扩展状态可能滞后或丢失）。 */
+        data class BindingMismatch(val expected: SidecarBinding, val actual: SidecarBinding) : GlobalRestoreOutcome
+    }
+
+    /**
+     * 恢复 global.rt2：**只验绑定与 global 形状，然后原样交出分片**——不并注册表、
+     * 不灌内核、不碰虚拟 NO 注册表（LOADGLOBAL 只读 Mod GLOBAL 分片，era-arch §8：
+     * 实体按槽走、虚拟 NO 是每槽身份）。
+     *
+     * 为什么不走 [restoreBundle]：它对零长实体载荷当场拒绝（`SaveServiceTest` 的
+     * 「全局档不可喂进槽恢复入口」钉住），而 global.rt2 的实体载荷恒空——两条路在
+     * 「要不要灌内核」上是互斥的，不是一个布尔开关。
+     *
+     * 为什么不并注册表：global 束里的 [SidecarSaveBundle.registrySnapshot] 是 SAVEGLOBAL
+     * 时刻的注册表视图，而 LOADGLOBAL 发生在**活会话**里——装载期并集与（若先做了
+     * LOADGAME 的）槽档快照都已并入，此刻再把旧快照灌回去，最好情形是 no-op，最坏情形
+     * 与活会话的新增包撞号（RegistryConflictException 会把 mod 分片交还整个打断）。
+     * 全局注册表 bin 的装载面（era-arch §8「rt2_pkg_registry.bin」）是独立波次，不在本路。
+     *
+     * 反向形状闸：实体图 / 虚拟 NO 段非空 = 槽档容器被喂进了 global 恢复口，当场拒绝
+     * 而不是静默只取分片（那会丢掉身份映射还自以为恢复成功）。
+     */
+    fun restoreGlobalBundle(bundle: SidecarSaveBundle, expectedBinding: SidecarBinding): GlobalRestoreOutcome {
+        if (!bundle.matchesBinding(expectedBinding)) {
+            return GlobalRestoreOutcome.BindingMismatch(expectedBinding, bundle.binding)
+        }
+        require(bundle.entityGraphPayload.isEmpty()) {
+            "global.rt2 不带实体载荷：实体图非空说明这是槽档容器，LOADGLOBAL 不灌内核（实体按槽走）"
+        }
+        require(bundle.virtualNoSnapshot.isEmpty()) {
+            "global.rt2 恒不带虚拟 NO 注册表段：非空说明这是槽档容器，LOADGLOBAL 不并身份映射"
+        }
+        return GlobalRestoreOutcome.Applied(bundle.chunks)
     }
 
     /**

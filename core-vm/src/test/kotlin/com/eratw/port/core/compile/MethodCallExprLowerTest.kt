@@ -108,6 +108,12 @@ class MethodCallExprLowerTest {
             // qol_OBJ.ERB 的真实方法（语料形态用例直接解析该行）：解析期严格化后
             // 夹具必须与语料符号表同口径声明，否则 functionCall 会按未定义标识符报错。
             .declareFunction("GETMETH_INT", OperandType.INT)
+            // 2026-11-14 语料换代 261111：SAKE_BREWING_GUIDE.ERB:75 的第 4 实参从字面量
+            // "醸造数" 换成 ERH 常量 OBJKEY_醸造数 / OBJKEY_酒気増加量（Headers/OBJKEY_TAGS.ERH:180-181，
+            // #DIMS CONST = "醸造数"/"酒気増加量"）。夹具用初始化过的 STR 变量近似该常量：
+            // 观测值与常量逐字相同（见 observedStore 的写入）。
+            .declareVariable("OBJKEY_醸造数", OperandType.STR, 1)
+            .declareVariable("OBJKEY_酒気増加量", OperandType.STR, 1)
             .declareFunction("GETMETH_STR", OperandType.STR)
             .declareFunction("PLAINLBL", OperandType.INT)   // 普通 @label（非方法）
             // 行首方法调用形态（`MI(…)` / `SM1(…)` 独占一行 = METHOD 语句，不是赋值）
@@ -174,13 +180,17 @@ class MethodCallExprLowerTest {
         declareUserVar(DimSpec("G1", isStr = false, dims = intArrayOf(1)))
         declareUserVar(DimSpec("C0", isStr = true, dims = intArrayOf(1)))
         declareUserVar(DimSpec("C1", isStr = true, dims = intArrayOf(1)))
+        // OBJKEY_ 常量的夹具近似：写入语料常量字面值（OBJKEY_TAGS.ERH:180-181），观测等价。
+        declareUserVar(DimSpec("OBJKEY_醸造数", isStr = true, dims = intArrayOf(1)))
+        declareUserVar(DimSpec("OBJKEY_酒気増加量", isStr = true, dims = intArrayOf(1)))
+        writeStr("OBJKEY_醸造数", longArrayOf(0), "醸造数")
+        writeStr("OBJKEY_酒気増加量", longArrayOf(0), "酒気増加量")
         addPseudoCharacter()
     }
 
     /** 编译 MAIN + 全部被调方法，并给出 `FuncMeta`（isMethod / returnsStr / 形参桶数）。 */
     private fun model(main: List<Statement>, vararg callees: Callee): Model {
-        // 本类钉「融合前」指令形状：显式关掉 MODERN-T1 条件位融合（上游 171e7d1b 后缺省开）。
-        val c = ErbProgramCompiler(fuseEvalJump = false)
+        val c = ErbProgramCompiler()
         val tbl = callTable()
         val known = buildSet {
             add("MAIN")
@@ -242,9 +252,25 @@ class MethodCallExprLowerTest {
     private fun pcs(p: Program, op: Int): List<Int> =
         (0 until p.instructionCount).filter { ins(p, it).op == op }
 
-    /** 表达式池里第一个「`||` 顶层节点」（= 本路的 IF/赋值条件降级产物）。 */
+    /**
+     * 与 [ErbProgramCompiler] 构造期同源的档位镜像（`ErbProgramCompiler.kt:253` 读同一个
+     * 系统属性）：缺省 = MODERN-T1 融合开。关态（`-Deratw.perf.noEvalJumpFuse=true` 或
+     * 测试显式传 `fuseEvalJump = false`，T1 契约两形态）下表达式池与本类判据不变，
+     * 只有条件载体指令变档（见 [orExprOf]）。
+     */
+    private val evalJumpFused: Boolean = !java.lang.Boolean.getBoolean("eratw.perf.noEvalJumpFuse")
+
+    /**
+     * 表达式池里第一个「`||` 顶层节点」（= 本路的 IF/赋值条件降级产物）。
+     *
+     * 表达式池两档同形（T1 融合只压指令流、不动池：同一个降级后的 `||` 节点，缺省档由
+     * `_EVAL_INT_JZ`(246) 超指令携带、关态由旧 `_EVAL_INT` 携带），故载体两 op 都扫 ——
+     * 「短路语义在池里可核对」这一被测意图两档都钉住（MODERN-R12-PRE 取证：T1 融合
+     * `171e7d1b5` 落地后 IF 条件位不再发 `_EVAL_INT`，只扫旧 op 会误报「池里没有顶层
+     * `||` 节点」）。
+     */
     private fun orExprOf(p: Program): Binary {
-        for (pc in pcs(p, Opcode._EVAL_INT)) {
+        for (pc in pcs(p, Opcode._EVAL_INT) + pcs(p, Opcode._EVAL_INT_JZ)) {
             val e = p.expr(ins(p, pc).a)
             if (e is Binary && e.op == OperatorCode.OR) return e
         }
@@ -285,6 +311,17 @@ class MethodCallExprLowerTest {
         val calls = pcs(p, Opcode._CALL)
         assertEquals(1, calls.size, "短路右位的调用不得提为前导 _CALL（伪造副作用）")
         val cond = orExprOf(p)
+        // 条件载体两档各断言各的（MODERN-T1）：顶层 || 节点在缺省档必须由 _EVAL_INT_JZ
+        // 携带、关态由旧 _EVAL_INT 携带。严格求值位的 _EVAL_INT（如被调 RETURNF 的返回值
+        // 求值）是合法存在，不在本判据内 —— 所以钉的是这个 OR 节点自己的载体指令。
+        // 载体换档不改短路语义，改了先红在这里。
+        val condPc = (pcs(p, Opcode._EVAL_INT) + pcs(p, Opcode._EVAL_INT_JZ))
+            .single { p.expr(ins(p, it).a) === cond }
+        assertEquals(
+            if (evalJumpFused) Opcode._EVAL_INT_JZ else Opcode._EVAL_INT,
+            ins(p, condPc).op,
+            "顶层 || 的条件载体必须随 T1 融合档位走（缺省=_EVAL_INT_JZ、关态=_EVAL_INT）",
+        )
         val leftNames = funCallNames(cond.left)
         assertEquals(1, leftNames.size)
         assertNotNull(exprTempSlotOf(leftNames[0]), "左位应已换成 `#EXPR_RET#<k>` 哨兵，实际=${leftNames[0]}")
@@ -459,7 +496,7 @@ class MethodCallExprLowerTest {
 
     @Test
     fun `非方法label表达式位调用 编译期按UsedNonMethodFunc原文抛`() {
-        val c = ErbProgramCompiler(fuseEvalJump = false)
+        val c = ErbProgramCompiler()
         val e = assertFailsWith<CompileException> {
             c.compileFunction(
                 FuncSig("MAIN", 0),

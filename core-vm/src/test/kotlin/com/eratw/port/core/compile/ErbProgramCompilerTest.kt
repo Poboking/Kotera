@@ -92,18 +92,25 @@ class ErbProgramCompilerTest {
         }.filterNotNull()
     }
 
+    /**
+     * 本类钉的是**循环/语句结构契约**（回边目标、终值临时槽、出口 marker、语句池落点），
+     * 与 PERF-LOOP 的循环条件融合开关正交（`_LT_JZ` 只是把 `_LT`+`_JUMP_IF_FALSE` 压成一条，
+     * 回边/槽位结构不变）。融合态由 `CompareJumpFuseTest` 专门钉，金标 E2E 走产品缺省档。
+     * 这里统一用**关态档**编译（`fuseCompareJump=false`，产物逐字节等于 PERF-LOOP 引入前），
+     * 免得以后任何发射面开关把结构钉连带打红；结构契约按「最展开形态」最可读。
+     */
     private fun compileOne(
         vararg lines: String,
         known: Set<String> = emptySet(),
         isMethod: Boolean = false,
     ): Program {
-        val c = ErbProgramCompiler()
+        val c = ErbProgramCompiler(fuseCompareJump = false)
         c.compileFunction(FuncSig("TEST", isMethod = isMethod), parse(*lines), known)
         return c.build()
     }
 
     private fun compileFuncs(vararg funcs: Pair<String, Array<String>>): Program {
-        val c = ErbProgramCompiler()
+        val c = ErbProgramCompiler(fuseCompareJump = false)
         val names = funcs.map { it.first }.toSet()
         for ((name, lines) in funcs) c.compileFunction(FuncSig(name), parse(*lines), names)
         return c.build(funcs.first().first)

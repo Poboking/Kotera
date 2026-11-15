@@ -82,10 +82,14 @@ class ThrowFrameMirrorTest {
         return vf.get(rt) as VirtualMachine
     }
 
-    // 最内层函数里的一条真报错：RAND(0) 在 core 侧就是 CodeEE（玩家报告原文同此串）。
+    // 最内层函数里的一条真报错：读越界局部变量在运行期就是 CodeEE（`checkElement` →
+    // `oorVarArg`，本装置把每个函数的 local 长度钉成 4，故 `LOCAL:10` 必越界）。
+    // 原先用 `RESULT = RAND(0)`，但 4.981 `VariableToken.cs:1425-1434` 已把 RAND 非法上界
+    // 改成钳制 0、不再抛（76a360ec0）；伪变量赋值又会先在解析期被拒（"赋值给常量"），
+    // 故取这条纯运行期、按函数局部长度判的越界读。
     private val throwing = arrayOf(
         Fn("CALLER", arrayOf("@CALLER", "CALL CALLEE", "RETURN")),
-        Fn("CALLEE", arrayOf("@CALLEE", "RESULT = RAND(0)")),
+        Fn("CALLEE", arrayOf("@CALLEE", "RESULT = LOCAL:10")),
     )
 
     @Test
@@ -95,7 +99,7 @@ class ThrowFrameMirrorTest {
         val vm = vmOf(rt)
 
         val e = assertFailsWith<CodeEE> { rt.execute() }
-        assertTrue("RAND" in e.message.orEmpty(), "报错串应保持原样，实际：${e.message}")
+        assertTrue("LOCAL" in e.message.orEmpty(), "报错串应保持原样，实际：${e.message}")
 
         val liveDepth = VirtualMachine::class.java.getDeclaredField("depth")
             .apply { isAccessible = true }.getInt(vm)
@@ -114,7 +118,7 @@ class ThrowFrameMirrorTest {
     fun `正常返回不留镜像且新一次 run 起跑清零`() {
         val fns = arrayOf(
             Fn("CALLER", arrayOf("@CALLER", "CALL CALLEE", "RETURN")),
-            Fn("CALLEE", arrayOf("@CALLEE", "RESULT = RAND(0)")),
+            Fn("CALLEE", arrayOf("@CALLEE", "RESULT = LOCAL:10")),
             Fn("OK", arrayOf("@OK", "RETURN")),
         )
         val (c, program) = compile(*fns)

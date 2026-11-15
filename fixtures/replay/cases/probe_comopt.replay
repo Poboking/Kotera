@@ -1,0 +1,22 @@
+# 泡茶子选单回归锁（2026-11-12 玩家「点红茶没反应」案）：
+# 复刻 QOL_USERCOM @COM_OPTION 弹窗的最小链（div 弹窗 + INPUT -1, 1 + 双槽读 + SETVAR 动态变量名）。
+# click 投喂「泡红茶」按钮 value=1（原版 MainWindow.cs:824-849 的鼠标分支口径）。
+# 写入成功以控制台 ALTER-WRITTEN 断言（COM_ALTER_301 是函数私有 #DIM，
+# 装置的 expect-vars 读不到私有变量 —— GoldenPipeline 的 dimLines 按函数切片归属）。
+case: probe_comopt
+target: REPLAY_HTML_COMOPT
+anchor: reference/emuera-cs/MinorShift.Emuera.Forms/MainWindow.cs:824-849
+anchor: ERB/魔改内容/qol/QOL_USERCOM.ERB @COM_OPTION（INPUT -1, 1 后读 RESULT 与 RESULT:1，SETVAR @"COM_ALTER_301"）
+--- inputs
+click 1 1
+--- expect-console
+START-COMOPT
+[泡茶][泡红茶][关闭]INPUT_VALUES=1
+MOUSE_BTN=1
+BTN_TEXT=1
+ALTER-WRITTEN
+END-COMOPT
+--- expect-vars
+RESULT:0 = 1
+RESULT:1 = 1
+RESULTS:1 = "1"

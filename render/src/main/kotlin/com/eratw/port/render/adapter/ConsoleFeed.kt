@@ -1,5 +1,6 @@
 package com.eratw.port.render.adapter
 
+import com.eratw.port.core.host.BusyIndicator
 import com.eratw.port.core.host.LineBufferConsoleSink
 import com.eratw.port.render.DirtyRect
 import com.eratw.port.render.RenderLine
@@ -380,7 +381,7 @@ class ConsoleFeed(
 
     /**
      * 有没有已到达但还没发布进 [screen] 的内容（`sink.revision` 前进、内联段到达版本前进、
-     * 或整屏底色与屏上当前值不一致）。
+     * 整屏底色与屏上当前值不一致，或长页忙碌指示器在场）。
      *
      * UI 重绘循环的「要不要 invalidate」判据就该用它而不是真的 [pump] 一次：pump 是
      * **发布动作**（发布后 [publishedRevision] 立即前移，脏区信息随之丢失），循环侧
@@ -388,11 +389,33 @@ class ConsoleFeed(
      *
      * 三条判据与 [pump] 的早退条件**逐条同源**（同一套水位、同一次比较），否则会出现
      * 「循环说没变化、pump 却交了一帧」或反向的静默丢帧。
+     *
+     * 第四条（[busyIndicator] 非 null）是**纯显示态**的增量：它在场时 UI 必须每帧重绘才能
+     * 呼吸/走点，但 [pump] 的交帧判据只认 revision 与内联水位，所以那一帧「问说有、pump
+     * 交空表」是安全的 —— 横带由绘制侧直接按 sink 的活值画，从不进内容快照。同型先例：
+     * 整屏底色也是谓词真、pump 只就地改 [screen] 而不产行快照。
      */
     fun hasUnpublishedContent(): Boolean {
         return sink.revision != publishedRevision || hasUnpublishedInline() ||
-            sinkBackgroundArgb() != screen.backgroundArgb
+            sinkBackgroundArgb() != screen.backgroundArgb ||
+            sink.busyIndicator() != null
     }
+
+    /**
+     * 长页忙碌指示器的直读口（[com.eratw.port.core.host.BusyIndicator]）：生产侧
+     * `LineBufferConsoleSink` 的 `@Volatile` 单字段，UI 线程每帧读；null = 没有长页。
+     *
+     * **只读**：本方法不推进任何发布水位、不改 [screen]。绘制侧（`CanvasConsoleView`）
+     * 直接拿它画横带，不经过 [pump] 的内容快照。
+     *
+     * 为什么 [hasUnpublishedContent] 把它算作「未发布」而 [pump] 却可以交空表：
+     * 该谓词是 UI 重绘循环的 invalidate 判据，不是「有内容帧要交」的判据 —— 指示器在动时
+     * 必须让 UI 每帧重绘（呼吸/动点），但 [pump] 只对 `revision` 前进与内联段水位负责，
+     * 指示器本来就不进行表（见 [com.eratw.port.core.host.LineBufferConsoleSink.setBusyIndicator]）。
+     * 同型先例：整屏底色（[publishBackground]）也是「谓词真、pump 交空表」——它只就地改
+     * [screen] 的底色，不产生行快照。
+     */
+    fun busyIndicator(): BusyIndicator? = sink.busyIndicator()
 
     /**
      * 有没有**已到达但还没发布**的内联段：`GraphicsLayer.inlineRevision()` 与本次已记的

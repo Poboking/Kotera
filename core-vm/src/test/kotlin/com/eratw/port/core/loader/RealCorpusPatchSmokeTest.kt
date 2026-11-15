@@ -2,8 +2,10 @@ package com.eratw.port.core.loader
 
 import com.eratw.port.core.code.ErbcWriter
 import com.eratw.port.core.code.Program
+import com.eratw.port.core.compile.ConstantKeywordResolver
 import com.eratw.port.core.compile.PatchCompiler
 import com.eratw.port.core.data.csv.GameDataLoader
+import com.eratw.port.core.data.csv.UserKeywordTables
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.frontend.RenameDictionary
 import com.eratw.port.core.frontend.sizeConsts
@@ -118,6 +120,8 @@ class RealCorpusPatchSmokeTest {
             val counts: PatchCompiler.BaseCounts,
             val metadata: BootMetadata,
             val symbolTable: SymbolTable,
+            /** 常量关键字折叠闭包（C5 生产同源）；null = 数据面缺，回退运行期按名查表。 */
+            val keywordLookup: ((String, Int, String) -> Long?)?,
             /**
              * C5 原样符号表预检的首例失败（strict 模式 = 逐字复刻 C5，遇错即抛）。
              * 非 null = C5 生产链在当前产物上导入**任何**补丁都会在这步整链死
@@ -158,6 +162,19 @@ class RealCorpusPatchSmokeTest {
                 longCount = program.constantCount,
                 exprCount = program.exprCount,
             )
+            // 常量关键字下标的解析期折叠面（C5 `ModImportController.buildPatchSymbolTable`
+            // 里 `keywordLookup` 的 core 等价）：数据面 = 设备现盘 CSV + ERB 下 ERD 表，
+            // 系统名表优先（与运行期 `VariableStore.keywordToInteger` 同源）。缺 CSV ⇒ null
+            // = 回退运行期按名查表，与生产缺数据面时的方向一致。
+            val gameDataForFold = runCatching { GameDataLoader.load(root.resolve("CSV")) }.getOrNull()
+            val foldSystemNames = gameDataForFold?.registry?.all()
+                ?.mapTo(HashSet()) { it.name.uppercase() } ?: emptySet()
+            val foldTables = runCatching { UserKeywordTables.foldSnapshot(root, foldSystemNames) }
+                .getOrDefault(emptyMap()) +
+                (gameDataForFold?.registry?.systemKeywordTables() ?: emptyMap())
+            val keywordLookup: ((String, Int, String) -> Long?)? = gameDataForFold?.let { data ->
+                ConstantKeywordResolver(data.registry, foldTables)::resolve
+            }
             val metadata = BootMetadata.read(dir.resolve("program.meta"))
             println(
                 "[r7d3-smoke] base 上下文：sha=$sha instr=${counts.instructionCount} " +
@@ -176,7 +193,10 @@ class RealCorpusPatchSmokeTest {
             val (symbolTable, skipped) = buildPatchSymbolTableTolerant(metadata, root.resolve("CSV"))
             println("[r7d3-smoke] $preflight")
             println("[r7d3-smoke] 容忍模式跳过的 global-dims 条目 ${skipped.size} 条：${skipped.take(5)}")
-            BaseContext(sha, program, counts, metadata, symbolTable, preflight, skipped, RenameDictionary.load(root.resolve("CSV")))
+            BaseContext(
+                sha, program, counts, metadata, symbolTable, keywordLookup, preflight, skipped,
+                RenameDictionary.load(root.resolve("CSV")),
+            )
         }
 
         /**
@@ -337,7 +357,10 @@ class RealCorpusPatchSmokeTest {
     ): PatchCompiler.PatchResult? {
         val c = ctx!!
         return try {
-            PatchCompiler(c.metadata, c.counts, c.symbolTable).compile(sources, entry)
+            PatchCompiler(
+                c.metadata, c.counts, c.symbolTable,
+                constantKeywordLookup = c.keywordLookup,
+            ).compile(sources, entry)
         } catch (e: PatchCompiler.PatchCompileException) {
             val msg = e.message ?: ""
             rows.add(SmokeRow(file, "COMPILE", bucketOf("COMPILE", msg), msg))

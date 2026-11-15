@@ -260,14 +260,21 @@ class IsaGapTest {
     }
 
     @Test
-    fun `CALLSHARP 未注册方法报原版文案`() {
+    fun `CALLSHARP 未注册方法打原版文案并跳过该语句`() {
         // 装载期口径 = ParserMediator.Warn("No native method X found", isError=true)
-        // （FunctionIdentifier.cs:1204）；移植侧挪到执行期抛 CodeEE，字符串原样保留
+        // （FunctionIdentifier.cs:1204）。执行期按**通用策略**（2026-11-09）：本移植版**不抛**
+        // CodeEE，改为把同一句打一行错误行后跳过整条语句（有意偏离 ADR-005，见
+        // specs/verify-notes.md §35）—— 官方此处会中断脚本，真机上就是「No native method」崩溃簇。
         val env = IsaEnv()
-        val e = assertFailsWith<CodeEE> {
-            env.run(instr(FunctionCode.CALLSHARP, callSharp("ABSENT", iVar("DAY", 0))))
-        }
-        assertEquals("No native method ABSENT found", e.message)
+        env.store.writeInt("DAY", longArrayOf(0), 5L)
+        val result = env.run(instr(FunctionCode.CALLSHARP, callSharp("ABSENT", iVar("DAY", 0))))
+        assertEquals(ExecResult.Normal, result, "未命中不中断脚本")
+        assertEquals(
+            listOf("printError(No native method ABSENT found)"),
+            env.console.events,
+            "官方文案原样上屏（呈现面 ≡ EmueraConsole.PrintError，EmueraConsole.cs:3098-3115）",
+        )
+        assertEquals(5L, env.store.readInt("DAY", longArrayOf(0)), "整条语句跳过：实参位没有回写")
     }
 
     @Test
@@ -295,11 +302,16 @@ class IsaGapTest {
     }
 
     @Test
-    fun `CALLSHARP 表为空时第一次调用即报错（不静默跳过）`() {
-        // 本波前 CALLSHARP 落在「始终抛未实现」名单；落地后仍必须有失败面，
-        // 不许为了过闸把未注册方法当成 no-op（契约 §3「不许吞异常」）
+    fun `CALLSHARP 表为空时第一次调用即提示（不静默跳过）`() {
+        // 通用策略（2026-11-09）：未注册方法不抛、不中断脚本，但**必须有失败面** ——
+        // 每行打一行官方文案的错误行；不许当成无声 no-op（契约 §3「不许吞异常」的等价物）。
         val env = IsaEnv()
-        assertFailsWith<CodeEE> { env.run(instr(FunctionCode.CALLSHARP, callSharp("NOPE"))) }
+        val arg = callSharp("NOPE")
+        env.run(instr(FunctionCode.CALLSHARP, arg))
+        assertEquals(listOf("printError(No native method NOPE found)"), env.console.events)
+        // 同一行重复执行：跳过照旧生效，但提示不刷屏（每行键只出一次）。
+        env.run(instr(FunctionCode.CALLSHARP, arg))
+        assertEquals(1, env.console.events.size, "同一行只提示一次")
         assertTrue(env.native.names().isEmpty())
     }
 

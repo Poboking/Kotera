@@ -21,7 +21,21 @@ open class VmException(
     line: Int,
     pc: Int,
     funcName: String?,
-) : CodeEE(message, funcName, line, pc)
+    /**
+     * **抛点帧**的源文件显示名（`CodeEE.scriptFile` 的透传口，MODERN-R8-A）。
+     *
+     * 原版的错误位置是**异常自己身上的** `ScriptPosition`（`CodeEE.cs:5-8` 的
+     * `CodeEE(errormes, position)`、`EmueraException.cs:7-13` 的 `Position` 字段），
+     * 上屏时它优先于「捕获点那一行」（`Process.cs:598-606`：`ex.Position` 命中就不看
+     * `current`），文件名由此进 `Lang.Error.ErrorFileAndLine`（`Lang.cs:2954`；无行号形态
+     * `Lang.Error.ErrorFile` 见 `Lang.cs:2958`）。所以本字段只在**抛点**由
+     * [com.eratw.port.core.code.VirtualMachine] 填，语句层捕获点不再猜帧。
+     *
+     * null = 宿主没有文件表（[com.eratw.port.core.code.VmHost.scriptFileOf] 缺省实现）
+     * 或抛点无帧 —— 与加本字段之前逐字相同。
+     */
+    scriptFile: String? = null,
+) : CodeEE(message, funcName, line, pc, scriptFile = scriptFile)
 
 /**
  * 死循环保护的**触发原因**（ENGFIX-3 · 2026-11-05）。
@@ -85,6 +99,13 @@ enum class LoopGuardCause {
  *   「为什么这一次会问」的事后取证靠它
  * @property textVariant 宿主画框时实际使用的语言档，原样带回给 VM，用于把
  *   「玩家选了退出」那条 `CodeEE` 的文案渲染成**同一种语言**（口径见 [InfiniteLoopTexts]）
+ * @property attempt **本次 run 内的第几次告警**（1 = 首问）。原版每次都问同一个阈值，
+ *   本移植「答继续后阈值翻倍」是有意偏离（见 [VirtualMachine] 的 `loopAlertEscalated`），
+ *   没有这一位，事后看现场分不出「一段长链问了一次」还是「四段各问了一次」。
+ * @property backgroundMs 本段起点以来**宿主累计在后台的毫秒数**（`VmHost.loopGuardBackgroundMs`）。
+ *   0 = 从没被暂停 / 宿主不记账。判据只用「VM 真在跑」的时钟（见
+ *   [VmConfig.monotonicMs]），这一位是给下一份上报自证用的：
+ *   `elapsedMs` 大而 `backgroundMs` 也大 ⇒ 慢机 + 后台抢占，不是死循环。
  */
 data class InfiniteLoopAlert(
     val sourceName: String?,
@@ -94,6 +115,8 @@ data class InfiniteLoopAlert(
     val elapsedMs: Long,
     val alertTimeMs: Long,
     val textVariant: LangVariant = LangVariant.ZHS,
+    val attempt: Int = 1,
+    val backgroundMs: Long = 0L,
 ) {
     /** 对话框标题（`Lang.MessageBox.InfiniteLoop`）。 */
     fun title(variant: LangVariant = textVariant): String = InfiniteLoopTexts.title(variant)
@@ -304,6 +327,8 @@ class StepLimitExceeded(
      * null = 非告警路径（装置预算）。宿主的取证与失败报告按这一份说「为什么问、玩家答了什么」。
      */
     val alert: InfiniteLoopAlert? = null,
+    /** 抛点帧的源文件显示名（口径同 [VmException] 的末位参数；[alert] 的文件位另有其道）。 */
+    scriptFile: String? = null,
 ) : VmException(
     when (guardCause) {
         // 官方唯一中止路径：文案 = Lang.Error.SelectExitInfiniteLoopMB（skia Process.cs:484）。
@@ -318,7 +343,7 @@ class StepLimitExceeded(
                 if (callChain != null) " @ $callChain" else ""
         }
     },
-    line, pc, funcName,
+    line, pc, funcName, scriptFile,
 )
 
 /** 调用栈超过 [VmConfig.maxCallDepth]。 */
@@ -329,7 +354,9 @@ class CallStackOverflow(
     funcName: String?,
     /** 同 [StepLimitExceeded.callChain]：抛点活链，失败屏只认 message。 */
     val callChain: String? = null,
+    /** 抛点帧的源文件显示名（口径同 [VmException] 的末位参数）。 */
+    scriptFile: String? = null,
 ) : VmException(
     "调用栈超过上限($depth)" + if (callChain != null) " @ $callChain" else "",
-    line, pc, funcName,
+    line, pc, funcName, scriptFile,
 )

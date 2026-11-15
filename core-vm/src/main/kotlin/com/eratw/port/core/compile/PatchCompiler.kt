@@ -9,6 +9,7 @@ import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.FuncCall
 import com.eratw.port.core.expr.OperandType
+import com.eratw.port.core.expr.ParserConfig
 import com.eratw.port.core.expr.VarInfo
 import com.eratw.port.core.frontend.ErbPreprocessor
 import com.eratw.port.core.frontend.Symbols
@@ -75,15 +76,20 @@ import com.eratw.port.core.vars.DimParser
  * ## 包内同名重复定义 = 后定义者生效（wave/mod-import-event-members）
  *
  * 原版对同名**非事件**函数是「后装载者留下」：`noneventLabelDic[labelName] = label`
- * 直接赋值（spec: LabelDictionary.cs:60-68），装载期仅按配置告警不拒绝
- * （spec: ErbLoader.cs:443-450，WarnNormalFunctionOverloading 出厂默认关，
- * spec: ConfigData.cs:94）。社区口上包普遍依赖该语义做「同函数多版本、后文件盖前文件」，
- * 补丁预扫因此把同键重复定义从拒绝改为**后到者覆盖**（步骤 3）+ 一条 parseWarnings
- * 告警（level 1 语义，不拒绝）；被覆盖定义的私有 `#DIM` 随其 FuncHead 一并废弃
- * （私有 DIM 解析在全部源预扫完后只对胜者定义做，见步骤 3.5），切片阶段跳过非胜者
- * 函数体（见 [slice]）。事件名的重复定义在本编译器里同键覆盖（最后成员胜出）——
- * 原版事件名是多成员并存（spec: LabelDictionary.cs:70-104 四桶追加），差异登记在
- * 类尾 TODO(verify) 4。
+ * 直接赋值（spec: LabelDictionary.cs:107-113），装载期仅按配置告警不拒绝
+ * （spec: ErbLoader.cs:466 的 `!label.IsEvent && (Config.WarnNormalFunctionOverloading ||
+ * Program.AnalysisMode)`；键缺省 false，spec: ConfigData.cs:99）。社区口上包普遍依赖该语义
+ * 做「同函数多版本、后文件盖前文件」，补丁预扫因此把同键重复定义从拒绝改为**后到者覆盖**
+ * （步骤 3）+ 一条 parseWarnings 告警（level 1 语义，不拒绝）；被覆盖定义的私有 `#DIM`
+ * 随其 FuncHead 一并废弃（私有 DIM 解析在全部源预扫完后只对胜者定义做，见步骤 3.5），
+ * 切片阶段跳过非胜者函数体（见 [slice]）。
+ *
+ * 告警门 = [warnNormalFunctionOverloading]：设备侧补丁预扫**不是** `Program.AnalysisMode`
+ * （后者是 erbcc 批量编译的口径，`LabelTable.duplicateFunctionWarnings` 因此无条件），
+ * 故按配置门控 —— false 时同批源内同名覆盖**零告警**，覆盖/分桶/装载结果逐位不变；
+ * 事件名重复**恒不告警**（原版 `!label.IsEvent`）。事件名的重复定义在本编译器里同键
+ * 覆盖（最后成员胜出）——原版事件名是多成员并存（spec: LabelDictionary.cs:187-216 四桶
+ * 追加），差异登记在类尾 TODO(verify) 4。
  *
  * ## 事件函数成员与补丁合成事件入口（wave/mod-import-event-members）
  *
@@ -142,6 +148,34 @@ class PatchCompiler(
      * 文字'[['」）整包解析失败。缺省 null = 旧行为逐字节不变。
      */
     val renameDic: Map<String, String>? = null,
+    /**
+     * 解析期常量关键字折叠（原版装载期 Restructure，`VariableStrArgTerm.cs:57-69`）：
+     * 与 erbcc 全量编译同一份数据面（系统名表 + ERD 表），由导入链按设备 `CSV/` 与
+     * ERD 构造后注入。
+     *
+     * 存在理由：设备端编译是**运行期唯一还在解析脚本**的入口。不注入时
+     * `M_CFLAG:LOCAL:后宫居住标记` 这类常量下标会保留成 `KeywordIndexArg`，
+     * 运行期按名查盘上 CSV —— 盘上表旧/半截就抛「M_CFLAG.csv 中未定义关键字」，
+     * 与 5fce232df 修掉的全量编译路是同一类相位缺陷。
+     * 缺省 null = 不折（查不到/无 CSV 时的保守回退，报错语义不变）。
+     */
+    val constantKeywordLookup: ((String, Int, String) -> Long?)? = null,
+    /**
+     * 同名**非事件**函数重复定义的装载期告警门（原版 `Config.WarnNormalFunctionOverloading`）：
+     * [prescan] 仅在本值为 true 时把「同名覆盖」写进 [PatchResult.parseWarnings]；false 时
+     * 零告警，覆盖语义（非事件后定义者胜出）与装载结果逐位不变。
+     *
+     * 原版门 = `!label.IsEvent && (Config.WarnNormalFunctionOverloading || Program.AnalysisMode)`
+     * （spec: ErbLoader.cs:466；命中后 level 1 告警，:472），键缺省 false（spec:
+     * ConfigData.cs:99）。设备侧补丁预扫**不是** `Program.AnalysisMode`（那是 erbcc 批量
+     * 编译的口径，`LabelTable.duplicateFunctionWarnings` 因此无条件），所以必须按配置
+     * 门控 —— 4.981 出厂 `emuera.config` 第 48 行是 `DUPLICATED FUNCTIONS WARNING:YES`
+     * ⇒ 出厂行为不变；玩家关掉后导入报告不再刷同名覆盖告警。
+     *
+     * 缺省 true = 保住接线前的既有设备行为（不能因调用方漏传而静默少告警）；生产调用方
+     * （app 的 `ModImportController`）恒显式传 `EffectiveConfig` 读数。
+     */
+    val warnNormalFunctionOverloading: Boolean = true,
 ) {
 
     /** 补丁源文件（相对路径用于报错定位与 `position` 字段；文本按 UTF-8 解码后的形态）。 */
@@ -398,8 +432,9 @@ class PatchCompiler(
         }
 
         // ---- 步骤 3：预扫（第一遍）——函数头 / 方法声明 / `#DIM` 原文，带 I6 前三闸 ----
-        // 包内同键重复定义 = 后定义者覆盖（原版 LabelDictionary.cs:60-68 语义），覆盖时
-        // 塞一条 parseWarnings 告警（ErbLoader.cs:443-450 的 level-1 告警口径）。
+        // 包内同键重复定义 = 后定义者覆盖（原版 LabelDictionary.cs:107-113 语义），覆盖时按
+        // [warnNormalFunctionOverloading] 决定要不要塞一条 parseWarnings 告警（原版
+        // ErbLoader.cs:466 的 level-1 告警门，事件名恒不告警）。
         val heads = LinkedHashMap<String, FuncHead>()          // 大写键 → 胜者定义（后到者覆盖）
         val privateByDefinition = HashMap<Pair<String, Int>, List<VarInfo>>()
         val privateDimsOut = ArrayList<BootMetadata.PrivateDim>()
@@ -534,7 +569,12 @@ class PatchCompiler(
             // resolver/parser 每轮重建：解析面（补丁内可引用函数名）随 poison 收缩，
             // 引用了被毒函数的调用点必须在这一轮的解析层就失败，才能同粒度废弃调用方。
             val resolver = PatchSourceResolver(symbolTable, privateByDefinition, liveHeads)
-            val parser = LineParser(resolver, lexerConfig = lexerCfg, dimConsts = consts)
+            val parser = LineParser(
+                resolver,
+                config = ParserConfig(constantKeywordLookup = constantKeywordLookup),
+                lexerConfig = lexerCfg,
+                dimConsts = consts,
+            )
             val parsed = LinkedHashMap<String, Pair<FuncHead, List<Statement>>>()
             for (src in sources) {
                 slice(src, liveHeads, parser, parsed, lexerCfg, poison, warnings)
@@ -574,7 +614,9 @@ class PatchCompiler(
             val (key, pair) = entry
             val (head, stmts) = pair
             val label = stmts.filterIsInstance<FuncLabelStmt>().firstOrNull()
-            val paramNames = label?.paramNames ?: emptyList()
+            // 形参项原文（保留 `:n`）：与全量路 CorpusCompile 同口径 —— 逐位绑定与
+            // ARG/ARGS 声明长（= max(下标 + 1)）都要靠它，剥掉下标只剩个数。
+            val paramNames = label?.paramRefs ?: emptyList()
             val programName =
                 if (Symbols.isEventLabelName(key)) "$key#${baseCounts.functionCount + i}" else key
             sigs.add(
@@ -807,10 +849,11 @@ class PatchCompiler(
      * 做（覆盖语义：被覆盖定义的私有声明随其 FuncHead 一并废弃）。
      *
      * 包内同键重复定义 = **后定义者覆盖**（原版对同名非事件函数是「后装载者留下」，
-     * spec: LabelDictionary.cs:60-68 直接赋值；装载期只告警不拒绝，spec: ErbLoader.cs:443-450，
-     * WarnNormalFunctionOverloading 出厂默认关，spec: ConfigData.cs:94），覆盖时塞一条
-     * [warnings] 告警（level 1 语义，不拒绝）。事件名同键覆盖（最后成员胜出）——原版
-     * 事件名是多成员并存（LabelDictionary.cs:70-104），差异见类尾 TODO(verify) 4。
+     * spec: LabelDictionary.cs:107-113 直接赋值；装载期只告警不拒绝，spec: ErbLoader.cs:466，
+     * 键缺省 false，spec: ConfigData.cs:99）。覆盖时的告警受 [warnNormalFunctionOverloading]
+     * 门控（原版 `WarnNormalFunctionOverloading || Program.AnalysisMode` 的前半；设备侧不是
+     * 分析态），且事件名恒不告警（原版 `!label.IsEvent`）。事件名同键覆盖（最后成员胜出）
+     * ——原版事件名是多成员并存（LabelDictionary.cs:187-216），差异见类尾 TODO(verify) 4。
      */
     private fun prescan(
         src: SourceFile,
@@ -853,13 +896,18 @@ class PatchCompiler(
                     val old = heads.put(key, FuncHead(name, rel, line.lineNo).apply { rawLine = content })
                     if (old != null) {
                         // 后定义者生效；被覆盖定义的 dimLines 挂在旧 FuncHead 上随替换废弃
-                        //（步骤 3.5 只解析 heads 里的胜者定义）。告警口径 = 原版
-                        // FuncIsAlreadyDefined 的 level-1（ErbLoader.cs:448）。
-                        warnings.add(
-                            "函数 $key 重复定义，后定义者生效：$rel:${line.lineNo + 1} 覆盖 " +
-                                "${old.file}:${old.displayLine}（原版对同名函数覆盖只告警不拒绝，" +
-                                "spec: LabelDictionary.cs:60-68 + ConfigData.cs:94）",
-                        )
+                        //（步骤 3.5 只解析 heads 里的胜者定义）。告警门 = 原版
+                        // `!label.IsEvent && (WarnNormalFunctionOverloading || AnalysisMode)`
+                        // 的前半（spec: ErbLoader.cs:466 的 level-1 告警，:472）：事件名重复
+                        // 恒不告警，配置关时同一批源零告警。**覆盖动作本身已在上一行完成**，
+                        // 门只决定「发不发」，不改装载/覆盖结果。
+                        if (warnNormalFunctionOverloading && !Symbols.isEventLabelName(name)) {
+                            warnings.add(
+                                "函数 $key 重复定义，后定义者生效：$rel:${line.lineNo + 1} 覆盖 " +
+                                    "${old.file}:${old.displayLine}（原版对同名函数覆盖只告警不拒绝，" +
+                                    "spec: LabelDictionary.cs:107-113 + ConfigData.cs:99）",
+                            )
+                        }
                     }
                     cur = heads.getValue(key)
                 }
@@ -1017,7 +1065,7 @@ class PatchCompiler(
                     val key = stmt.name.uppercase()
                     // 包内同名覆盖（后定义者生效）：heads 里是胜者定义，函数体按定义身份
                     //（文件, 0 基行号）比对——非胜者的 @ 行整段丢弃（连函数头带语句体），
-                    // 私名作用域与 #LOCALSIZE 采集都只对胜者生效。spec: LabelDictionary.cs:60-68。
+                    // 私名作用域与 #LOCALSIZE 采集都只对胜者生效。spec: LabelDictionary.cs:107-113。
                     val winner = heads[key]
                     // 更早轮次已废弃的函数（不在本轮解析面里）：整段作废，等下一个 @ 行。
                     if (winner == null) {
@@ -1041,7 +1089,7 @@ class PatchCompiler(
                     // （@ 行之前的 # 行不归属任何函数，Symbols.kt:921 curPos < 0 continue
                     // 的同款）；后到者覆盖。值域口径 = 原版 <=0 或 >= int.MaxValue 告警后
                     // 不生效（spec: LogicalLineParser.cs:236-244）：越界值不写、保持 0
-                    // （不静默截断）；16 位域上限由 FuncMeta 构造期 require 兜底（明确失败）。
+                    // （不静默截断）；上界之后还有 FuncMeta 构造期 require 兜底（明确失败）。
                     val key = curKey
                     if (key != null) {
                         val head = heads.getValue(key)
@@ -1195,7 +1243,7 @@ class PatchCompiler(
 //    成员执行（原版会插桶，spec: CalledFunction.cs:228-243），需要采集时从切片遍的
 //    [SharpStmt] 补（与 #LOCALSIZE 同款通道），组长裁定后再接。两个残余差异：
 //    （a）同名事件名的包内重复定义在本编译器是「最后成员胜出」，而原版是多成员并存
-//    （spec: LabelDictionary.cs:70-104 四桶追加）——社区包对同一事件名的多定义靠
+//    （spec: LabelDictionary.cs:187-216 四桶追加）——社区包对同一事件名的多定义靠
 //    同名覆盖叠打的形态会被吞成员，待采集多成员语义时一并处理；（b）装载路
 //    （GameSession.buildPatchFunctionMetas）按 Program 函数名重建补丁 FuncMeta 且
 //    事件位恒 false，事件成员要进 eventMembersByKey 需该重建面识别事件名（组长接线）。

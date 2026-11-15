@@ -37,6 +37,13 @@ enum class ComponentFieldType { INT, STR }
  * [isEntityRef] 只对整型字段合法：跨设备 shortId 重映射时，引擎按 **schema 声明**
  * 遍历该字段并改写其中的 EntityId；未声明为 EntityRef 的整型字段一律不猜值
  * （普通整数与 EntityId 在 Long 上不可区分，诚实边界同蓝图 §7）。
+ *
+ * 删除契约（v6.5-c §19.4.1，KEEP_INVALID 是 v1 唯一策略）：目标实体 destroy 后，
+ * 引用它的本字段**原值保留**（引擎不 cascade-null、不全表扫描），目标 generation
+ * 失效 ⇒ exists 判否；Mod 用 ENTITY_EXISTS 自检。这与关系边的级联清除契约不同
+ * （destroy 清边、不清组件字段），二者承载面由 Mod 自选。写入不校验引用存活
+ * （无参照完整性闸）；槽复用不重写旧字段值（generation ABA 防护）。
+ * 回归闸 EntityRefLifecycleContractTest。
  */
 data class ComponentFieldSpec(
     val name: String,
@@ -148,7 +155,13 @@ interface IEntityKernel {
     /** 建实体（初始 ACTIVE）。archetype 须已注册；返回新 EntityId。 */
     fun create(pkgShortId: Int, archetype: String): Long
 
-    /** 真删：级联清关系边、槽位 generation 递增。不存在返回 false。 */
+    /**
+     * 真删：级联清关系边、槽位 generation 递增。不存在返回 false。
+     *
+     * 组件 EntityRef 字段**不在级联面**（v6.5-c §19.4.1）：引用本实体的组件字段
+     * 原值保留（悬空 + generation 失效，exists 判否），引擎不 cascade-null。
+     * 要 cascade-on-destroy 用关系边，要悬空+自检用组件字段，二者删除契约不同。
+     */
     fun destroy(id: Long): Boolean
 
     /** 存活判定（全位域比对 + 未销毁；RETIRED 也算存在）。 */
@@ -245,6 +258,22 @@ interface ICharaSlotProjector {
 
     /** 当前映射行号；未投射 -1。调用方不得持久化此值。 */
     fun charIndexOf(entityId: Long): Int
+
+    /**
+     * 行排列世代（§7 引用审计诚实边界 / MR-2b-1）：原生行发生排列/删除（含退场删行）
+     * 即递增；尾部追加新行（[project]）不递增（既有行号不动）。Mod 存原生引用时一并快照
+     * 此值，用前比对即可自检缓存的 charIndex 是否过期——这是 ROSTER_GENERATION 内置函数
+     * 的核心底座（函数注册归 M4-2）。无 Mod / 无行操作时恒 0，不参与热路径。
+     */
+    val rosterGeneration: Long
+
+    /**
+     * 世代校验通道换 CHARA（§7 诚实四行判据第 3 行）：仅当 [rosterGeneration] 与
+     * [expectedGeneration] 一致且实体已投射时返回当前行号；世代过期或未投射返回 -1（拒绝）。
+     * 引擎校验的是「声明过世代的引用」，不是裸 Long——未声明世代的普通 charIndex 不走此通道，
+     * 引擎不猜值、不乱改（四行判据第 4 行的诚实边界）。
+     */
+    fun charIndexOfChecked(entityId: Long, expectedGeneration: Long): Int
 
     /** 行号反查；该行无投射实体返回 [EntityIdCodec.NULL]。 */
     fun entityAt(charIndex: Int): Long

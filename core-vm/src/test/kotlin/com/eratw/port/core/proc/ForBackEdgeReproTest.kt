@@ -88,9 +88,9 @@ class ForBackEdgeReproTest {
         val fb: FunctionBytecode = compiler.compileFunction(
             FuncSig("SYSTEM_TITLE"), title, setOf("SYSTEM_TITLE", "GETMAPID"),
         )
-        // 形参必须显式声明：原版 `CALL F(x)` 时 `ConvertArg` 按 `TopLabel.Arg.Length` 建数组，
-        // 未声明形参（arity=0）⇒ TooManyFuncArgs（CalledFunction.cs:136-140）。本骨架
-        // `CALL GETMAPID, Y:LOCAL` 传 1 个实参，故 `@GETMAPID(ARG)` 的 arity 必须是 1。
+        // 形参必须显式声明：实参按**形参位**绑定，未声明形参（arity=0）就没有可写的位。
+        // 4.981 起多传的实参是静默丢弃而非 TooManyFuncArgs（Process.CalledFunction.cs:212-357），
+        // 但本骨架要验证的是 `CALL GETMAPID, Y:LOCAL` 的实参真的落到 ARG，故仍按 arity=1 声明。
         val gfb: FunctionBytecode = compiler.compileFunction(
             FuncSig("GETMAPID", arity = 1, isMethod = true, paramNames = listOf("ARG")),
             getmap,

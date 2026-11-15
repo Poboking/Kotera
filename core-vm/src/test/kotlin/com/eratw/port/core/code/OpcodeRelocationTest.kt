@@ -3,6 +3,7 @@ package com.eratw.port.core.code
 import com.eratw.port.core.expr.IntLiteral
 import com.eratw.port.core.loader.ErbcLoadException
 import com.eratw.port.core.loader.ProgramLoader
+import com.eratw.port.core.patch.LinkInputs
 import com.eratw.port.core.patch.LinkableModule
 import com.eratw.port.core.patch.ModuleDescriptor
 import com.eratw.port.core.patch.ModuleLinker
@@ -52,7 +53,7 @@ class OpcodeRelocationTest {
     private val mark = 0x51515151
 
     private fun specRef(op: Int, slot: Int): PoolRef {
-        // 不变量 1：c 槽在 0..246 全域都不是池引用。
+        // 不变量 1：c 槽在 0..248 全域都不是池引用。
         if (slot == 2) return PoolRef.NONE
         // isa 语句 marker：a = 语句池下标，b = 0，c = NONE（契约 C3）。
         if (op in 29..197) return if (slot == 0) PoolRef.STATEMENT else PoolRef.NONE
@@ -90,6 +91,8 @@ class OpcodeRelocationTest {
         Opcode._JUMP_IF_FALSE, Opcode._JUMP_IF_TRUE -> slot == 1
         // 条件位融合超指令（246）：跳转偏移在 c、相对下一条指令（与 _JUMP_IF_FALSE 同档）。
         Opcode._EVAL_INT_JZ -> slot == 2
+        // 循环条件融合（247/248）：跳转偏移在 c、相对下一条指令（与 _JUMP_IF_FALSE 同档）。
+        Opcode._LT_JZ, Opcode._GT_JZ -> slot == 2
         else -> false
     }
 
@@ -182,7 +185,7 @@ class OpcodeRelocationTest {
     fun `表稠密覆盖全部操作码且与规约逐槽一致`() {
         assertEquals(Opcode.MAX_OPCODE + 1, OpcodeRelocation.size, "表必须按 0..MAX_OPCODE 稠密建满")
         assertEquals(Opcode.NAMES.size, OpcodeRelocation.size, "表与名字表同长（追加操作码漏扩 NAMES 也在这里红）")
-        assertEquals(247, OpcodeRelocation.size, "当前末条是 _EVAL_INT_JZ(246)；追加操作码时本钉跟着改")
+        assertEquals(249, OpcodeRelocation.size, "当前末条是 _GT_JZ(248)；追加操作码时本钉跟着改")
         for (op in 0..Opcode.MAX_OPCODE) {
             val rel = OpcodeRelocation.of(op)
             for (slot in 0..2) {
@@ -238,7 +241,9 @@ class OpcodeRelocationTest {
         // 四个基线互不相同且非零：错平移一格、或把不该动的槽平移了，读数上都看得出来。
         assertEquals(listOf(3, 5, 7, 11), listOf(longBase, stringBase, exprBase, stmtBase))
 
-        val linked = ModuleLinker.link(base, baseMetas, listOf(probeModule()), ResolverPolicy.MODERN).program
+        val linked = ModuleLinker.link(
+            LinkInputs(base, baseMetas, listOf(probeModule()), ResolverPolicy.MODERN),
+        ).program
         for (op in 0..Opcode.MAX_OPCODE) {
             val pc = baseInstr + op * 2
             assertEquals(op, linked.op(pc), "pc=$pc 的操作码")
@@ -285,7 +290,7 @@ class OpcodeRelocationTest {
             override val functions = listOf(FuncMeta(index = 0, key = "RFNONE"), FuncMeta(index = 1, key = "RFEXPR"))
             override fun signatureHashOf(functionKey: String): String = ""
         }
-        val linked = ModuleLinker.link(base, baseMetas, listOf(module), ResolverPolicy.MODERN).program
+        val linked = ModuleLinker.link(LinkInputs(base, baseMetas, listOf(module), ResolverPolicy.MODERN)).program
         val off = base.instructionCount
         // 缺陷本体：-1 若被平移就变成 exprBase-1，运行期求值 base 段末条表达式（返回别人的值）。
         assertEquals(ErbcFormat.NONE_REF, linked.a(off), "_RETF 的 NONE_REF 必须原样穿过链接")

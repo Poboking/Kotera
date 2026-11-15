@@ -94,7 +94,7 @@ class ErrorReport(
      */
     val rootCause: String? = null,
     /**
-     * 脚本位置（如「GET_TALENTNAME 行370」）；null = 本错误不指向某行脚本。
+     * 脚本位置（如「GET_TALENTNAME ERB/SUB/A.ERB 行370」，文件段可缺）；null = 本错误不指向某行脚本。
      *
      * 行号是 **1 基**（与原版屏上一致，判据见 [scriptLocationOf]）；生产侧唯一入口是
      * [CodeEE.displayLine]，本字段只搬运、不再换算。
@@ -253,10 +253,12 @@ class ErrorReport(
 
         /**
          * 从异常因果链（cause 链，最多 16 层）里找第一个带位置信息的 [CodeEE]，
-         * 返回「函数名 行N」形式的脚本位置；找不到返回 null。
+         * 返回「函数名 文件 行N」形式的脚本位置（缺哪段省哪段）；找不到返回 null。
          *
          * 与 app 侧既有 `GameHost.scriptLocation` 同判据（那里的产出上屏，这里的进报告）：
-         * [CodeEE] 一路都带 funcName/line，裸穿到宿主时这是唯一的脚本定位。
+         * [CodeEE] 一路都带 funcName/line，裸穿到宿主时这是唯一的脚本定位。文件段只读
+         * [CodeEE.scriptFile]（语句层捕获点盖章的源文件显示名）；它为空时输出与本波之前
+         * 逐字节相同，屏上文案不读本函数。
          *
          * 行号取 [CodeEE.displayLine]（**1 基，与原版对齐**）——[CodeEE.line] 是内部 0 基
          * 下标，直接打它会比原版少一行；换算只在 [CodeEE.displayLine] 一处，本函数不加一
@@ -267,8 +269,9 @@ class ErrorReport(
             var depth = 0
             while (node != null && depth < 16) {
                 if (node is CodeEE) {
-                    val parts = ArrayList<String>(2)
+                    val parts = ArrayList<String>(3)
                     node.funcName?.takeIf { it.isNotBlank() }?.let { parts += it }
+                    node.scriptFile?.takeIf { it.isNotBlank() }?.let { parts += it }
                     if (node.line >= 0) parts += "行${node.displayLine}"
                     return if (parts.isEmpty()) null else parts.joinToString(" ")
                 }

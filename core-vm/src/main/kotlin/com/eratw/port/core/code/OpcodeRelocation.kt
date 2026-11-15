@@ -90,7 +90,7 @@ class OperandRelocation(val a: PoolRef, val b: PoolRef, val c: PoolRef) {
  *
  * ## 不变量
  *
- * * c 槽在 0..246 全域都是 [PoolRef.NONE]（`_STK_PLUS_VAR_I` 的 c 是 ±1 增量，
+ * * c 槽在 0..248 全域都是 [PoolRef.NONE]（`_STK_PLUS_VAR_I` 的 c 是 ±1 增量，
  *   `_CALL`/`_CALL_BY_NAME`/`_CALL_STR` 的 c 是返回槽）。将来若有 c 是池引用，
  *   消费方已经按三槽循环，不需要改代码，但 `OpcodeRelocationTest` 的 c 槽钉会红 ——
  *   那是有意的：这种变化必须过一次人工裁定。
@@ -201,10 +201,12 @@ object OpcodeRelocation {
         put(Opcode._STK_POP_SLOT_I)
         put(Opcode._STK_POP_SLOT_S)
 
-        // ---- 末尾追加段 244..246 ----
+        // ---- 末尾追加段 244..248 ----
         put(Opcode._RETF, a = PoolRef.EXPR_NULLABLE)
         put(Opcode._CALL_STR)
         put(Opcode._EVAL_INT_JZ, a = PoolRef.EXPR)
+        put(Opcode._LT_JZ)
+        put(Opcode._GT_JZ)
 
         Array(size) { op ->
             requireNotNull(t[op]) {

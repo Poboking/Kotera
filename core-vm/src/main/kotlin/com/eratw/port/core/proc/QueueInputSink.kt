@@ -211,17 +211,26 @@ class InputSinkClosedException(
  * [Entry] 里加 `changedByMouse` 维并让宿主提交点（`app`/`platform`）跟着分流。
  * `PRIMITIVE_MOUSE_KEY` 的真鼠标/按键事件推进（:1290-1346）同样未接，本类只覆盖
  * 「一条提交」与「超时」两个推进源。
- * 另有四处提交预处理/状态维未接（语料 0 命中，不影响本路形态分派）：
+ * 另有两处提交预处理/状态维未接（语料 0 命中，不影响本路形态分派）：
  * ① 脚本执行期（`state == Running`，:1374-1377）的按键原版丢弃 —— 生产宿主已按
  * [isAwaiting] 预筛对齐（见第 1 条，2026-10-25），本类自身的队列语义保留给测试/装置；
  * ② `@` 开头的系统命令（:1412-1416，`input.Length > 1 && !OneInput` 才走）；
- * ③ 括号表达式输入 `parseInput`（:1425-1428，实现 :1546）—— 提交文本在原版进
- * `doInputToEmueraProgram` 之前还要过这两道，本类按「整条就是最终文本」收；
- * ④ **多段切分**：原版先把这条提交按 `spliter = { "\\n", "\r\n", "\n", "\r" }`
- * （`EmueraConsole.cs:146`，首项是**字面**反斜杠+n 两字符）切成多段，再逐段
- * `RunEmueraProgram`（:1429-1433）⇒ 一次回车可跨多处等待连推；本类把「一条提交」
- * 当作一个等待的输入、不切分（宏回放/多行输入含字面反斜杠+n 或 CR/LF 时行为分叉）。
- * 段内跳过标记的处理已补上（见 `ESCAPE_SKIP` 与 [interpret]）。
+ * ③ **括号表达式输入 `parseInput`**（2026-11-11 已补）：原版 `:1425-1428` 在**切段之前**把
+ * `( … )*n` 展开成重复串（实现 `:1546-1623`），本类由 [expandMacroSyntax] 逐条复刻
+ * （含 `\e`/`\n`/`\r`/`\` 转义表）。
+ * ④ **多段切分**（2026-11-11 已补）：原版先把这条提交按
+ * `spliter = { "\\n", "\r\n", "\n", "\r" }`（`EmueraConsole.cs:146`，首项是**字面**
+ * 反斜杠+n 两字符）切成多段，再逐段 `RunEmueraProgram`（:1429-1433）⇒ 一次回车可跨
+ * 多处等待连推。本类在 [submit] 入队时按同一张分隔符表切段，**每段一条 [Entry]**、
+ * 依次入队（空段保留 = `StringSplitOptions.None`），等待方逐段消费；鼠标路
+ * [submitButtonClick]（原版 `changedByMouse: true`，`MainWindow.cs:1421-1423`）整串不切。
+ * 段内跳过标记的处理见 `ESCAPE_SKIP` 与 [deliverText]。
+ *
+ * 已知差异（多段切分）：原版段循环在某段跑完已离屏（`state != WaitInput`）时 `break`
+ * 丢弃余段（:1457-1460；典型触发是 Quit/Error 收尾与 `KillMacro` 宏回放中止）。本类按
+ * 队列模型提前把各段入队，余段留在队列里交给下一次等待（与第 1 条的迟到提交同口径）。
+ * 生产路径上段间通常仍处 WaitInput，且 F1-F12 宏回放不走本口，故本刀不引入
+ * 「控制台状态回传」这条新维；要逐字复刻就得让交付侧把状态喂进来。
  */
 class QueueInputSink(
     /** 单调时钟（纳秒）。默认墙钟；测试注入假时钟以在不真等毫秒的情况下驱动截止/超时分支。 */
@@ -231,11 +240,19 @@ class QueueInputSink(
     /**
      * `PressEnterKey` 段内的跳过标记 `\e`（`EmueraConsole.cs:1435` 的 `"\\e"` 字面量：
      * 反斜杠 + `e` 两个字符，**不是** ESC 控制符 U+001B）。命中即从提交文本里全部剥离，
-     * 并把 `MesSkip` 置真（:1437-1438）。C# 逐段独立判定（:1432 的分段循环），
-     * 本移植「一条提交 = 一段」等价为整条判定一次；剥离发生在 OneInput 截断**之前**（同 C# 序）。
+     * 并把 `MesSkip` 置真（:1437-1438）。C# 逐段独立判定（:1432 的分段循环）；
+     * 本移植的每条 [Entry] 就是一段（[submit] 入队时已切好），所以剥离在 [deliverText]
+     * 里逐 Entry 判定一次，且仍在 OneInput 截断**之前**（同 C# 序）。
      */
     private companion object {
         const val ESCAPE_SKIP = "\\e"
+
+        /**
+         * 指令集括号语法的两道安全闸（原版不设防，这里只防手滑把内存吃光，不改变正常语义）：
+         * `( … )*n` 的 n 上限、以及展开后总长度上限。
+         */
+        const val SYNTAX_REPEAT_MAX = 99
+        const val SYNTAX_EXPAND_CAP = 1_000_000
 
         /**
          * 近期流水环形窗口的容量（条）。定长是硬约束：见类 KDoc 第 10 条，
@@ -392,6 +409,31 @@ class QueueInputSink(
      * 交付在锁外，见 [settleTurnStart]。宿主实现自身仍应便宜 —— 它在 VM 线程上同步调。
      */
     var onTurnReady: ((Long) -> Unit)? = null
+
+    /**
+     * turn 边界回调（宿主接线；null = 零行为）：[readAnyKey] / [waitInput] **每次进入等待点**
+     * 各调一次，不论这次等待之前有没有玩家提交起点。
+     *
+     * 原版每个等待点都结束一次 turn、回到消息循环（`Process.cs:438-470` 的 DoScript 循环
+     * 与 WaitInput 状态机）；限时等待超时由 `endTimer()` 置 `isTimeout = true` 后调
+     * `RunEmueraProgram("")` 重进脚本（`EmueraConsole.cs:1043/:1068`），**同样是一次新 turn**，
+     * 且每次等待入口都会 `RefreshStrings(true)` 重画。4.981 的动态地图循环把这一点用到了极致：
+     * 魔改内容/qol/qol_MAP.ERB:32-98 的 `MAP_LOOP` 由 `TINPUTSNF` 超时逐帧推进，每一帧就是
+     * 一次 [waitInput] 调用、也就是一个 turn；该死循环整段跑在宿主的一次 `resumeSystem()` 里。
+     *
+     * 与 [onTurnReady] 的区别（两者都在等待点、锁外、VM 线程触发，但用途不能混）：
+     * - [onTurnReady] 是「玩家提交 → 下一次等待」的**翻页读数**，[settleTurnStart] 没有起点时
+     *   返 -1 就不触发；宿主在它上面挂了存档兑现、堆采样、turn 日志、图像回收等**每页一次**
+     *   的重动作，绝不能让 33 ms 一帧的动画循环每帧都跑。
+     * - 本回调是**无条件的轻量边界信号**，供宿主按 turn 复位页计时器、清长页忙碌横带。
+     *   缺省 null ⇒ 装置/headless 逐字零行为；实现必须便宜，且**不得**回调 sink 自身（会自锁）。
+     *
+     * 真机教训（2026-11-03 报告）：缺这条边界时，上述动画循环里 `lastSubmitNs` 恒为 0，
+     * [onTurnReady] 只在切页那一刻触发一次，之后 2.9 分钟不再触发 ⇒ 页计时器不复位、
+     * 忙碌横带常驻，玩家看到的就是「切换地图后一直加载」。
+     */
+    @Volatile
+    var onTurnBoundary: (() -> Unit)? = null
 
     /**
      * 等待点进入回调（宿主接线；null = 零行为）：[readAnyKey] / [waitInput] 进入等待时各调一次。
@@ -777,10 +819,20 @@ class QueueInputSink(
     /**
      * 提交一条「回车文本」。
      *
+     * ## 多段切分（原版 `PressEnterKey` 的指令集语义）
+     *
+     * 一次调用可能产生**多条** [Entry]：文本按原版分隔符表切成多段（见 [splitSegments]），
+     * 每段各占一个流水号、依次入队，等待方逐段消费 —— 这就是 era 指令集的「一次回车跨
+     * 多处等待连推」（`EmueraConsole.cs:1429-1433`；串里写 `0\e\n1\e\n` 即自动依次输入）。
+     * 鼠标路 [submitButtonClick] 对应原版 `changedByMouse: true`，**整串不切**（同
+     * `MainWindow.cs:1421-1423`）—— 右栏按钮/画布命中的语义因此逐字不变。
+     *
      * @param mesSkip `PressEnterKey` 的 `keySkip`：双击/右键/Esc 跳过时为 true，
-     *   普通回车为 false（`EmueraConsole.cs:1371-1373`、`MainWindow.cs:1415-1422`）
-     * @return true = 已入队；false = 队列已关闭（丢弃，不抛：这条提交来自正在销毁的 UI，
-     *   不该把关闭竞态变成宿主线程上的异常）。已关闭时**不发号**：流水编号只覆盖真正入队的提交。
+     *   普通回车为 false（`EmueraConsole.cs:1371-1373`、`MainWindow.cs:1415-1422`）。
+     *   **只作用于首段**：原版在段循环前置一次、每段末尾复位（:1373/:1456）。
+     * @return true = 已入队（至少一段）；false = 队列已关闭（丢弃，不抛：这条提交来自
+     *   正在销毁的 UI，不该把关闭竞态变成宿主线程上的异常）。已关闭时**不发号**：
+     *   流水编号只覆盖真正入队的段。
      */
     fun submit(text: String, mesSkip: Boolean = false): Boolean {
         // FEEL1-L3 探针（只观测，锁语义一字未动）：未挂载 = watch == null ⇒ 不取时钟、
@@ -793,11 +845,23 @@ class QueueInputSink(
             if (closed) return false
             // 翻页计时起点：入队即算「玩家已提交」，到下一个等待点结算。
             lastSubmitNs = System.nanoTime()
+            // 原版在**切段之前**先展开指令集的括号重复语法（`EmueraConsole.cs:1425-1428` → `:1429`）：
+            // 只有输入里出现过 `(` 才走解析；不带括号时 `\e`/`\n` 保持字面，由下面的切段处理。
+            val expanded = expandMacroSyntax(text)
+
             // 按下时刻用 [timeSource]（与截止点同一条时间轴；假时钟下可判先后）。
-            // 流水编号与入队同批、同一把锁：单调、只增、每条提交恰一个号（观察面，见类 KDoc 第 10 条）。
-            val seq = ++seqIssued
-            queue.addLast(Entry(text, mesSkip, timeSource(), seq))
-            noteEnqueued(seq, text, mesSkip)
+            // 一次按下的所有段共用一个 atNs：它们来自同一次回车，不属于不同按键。
+            val atNs = timeSource()
+            // 流水编号与入队同批、同一把锁：单调、只增、每段恰一个号（观察面，见类 KDoc 第 10 条）。
+            // keySkip 只落在**首段**：原版在段循环之前 `MesSkip = keySkip` 置一次（:1373），
+            // 每段末尾 `MesSkip = false` 复位（:1456）⇒ 后续段不带 keySkip；段内字面 `\e`
+            // 的跳过标记则由该段自己在 [deliverText] 里认（:1435-1438）。
+            splitSegments(expanded).forEachIndexed { index, segment ->
+                val skip = mesSkip && index == 0
+                val seq = ++seqIssued
+                queue.addLast(Entry(segment, skip, atNs, seq))
+                noteEnqueued(seq, segment, skip)
+            }
             arrived.signalAll()
             return true
         } finally {
@@ -811,6 +875,124 @@ class QueueInputSink(
                 )
             }
         }
+    }
+
+    /**
+     * era 指令集宏语法展开（原版 `EmueraConsole.parseInput`，`EmueraConsole.cs:1546-1623`）。
+     *
+     * 这是「指令集」的另一半：`( … )*n` 重复（可嵌套），以及反斜杠转义表。
+     * 原版**只在输入里出现过 `(` 时**才调它（`:1425-1428`，条件是 `input.Contains('(')`），
+     * 调用点在切段（`:1429`）**之前** —— 顺序是语义的一部分，不能换。
+     *
+     * 逐条对齐原版（`:1551-1621`）：
+     * - `( … )*n`：括号内递归解析（`isNest: true` 遇 `)` 收尾），`*n` 把展开结果**重复 n 次**
+     *   直接拼进串里（纯字符串展开，没有自己的循环语义）；不带 `*n` 即为分组。
+     * - `\e`：追加**字面** `\e` + 真换行，并置 flag —— 所以 `\e` 自带一次分段，紧随其后的
+     *   `\n` 被吞（`:1592-1601` 的 `flag`）。
+     * - `\n` → 真换行（分段）；`\r` → CR；`\` + 真换行 → 续行丢弃；`\` + 其他 → 该字符本身。
+     * - 括号未闭合（走到 EOS）⇒ 原样追加已解析部分并收尾（`:1557-1586` 的 `!st.EOS` 分支）。
+     *
+     * 与原版的**有意差异**：`*n` 的 n 加了 [MACRO_REPEAT_MAX] 与展开长度硬闸（原版不设防，
+     * 玩家手滑打 `(……)*999999999` 会把内存吃光；这里截断保命，正常宏不受影响）。
+     */
+    private fun expandMacroSyntax(input: String): String {
+        // 原版守卫：不含 '(' 直接返回原文（此时 `\e` 由段循环剥、`\n` 由切段吃）。
+        if (input.indexOf('(') < 0) return input
+        val out = StringBuilder(input.length.coerceAtLeast(16))
+        parseMacroSyntax(input, 0, isNest = false, out = out)
+        return out.toString()
+    }
+
+    /** [expandMacroSyntax] 的递归主体：返回下一次读取下标（= `(` 组的消费终点）。 */
+    private fun parseMacroSyntax(input: String, from: Int, isNest: Boolean, out: StringBuilder): Int {
+        var i = from
+        // 上一个 `\e` 追加过换行 ⇒ 紧随的 `\n` 被吞掉（原版 flag，:1593-1600）。
+        var skipNextNewline = false
+        while (i < input.length && !(isNest && input[i] == ')')) {
+            if (out.length >= SYNTAX_EXPAND_CAP) return input.length
+            when (val ch = input[i]) {
+                '(' -> {
+                    i++
+                    // 内层先解析进**独立** builder（原版是拼进同一个 builder 再取尾段；
+                    // 分开更直白，展开结果逐字等价）。
+                    val group = StringBuilder()
+                    i = parseMacroSyntax(input, i, isNest = true, out = group)
+                    if (i < input.length) {
+                        i++ // 吃掉 ')'
+                        if (i < input.length && input[i] == '*') {
+                            i++
+                            var times = 0
+                            while (i < input.length && input[i].isDigit()) {
+                                times = times * 10 + (input[i] - '0')
+                                if (times > SYNTAX_REPEAT_MAX) times = SYNTAX_REPEAT_MAX
+                                i++
+                            }
+                            repeat(times) { out.append(group) }
+                        } else {
+                            out.append(group)
+                        }
+                    } else {
+                        out.append(group)
+                    }
+                    continue
+                }
+                '\\' -> {
+                    i++
+                    if (i < input.length) {
+                        when (input[i]) {
+                            'n' -> if (!skipNextNewline) out.append('\n') else skipNextNewline = false
+                            'r' -> out.append('\r')
+                            'e' -> {
+                                out.append("\\e").append('\n')
+                                skipNextNewline = true
+                            }
+                            '\n' -> Unit // 续行：反斜杠 + 真换行 = 丢弃
+                            else -> out.append(input[i])
+                        }
+                    }
+                }
+                else -> out.append(ch)
+            }
+            i++
+        }
+        return i
+    }
+    /**
+     * 把一条键盘提交按原版分隔符表切成多段（`EmueraConsole.cs:146` 的
+     * `spliter = new string[4] { "\\n", "\r\n", "\n", "\r" }`）。
+     *
+     * **数组顺序即语义**：首项是**字面**反斜杠 + `n` 两字符（玩家在指令集串里打的 `\n`，
+     * 不是 LF），CRLF 必须排在单字符 LF/CR 之前 —— 否则 `"\r\n"` 会在 CR 处断成两段。
+     * 切分保留空段（`StringSplitOptions.None`）：`"0\e\n1\e\n"` 切成
+     * `["0\e", "1\e", ""]`，末段的空串在原版同样会 `RunEmueraProgram("")` 推进一次。
+     * 空串输入 ⇒ 只有一段空段（= 一次空回车）。不含任何分隔符时零分配直接返回单段。
+     */
+    private fun splitSegments(text: String): List<String> {
+        if (text.indexOf('\n') < 0 && text.indexOf('\r') < 0 && text.indexOf("\\n") < 0) {
+            return listOf(text)
+        }
+        val out = ArrayList<String>(4)
+        var start = 0
+        var i = 0
+        while (i < text.length) {
+            val len = when {
+                // 顺序同 C# 的 spliter 数组：字面反斜杠+n → CRLF → LF → CR。
+                text.startsWith("\\n", i) -> 2
+                text.startsWith("\r\n", i) -> 2
+                text[i] == '\n' -> 1
+                text[i] == '\r' -> 1
+                else -> 0
+            }
+            if (len == 0) {
+                i++
+                continue
+            }
+            out.add(text.substring(start, i))
+            i += len
+            start = i
+        }
+        out.add(text.substring(start))
+        return out
     }
 
     /** [submit] 的整数便捷入口（按钮 [0]/[1]、指令号等）。 */
@@ -1006,6 +1188,9 @@ class QueueInputSink(
                 pageTrail?.clear()
             }
         }
+        // turn 边界（无条件）：超时自动推进的连续等待点没有提交起点、不触发 onTurnReady，
+        // 但原版仍是一次新 turn。宿主据此按帧复位页计时器 / 清忙碌横带；见 onTurnBoundary KDoc。
+        onTurnBoundary?.invoke()
         // 键入回显文本在锁内只计算、unlock 后交付（与 onTurnReady 同一条锁外纪律，见 onEchoInput）。
         var pendingEcho: String? = null
         lock.lock()
@@ -1095,6 +1280,9 @@ class QueueInputSink(
                 pageTrail?.clear()
             }
         }
+        // turn 边界（无条件）：超时自动推进的连续等待点没有提交起点、不触发 onTurnReady，
+        // 但原版仍是一次新 turn。宿主据此按帧复位页计时器 / 清忙碌横带；见 onTurnBoundary KDoc。
+        onTurnBoundary?.invoke()
         // 交付结果与键入回显文本都在锁内结算；回显的**交付**（宿主回调）在 unlock 之后 ——
         // 与 onTurnReady 同一条锁外纪律（宿主实现会拿控制台的锁，见 onEchoInput 的 KDoc）。
         var deliveredOutcome: InputOutcome? = null
@@ -1237,7 +1425,7 @@ class QueueInputSink(
      * 提交文本的段内预处理（`PressEnterKey` 段循环里、进 `doInputToEmueraProgram` 之前的两步）：
      * `\e` 跳过标记全部剥离（:1435-1438），再按 `OneInput` 截断到首字符（:1440-1443）。
      * 剥离发生在截断之前（与 C# 同序）。原版按段切分后逐段处理（:1432 的分段循环）；
-     * 本移植「一条提交 = 一段」，等价于整条处理一次。
+     * 本移植的每条 [Entry] 就是一段（[submit] 入队时已切好），故这里逐 Entry 处理一次。
      *
      * 取值解释（[interpret]）与键入回显（[echoTextFor]）吃的是**同一份**生效文本 ——
      * 原版 switch 与 `Print(str)`（:1280）看到的就是同一个 `str`。
@@ -1353,7 +1541,7 @@ class QueueInputSink(
         entry.mappedColor?.let { color -> return interpretMappedColor(request, color, timerFired) }
         // CBG 按钮值条目（[submitCbgButtonValue]）同理，交付面见 [interpretCbgButton]。
         entry.cbgButtonValue?.let { value -> return interpretCbgButton(request, value, timerFired) }
-        // 原版按段切分后逐段截断（:1440-1443）；本移植的提交不带分隔符，等价于「整条就是一段」。
+        // 原版按段切分后逐段截断（:1440-1443）；本移植的每条 Entry 就是一段（入队时切好）。
         val text = deliverText(request, entry.text)
         return when (form) {
             // EnterKey/AnyKey：任何一条提交都推进（:1421-1424 顺带 stopTimer），

@@ -25,8 +25,9 @@ import org.junit.jupiter.api.Assumptions
  *
  * 定性（13da05bd 的结论，本闸逐条实测复核）：**不是引擎缺陷，是出包混装**。
  * - 脚本面（4.981 专属，4.980 无此文件）：`ERB/魔改内容/qol/qol_item.ERB:113`
- *   `FOR ITEM_ID, 1, 1200 ;qol custom code`，循环体 `:114` 调 `QOL_ITEMDATA_ORIGINAL(ITEM_ID, …)`，
- *   该函数 `:402` 读 `ITEMNAME:ARG` ⇒ 最大访问下标 = 1199。
+ *   `FOR ITEM_ID, 0, 1200 ;qol custom code（起点＝0…）`（261017 起点 1；261111 上游改 0 修「id 0 跳蛋不入圈」），
+ *   循环体 `:114` 调 `CALLF QOL_ITEMDATA_ORIGINAL(ITEM_ID, "", 0, 1)`，
+ *   该函数 `:405`（261017=:402）读 `ITEMNAME:ARG` ⇒ 最大访问下标 = 1199。
  * - 数据面：`CSV/VariableSize.csv:74` 4.981 = `ITEMNAME,1200`、4.980 = `ITEMNAME,1000`
  *   （`ITEMNAME` 与 `ITEMPRICE` 双向同步见同文件 :73 注释）。
  * ⇒ 4.981 脚本 + 4.981 数据：1199 < 1200，不越界；4.981 脚本 + 4.980 数据：下标 1000 起越界，
@@ -55,7 +56,7 @@ class ItemNameCorpusAlignmentTest {
     private companion object {
         /** 4.981 的循环上界行与 `ITEMNAME` 读取行（实测物理行号，1 基）。 */
         const val LOOP_LINE = 113
-        const val READ_LINE = 402
+        const val READ_LINE = 405
         const val ITEMNAME = "ITEMNAME"
     }
 
@@ -78,12 +79,14 @@ class ItemNameCorpusAlignmentTest {
         return dims[0]
     }
 
-    /** 真语料的 `FOR ITEM_ID, 1, N` 上界（直接读那行原文，不抄副本）。 */
+    /** 真语料的 `FOR ITEM_ID, 0, N` 上界（直接读那行原文，不抄副本；261111 起点改 0）。 */
     private fun realLoopBound(): Long {
         val file = erbRoot!!.resolve(qolRel)
         val lines = LogicalLineReader.readAllLines(Files.readAllBytes(file))
         val raw = lines[LOOP_LINE - 1].trim()
-        assertTrue(raw.startsWith("FOR ITEM_ID, 1,"), "$qolRel:$LOOP_LINE 原文形态与上报口径不一致：$raw")
+        // 2026-11-14 语料换代 261111：上游把循环起点从 1 改 0（道具 id 0「跳蛋」此前永不入圈，
+        // 原行尾注释自述）；起点不改变「最大访问下标 = bound-1」的越界判据。
+        assertTrue(raw.startsWith("FOR ITEM_ID, 0,"), "$qolRel:$LOOP_LINE 原文形态与上报口径不一致：$raw")
         return raw.substringBefore(';').trimEnd().split(',').last().trim().toLong()
     }
 
@@ -129,11 +132,11 @@ class ItemNameCorpusAlignmentTest {
     }
 
     @Test
-    fun `真语料 402 行的读取形态就是 ITEMNAME 下标访问`() {
+    fun `真语料 405 行的读取形态就是 ITEMNAME 下标访问`() {
         val erb = erbRoot
         Assumptions.assumeTrue(erb != null, "缺 4.981 语料根：跳过")
         val lines = LogicalLineReader.readAllLines(Files.readAllBytes(erb!!.resolve(qolRel)))
         val raw = lines[READ_LINE - 1].trim()
-        assertEquals("SIF ITEMNAME:ARG == \"\"", raw, "$qolRel:$READ_LINE 原文（上报抛点的读取行）")
+        assertEquals("SIF ITEMNAME:ARG == \"\"", raw, "$qolRel:$READ_LINE 原文（上报抛点的读取行；261017=:402，261111 函数体前移 3 行）")
     }
 }

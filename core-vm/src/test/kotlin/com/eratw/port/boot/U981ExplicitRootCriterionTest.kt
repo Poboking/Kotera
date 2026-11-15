@@ -22,7 +22,7 @@ import kotlin.test.assertTrue
  * `ConfigChainTest.corpusRoot()` 同一把尺。
  *
  * 显式判据 = [CorpusProfile.detect]：就近读 `ERB/DIM.ERH` 的 `#DIM CONST NOW_VERSION`
- * （4.980=20260326、4.981=20261017；未在册或未读到判红不降级）。这与主源 1.824 装载期
+ * （4.980=20260326、4.981=20261111；未在册或未读到判红不降级）。这与主源 1.824 装载期
  * 配置项的裁决形态同形 —— 靠注册条目 + 精确查表 + 值解析 + 显式分支，不靠「某键字符串
  * 是否出现」：`ConfigData.cs:55`（注册 `ConfigItem<TextDrawingMode>`、缺省实参 TEXTRENDERER）、
  * `:529-543`（跳注释空行、按冒号切、`array[0].Trim()` 精确查表、查不到 continue）、
@@ -59,10 +59,10 @@ class U981ExplicitRootCriterionTest {
 
     @Test
     fun `合法值 NOW_VERSION 4_981 判为 4_981 且不依赖 emuera_config 键行`() {
-        val root = syntheticRoot("#DIM CONST NOW_VERSION = 20261017\n", "IGNORE CASE:YES")
+        val root = syntheticRoot("#DIM CONST NOW_VERSION = 20261111\n", "IGNORE CASE:YES")
         assertTrue(
             is981Root(root),
-            "4.981 档只由 NOW_VERSION=20261017 决定；emuera.config 无 SKIASHARP / RENDERING BACKEND 键行照样命中",
+            "4.981 档只由 NOW_VERSION=20261111 决定；emuera.config 无 SKIASHARP / RENDERING BACKEND 键行照样命中",
         )
     }
 
@@ -80,7 +80,7 @@ class U981ExplicitRootCriterionTest {
 
     @Test
     fun `大小写与空格边界 显式判据仍认 4_981`() {
-        val root = syntheticRoot("  #dim   const   now_version=20261017  \n", "RENDERING BACKEND:Auto")
+        val root = syntheticRoot("  #dim   const   now_version=20261111  \n", "RENDERING BACKEND:Auto")
         assertTrue(is981Root(root), "NOW_VERSION_LINE 用 IGNORE_CASE 与空白通配，find 不锚行首")
     }
 

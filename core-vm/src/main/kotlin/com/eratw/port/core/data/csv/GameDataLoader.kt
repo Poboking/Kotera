@@ -2,6 +2,8 @@ package com.eratw.port.core.data.csv
 
 import com.eratw.port.core.vars.CharacterTemplate
 import com.eratw.port.core.vars.GameBaseData
+import com.eratw.port.core.vars.ModCsvInjectionPlan
+import com.eratw.port.core.vars.SystemLayout
 import com.eratw.port.core.vars.VariableRegistry
 import com.eratw.port.core.vars.VariableSizes
 import java.nio.file.Path
@@ -86,11 +88,51 @@ object GameDataLoader {
      * 超出 MaxDataList 的下标由 [CsvLoader.loadNameTable] 的越界跳过承接。
      * （2026-10-22 移除了此前的 autoGrowByCsvExtent 试探性扩容——与官方口径不符且在本语料是死代码。）
      */
-    fun load(csvDir: Path): GameData? {
+    fun load(csvDir: Path): GameData? = load(csvDir, null)
+
+    /**
+     * **Base 口径的轻量装载**（M1-4 阶段二装载相位）：`VariableSize → GAMEBASE → registry → 29 槽名字表`，
+     * **不读角色模板**（`CharaCsvLoader` 是本函数之外最重的一段）。
+     *
+     * 消费点 = `ModCsvPlanLoader`：推导 `csvTableCapacities` / `baseCsvKeywords` 与变量 Base 容量，
+     * 供唯一一次 `ManifestLoader.load` 使用；随后 `GameSession` 会带计划再装一次完整数据。
+     * 缺目录 → null（与 [load] 同口径）。
+     */
+    fun loadBase(csvDir: Path): GameData? {
         if (!java.nio.file.Files.isDirectory(csvDir)) return null
         val warnings = ArrayList<String>()
         val sizes = VariableSizes()
         VariableSizeLoader.load(csvDir, sizes, warnings)
+        val gameBase = GameBaseLoader.load(csvDir, warnings)
+        val registry = VariableRegistry(sizes, gameBase)
+        val itemPrices = LongArray(sizes.maxDataList[6])
+        for (slot in SLOT_FILES.indices) {
+            val prices = if (slot == 6) itemPrices else null
+            CsvLoader.loadNameTable(csvDir, SLOT_FILES[slot], slot, registry.csvTables[slot], prices, warnings)
+        }
+        return GameData(gameBase, registry, emptyList(), warnings, itemPrices)
+    }
+
+    /**
+     * 装载全部游戏数据；[plan] 非空时**在 `VariableRegistry` 定型之前**并入 Mod 注入位
+     * （CONTRACT-RT2-M14B-IMPL §1 裁定 1/4，锚 `ConstantData.cs:678`：原版容量在 LoadData 一次定型，
+     * 注入位等价于在定型前把 mod 声明的关键字并入容量与名字表）。
+     *
+     * 两步都只做**扩容**不改 Base：
+     * 1. `sizes.maxDataList[slot]` 与 `charaInt1D/Str1D[slot]` 抬到 `max(Base, 注入位最大下标 + 1)`；
+     * 2. 名字表装载后，把每个注入位的关键字登记进 `registry.csvTables[slot]`（先输原则，同名不改写）。
+     *
+     * 只支持 `C_INT1` / `C_STR1`（角色 1 维整数/字符串）；`C_INT2`（`CDFLAG`）与系统 1 维变量
+     * （`FLAG` / `GLOBAL` 一类）本波**整表/整变量警告排除**，不猜语义。`plan == null` 或空计划
+     * ⇒ 与原 [load] 逐字节等价（Base-only 零变化）。
+     */
+    fun load(csvDir: Path, plan: ModCsvInjectionPlan?): GameData? {
+        if (!java.nio.file.Files.isDirectory(csvDir)) return null
+        val warnings = ArrayList<String>()
+        val sizes = VariableSizes()
+        VariableSizeLoader.load(csvDir, sizes, warnings)
+        // 扩容 must be before registry：CsvNameTable.capacity 与 CharacterTable.blockSize 都吃 sizes。
+        if (plan != null && !plan.isEmpty) expandForInjection(sizes, plan, warnings)
         // GameBase 先读：registry 的 gameBase 是构造期只读字段（VariableRegistry.kt:58）
         val gameBase = GameBaseLoader.load(csvDir, warnings)
         val registry = VariableRegistry(sizes, gameBase)
@@ -99,7 +141,91 @@ object GameDataLoader {
             val prices = if (slot == 6) itemPrices else null
             CsvLoader.loadNameTable(csvDir, SLOT_FILES[slot], slot, registry.csvTables[slot], prices, warnings)
         }
+        // 名字表建好后才能登记注入关键字（CsvNameTable.set 有容量闸）。
+        if (plan != null && !plan.isEmpty) registerInjectedKeywords(registry, plan, warnings)
         val templates = CharaCsvLoader.load(csvDir, registry, warnings)
         return GameData(gameBase, registry, templates, warnings, itemPrices)
+    }
+
+    /**
+     * 装载相位扩容（裁定 1/4）：只碰计划涉及的 `C_INT1` / `C_STR1` 变量。
+     *
+     * 两类容量分别推导（生产语料里两者同值，但契约要求各自 `max`）：
+     * - `sizes.maxDataList[slot]` = 名字表容量（`CsvNameTable.capacity`，`ConstantData.cs:678`）；
+     * - `sizes.charaInt1D[slot]` / `charaStr1D[slot]` = 列块长（`CharacterTable.LongCol.blockSize` 派生）。
+     */
+    private fun expandForInjection(
+        sizes: VariableSizes,
+        plan: ModCsvInjectionPlan,
+        warnings: MutableList<String>,
+    ) {
+        for (varName in plan.varNames) {
+            val table = SystemLayout.keywords[varName.uppercase()]?.table
+            val csvSlot = table?.let { csvSlotOf(it) }
+            val int1Slot = SystemLayout.charaInt1D.indexOfFirst { it.first.equals(varName, true) }
+            val str1Slot = SystemLayout.charaStr1D.indexOfFirst { it.first.equals(varName, true) }
+            val int2Slot = SystemLayout.charaInt2D.indexOfFirst { it.first.equals(varName, true) }
+            val required = plan.requiredCapacityOf(varName)
+            when {
+                int2Slot >= 0 -> warnings +=
+                    "Mod CSV 注入位：$varName 属二维变量（C_INT2），v1 不支持持久化，整表排除"
+                int1Slot >= 0 && csvSlot != null && required != null -> {
+                    sizes.charaInt1D[int1Slot] = maxOf(sizes.charaInt1D[int1Slot], required)
+                    sizes.maxDataList[csvSlot] = maxOf(sizes.maxDataList[csvSlot], required)
+                }
+                str1Slot >= 0 && csvSlot != null && required != null -> {
+                    sizes.charaStr1D[str1Slot] = maxOf(sizes.charaStr1D[str1Slot], required)
+                    sizes.maxDataList[csvSlot] = maxOf(sizes.maxDataList[csvSlot], required)
+                }
+                else -> warnings +=
+                    "Mod CSV 注入位：$varName 不是角色 1 维变量（C_INT1/C_STR1），本波不扩容，已排除"
+            }
+        }
+    }
+
+    /** 注入关键字登记进名字表（先输原则：`ConstantData.cs:725-735`，同名不改写）。 */
+    private fun registerInjectedKeywords(
+        registry: VariableRegistry,
+        plan: ModCsvInjectionPlan,
+        warnings: MutableList<String>,
+    ) {
+        val supported = expandableVarNames()
+        for (varName in plan.varNames) {
+            // C_INT2 与系统变量在扩容相位已整表/整变量警告排除（裁定 5），这里不再登记。
+            if (supported.any { it.equals(varName, true) }) {
+                registerKeywordsOf(registry, plan, varName, warnings)
+            }
+        }
+    }
+
+    /** 本波扩容面 = 角色 1 维整数/字符串（`C_INT2` 与系统 1 维变量不在内，裁定 4/5）。 */
+    private fun expandableVarNames(): List<String> =
+        SystemLayout.charaInt1D.map { it.first } + SystemLayout.charaStr1D.map { it.first }
+
+    /** 一个变量的全部注入关键字逐格登记；未知表 / 越界逐条警告（不越界写）。 */
+    private fun registerKeywordsOf(
+        registry: VariableRegistry,
+        plan: ModCsvInjectionPlan,
+        varName: String,
+        warnings: MutableList<String>,
+    ) {
+        for (cell in plan.cellsOf(varName)) {
+            val slot = csvSlotOf(cell.tableId)
+            val table = slot?.let { registry.csvTables[it] }
+            if (table == null) {
+                warnings += "Mod CSV 注入位：未知表 ${cell.tableId}（关键字 ${cell.keyword}），已排除"
+            } else if (cell.index !in 0 until table.size) {
+                warnings += "Mod CSV 注入位：${cell.tableId}.${cell.keyword}#${cell.index} 越出名字表容量 " +
+                    "${table.size}（装载相位扩容未覆盖），已排除"
+            } else {
+                table.set(cell.index, cell.keyword)
+            }
+        }
+    }
+
+    /** 表名（`CsvNameTable` 的槽位名）→ 29 槽下标；未知返回 null。 */
+    private fun csvSlotOf(table: String): Int? {
+        val idx = SLOT_FILES.indexOfFirst { it.substringBefore('.').equals(table, ignoreCase = true) }
+        return idx.takeIf { it >= 0 }
     }
 }

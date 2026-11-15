@@ -217,7 +217,11 @@ object BuiltinSymbols {
         VarSpec("__INT_MIN__", OperandType.INT, 0, isCharacterData = false, isConst = true),
     ).associateBy { it.name }
 
-    /** 内建函数的返回类型（271 个，spec: builtin-functions.yaml summary.total）。 */
+    /**
+     * 内建函数的返回类型（spec: builtin-functions.yaml summary.total；原版/fork 面 + RT2 移植侧
+     * 扩展族）。移植侧扩展与 [com.eratw.port.core.fn.Builtins.registry] 同口径逐名对账
+     * （闸 = erbcc SpecCrossTableTest 的元数/返回类型双对拍）。
+     */
     val functions: Map<String, OperandType> = mapOf(
         "ABS" to OperandType.INT,
         "ALLSAMES" to OperandType.INT,
@@ -452,6 +456,8 @@ object BuiltinSymbols {
         "RAND" to OperandType.INT,
         "REGEXPMATCH" to OperandType.INT,
         "REPLACE" to OperandType.STR,
+        // 蛇版 4.981 数学扩展（Creator.Method.cs:4544-4577，Creator.cs:100）；语料 261111 锻税.ERB 实算使用。
+        "ROUND" to OperandType.INT,
         "RESUMETEXTBOX" to OperandType.INT,
         "SAVENOS" to OperandType.INT,
         "SAVETEXT" to OperandType.INT,
@@ -518,12 +524,42 @@ object BuiltinSymbols {
         "XML_SET" to OperandType.INT,
         "XML_SET_BYNAME" to OperandType.INT,
         "XML_TOSTR" to OperandType.STR,
+        // ---- 实体/角色扩展族（RT2 移植侧 24 条，原版无 C# 出处；注册面 fn/EntityMethods.kt，
+        //      语义权威 era-arch-v61u.md §7/§16/§17）。含同族的 CHARA_TO_ENTITY / ROSTER_GENERATION /
+        //      MOD_IS_ACTIVE / HAS_SUPER；返回类型除 ENTITY_GET_STR = STR 外全 INT，
+        //      与 specs/builtin-functions.yaml 的 entity 类 24 条逐名对齐。
+        "CHARA_TO_ENTITY" to OperandType.INT,
+        "ENTITY_ADD_REL" to OperandType.INT,
+        "ENTITY_CREATE" to OperandType.INT,
+        "ENTITY_DEL_REL" to OperandType.INT,
+        "ENTITY_DESTROY" to OperandType.INT,
+        "ENTITY_EXISTS" to OperandType.INT,
+        "ENTITY_GET_INT" to OperandType.INT,
+        "ENTITY_GET_STATE" to OperandType.INT,
+        "ENTITY_GET_STR" to OperandType.STR,
+        "ENTITY_HAS_REL" to OperandType.INT,
+        "ENTITY_PROJECT_CHARA" to OperandType.INT,
+        "ENTITY_QUERY_COUNT" to OperandType.INT,
+        "ENTITY_QUERY_FILL" to OperandType.INT,
+        "ENTITY_QUERY_REL_COUNT" to OperandType.INT,
+        "ENTITY_QUERY_REL_FILL" to OperandType.INT,
+        "ENTITY_RAND" to OperandType.INT,
+        "ENTITY_SET_INT" to OperandType.INT,
+        "ENTITY_SET_STATE" to OperandType.INT,
+        "ENTITY_SET_STR" to OperandType.INT,
+        "ENTITY_TO_CHARA" to OperandType.INT,
+        "ENTITY_UNPROJECT_CHARA" to OperandType.INT,
+        "HAS_SUPER" to OperandType.INT,
+        "MOD_IS_ACTIVE" to OperandType.INT,
+        "ROSTER_GENERATION" to OperandType.INT,
     )
 
     /**
-     * 内建函数方法名全集（271 个）—— 原版 funcDic 里这些名字注册的是 methodInstruction
+     * 内建函数方法名全集 —— 原版 funcDic 里这些名字注册的是 methodInstruction
      * （spec: FunctionIdentifier.cs:4140-4148 遍历 FunctionMethodCreator.GetMethodList()），
      * 因此以它们开头的行是 METHOD 语句（如 SPRITECREATE/GDRAWSPRITE）。
+     * 除原版/fork 面外，SQL 族（16 条）与 RT2 实体扩展族（24 条）移植侧扩展同样在此登记，
+     * 与 [functions] 逐名对齐（闸 = erbcc SpecCrossTableTest）。
      */
     val methods: Set<String> = setOf(
         "ABS",
@@ -759,6 +795,7 @@ object BuiltinSymbols {
         "RAND",
         "REGEXPMATCH",
         "REPLACE",
+        "ROUND",
         "RESUMETEXTBOX",
         "SAVENOS",
         "SAVETEXT",
@@ -825,6 +862,31 @@ object BuiltinSymbols {
         "XML_SET",
         "XML_SET_BYNAME",
         "XML_TOSTR",
+        // ---- 实体/角色扩展族（RT2 移植侧 24 条，与 functions 表逐名对齐；见 fn/EntityMethods.kt）----
+        "CHARA_TO_ENTITY",
+        "ENTITY_ADD_REL",
+        "ENTITY_CREATE",
+        "ENTITY_DEL_REL",
+        "ENTITY_DESTROY",
+        "ENTITY_EXISTS",
+        "ENTITY_GET_INT",
+        "ENTITY_GET_STATE",
+        "ENTITY_GET_STR",
+        "ENTITY_HAS_REL",
+        "ENTITY_PROJECT_CHARA",
+        "ENTITY_QUERY_COUNT",
+        "ENTITY_QUERY_FILL",
+        "ENTITY_QUERY_REL_COUNT",
+        "ENTITY_QUERY_REL_FILL",
+        "ENTITY_RAND",
+        "ENTITY_SET_INT",
+        "ENTITY_SET_STATE",
+        "ENTITY_SET_STR",
+        "ENTITY_TO_CHARA",
+        "ENTITY_UNPROJECT_CHARA",
+        "HAS_SUPER",
+        "MOD_IS_ACTIVE",
+        "ROSTER_GENERATION",
     )
 
     fun variable(name: String): VarSpec? = variables[name.uppercase()]
@@ -836,9 +898,13 @@ object BuiltinSymbols {
      *
      * 判据与用法：`FunctionMethodTerm.GetEraType()`（spec: FunctionMethodTerm.cs:44-56）——
      * 在 `CanReturnFloat` 为真的方法上，**任一实参 `EraType.Float` 即整体返回 Float**。
-     * 本表目前只有 `POWER`：`PowerMethod` 声明 `ReturnType = EraType.Integer` +
-     * `CanReturnFloat = true`，两个实参都是 `ArgType.Any`（spec: FunctionMethodCreator.cs:5418-5436），
-     * 求值按 `HasFloatArg`（spec: :13434-13444）分流（spec: :5470-5477）。
+     * 本表现有两名：
+     * - `POWER`：`PowerMethod` 声明 `ReturnType = EraType.Integer` +
+     *   `CanReturnFloat = true`，两个实参都是 `ArgType.Any`（spec: FunctionMethodCreator.cs:5418-5436），
+     *   求值按 `HasFloatArg`（spec: :13434-13444）分流（spec: :5470-5477）。
+     * - `ROUND`：`RoundMethod` 同型（蛇版 4.981 数学扩展；Creator.Method.cs:4544-4577，
+     *   单参 `ArgType.Any`、`CanReturnFloat = true`，求值按 `HasFloatArg` 分流）；
+     *   语料 261111 的 DLC/小游戏/锻税.ERB 四处实算使用。
      *
      * 名单只收**运行期真能返回 `Value.FloatV`** 的方法（[com.eratw.port.core.fn.PureMethods]
      * 里已按实参类型分流的那几个）；漏收会让 `POWER(0.95, X)` 被钉成 INT 后在
@@ -847,7 +913,7 @@ object BuiltinSymbols {
      */
     fun canReturnFloat(name: String): Boolean = name.uppercase() in CAN_RETURN_FLOAT
 
-    private val CAN_RETURN_FLOAT: Set<String> = setOf("POWER")
+    private val CAN_RETURN_FLOAT: Set<String> = setOf("POWER", "ROUND")
 
     /**
      * 原版 `nameDic` 的 `SystemVariable` 类全集（CORE-06 的 `#DIM` 保留名判据）。
