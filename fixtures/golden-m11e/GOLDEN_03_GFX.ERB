@@ -11,10 +11,12 @@
 ; GDRAWG 11 参（spec: FunctionMethodCreator.cs:7266-7274）
 ;   第 11 参是颜色矩阵引用（RefInt2D/RefInt3D），原版 ReadColormatrix 后走 GDrawG 带矩阵重载。
 ;   语料实况写法是 `L_CM:0:0`（ステータス表示関連/縁取り.ERB:84）。
-;   10 参形态是「无矩阵」直通；11 参矩阵按行主序 m[源通道*5+目标通道] 换算
-;   （GraphicsBuffer.applyColorMatrix），本节把 R 通道映射到 G 通道。
-;   TODO(verify)：HEAD 的 GDRAWG 仍忽略第 11 参（m11e-dttoxml 路未合流），
-;   GDRAWG_11_PIX 现钉的是「忽略」读数；矩阵接线落地后该行会变成 4278255360。
+;   10 参形态是「无矩阵」直通；11 参矩阵按蛇版 4.981 Skia 滤镜口径装载消费
+;   （行 = 目标通道、列 = 源通道，Creator.Method.cs:7054 装载不转置 +
+;   GraphicsImage.cs:504-518 铺进 SKColorFilter；口径取证见 003028ca8）。
+;   本节 MAT:0:1=256 = 输出 R 取输入 G：纯红源（0xFFFF0000）经矩阵后 R/G 全零 ⇒
+;   GDRAWG_11_PIX = 4278190080（黑，alpha 由 MAT:3:3=256 直通保持不透明）；
+;   对角 MAT:3:3=256 同理 = 输出 A 取输入 A。
 ; ============================================================================
 @M11E_GFX05
 	PRINTL === SECTION:M11E-GFX05 ===

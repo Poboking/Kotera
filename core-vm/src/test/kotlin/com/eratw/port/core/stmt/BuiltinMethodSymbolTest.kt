@@ -64,10 +64,10 @@ class BuiltinMethodSymbolTest {
             BuiltinSymbols.functions.keys, BuiltinSymbols.methods,
             "原版 methodList 是单表双注册（FunctionIdentifier.cs:4140-4148 / IdentifierDictionary.cs:566-586），两表必须相等",
         )
-        // 271 条原版 + 8 条 4.981 上游自改新增（GETANIMETIMER/GETPLATFORM/UNCHECKED_* / MAP_*）
-        // + 1 条浮点扩展 TOFLOAT + 16 条 SQL 族 + 24 条 RT2 实体扩展族（原版无 C# 出处，
-        // 见 fn/EntityMethods.kt），共 321。
-        assertEquals(321, BuiltinSymbols.functions.size, "methodList 条目数（271 原版 + 8 上游 + 1 TOFLOAT + 16 SQL + 24 实体族）")
+        // 原版 271 条台账 + 4.981 上游自改族（GETANIMETIMER/GETPLATFORM/UNCHECKED_* / MAP_*）
+        // + 浮点扩展 TOFLOAT/ROUND + 25 条 SQL 族（f2bf08be8 补齐差集 9 后全量）
+        // + RT2 实体扩展族（原版无 C# 出处，见 fn/EntityMethods.kt），2026-11-16 实测 331。
+        assertEquals(331, BuiltinSymbols.functions.size, "methodList 条目数（271 原版 + 上游自改族 + TOFLOAT/ROUND + 25 SQL + 实体族，实测 331）")
         for ((name, type) in BuiltinSymbols.functions) {
             assertTrue(BuiltinSymbols.isBuiltinMethod(name), "$name 必须是 methodList 成员")
             assertTrue(BuiltinSymbols.isBuiltinFunction(name), "$name 必须有返回类型")

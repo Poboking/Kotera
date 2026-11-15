@@ -1,3 +1,7 @@
+// [归属登记 2026-11-16] 本文件 import app 模块（com.eratw.port.android.*）的 Compose 件，
+// 而 uipreview 是纯 JVM 模块、方向闸不允许依赖 application 模块 —— 单体时代即编译不过，
+// 从未生效（私有仓 HEAD 同红）。已由 uipreview 的 sourceSets.test 排除出编译面。
+// 归属 = 设置页三张长名单卡视觉回归（需 Compose Desktop 渲染面），待 pocket 侧接线后迁家。
 package com.eratw.port.uipreview
 
 import androidx.compose.foundation.background

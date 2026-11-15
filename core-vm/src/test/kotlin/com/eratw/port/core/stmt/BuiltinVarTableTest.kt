@@ -121,10 +121,10 @@ class BuiltinVarTableTest {
     @Test
     fun functionAndMethodTablesAreTheSame271Set() {
         // FunctionMethodCreator.cs:9040-9316（271 条）、FunctionIdentifier.cs:4140-4148 双注册。
-        // 4.981 上游自改另加 8 条（GETANIMETIMER/GETPLATFORM/UNCHECKED_*/MAP_*）+ 浮点 TOFLOAT
-        // + 16 SQL + 24 RT2 实体扩展族（fn/EntityMethods.kt），共 321。
-        assertEquals(321, BuiltinSymbols.functions.size)
-        assertEquals(321, BuiltinSymbols.methods.size)
+        // 4.981 上游自改族（GETANIMETIMER/GETPLATFORM/UNCHECKED_*/MAP_*）+ 浮点 TOFLOAT/ROUND
+        // + 25 SQL（f2bf08be8 补齐差集 9）+ RT2 实体扩展族（fn/EntityMethods.kt），实测 331。
+        assertEquals(331, BuiltinSymbols.functions.size)
+        assertEquals(331, BuiltinSymbols.methods.size)
         assertEquals(BuiltinSymbols.functions.keys, BuiltinSymbols.methods)
         // 同时是语句名的 6 个方法名（FunctionIdentifier.cs:4142 的 `!funcDic.ContainsKey`）。
         assertEquals(

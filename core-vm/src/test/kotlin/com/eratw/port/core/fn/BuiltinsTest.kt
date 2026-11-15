@@ -405,13 +405,16 @@ class BuiltinPureTest {
         // RT2 移植侧扩展（entity 族）随 M4-2/M4-4/M4-5 逐条入表；M4-5 补 ENTITY_RAND
         // ⇒ yaml 324 / 注册表 321。
         // 2026-11-14 语料换代 261111：补蛇版 4.981 数学扩展 `ROUND`
-        //（Creator.Method.cs:4544-4577；锻税.ERB 四处实算使用）⇒ yaml 325 / 注册表 322。
-        // 注册表缺的 3 条是尚未落成表达式内建的条目：MAP_VALUES 未实现，
-        // DISABLE_INPUT_MACRO / ENABLE_INPUT_MACRO 在 fork 里是 DO_NOTHING 语句别名
-        // （OpcodeTable.kt 的 StatementAlias），本就不该进表达式内建表。
+        //（Creator.Method.cs:4544-4577；锻税.ERB 四处实算使用）；
+        // 2026-11-15 f2bf08be8：SQL 内建补齐差集 9（SQL_CONNECTION_OPEN / SQL_DISCONNECT /
+        // SQL_READER_GET_FLOAT / SQL_EXECUTE_SCALAR_FLOAT / SQL_P_EXECUTE_SCALAR_FLOAT /
+        // SQL_IMPORT_DT_XML / SQL_EXPORT_MAP_XML / SQL_EXPORT_DT_XML / SQL_IMPORT_XML_CUSTOM）
+        // ⇒ yaml 334 / 注册表 331。注册表缺的 3 条是尚未落成表达式内建的条目：
+        // MAP_VALUES 未实现，DISABLE_INPUT_MACRO / ENABLE_INPUT_MACRO 在 fork 里是
+        // DO_NOTHING 语句别名（OpcodeTable.kt 的 StatementAlias），本就不该进表达式内建表。
         val notBuiltinFunctions = setOf("MAP_VALUES", "DISABLE_INPUT_MACRO", "ENABLE_INPUT_MACRO")
-        assertEquals(325, yamlNames.size)
-        assertEquals(322, Builtins.registry.size())
+        assertEquals(334, yamlNames.size)
+        assertEquals(331, Builtins.registry.size())
         val missing = yamlNames - Builtins.registry.names()
         val extra = Builtins.registry.names() - yamlNames
         assertEquals(notBuiltinFunctions, missing, "注册表缺少的只应是尚未落地的上游条目")

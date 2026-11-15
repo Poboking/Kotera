@@ -273,30 +273,26 @@ class FloatExprFaceTest {
     }
 
     /**
-     * **本路未放宽的第二支**（对照 + 卡点）：浮点字面量落进语句位的整型落点仍被拒。
+     * **语句位浮点落整型右值 = 上游静默截断**（原「残留偏离」已由 2026-11-14 语料换代
+     * 3add17466 接线消除）。
      *
-     * 实测拒绝点在**语句层**：`stmt/ArgBuilders.kt:1799` 的 `if (!term.isInteger()) fail(ctx,
-     * "不能把字符串赋给整数变量")` —— SET 的右值类型闸只认整型，浮点掉进那条**写着「字符串」的
-     * 文案**里（文案本身是第二处不准，文件不在本路所有权）。编译层 `ErbProgramCompiler.kt:817-828`
-     * 的 `OperandType.FLOAT` 守卫是第二道，本条形态走不到它。
+     * 蛇版解析期闸只拒字符串右值（trerror.CanNotAssignStrToInt，
+     * ArgumentBuilder.cs:1147-1149 / :1164-1166），浮点右值放行、执行期走整型通道截断
+     * （Instraction.Child.cs:696 `Term.GetIntValue(exm)`；SingleFloatTerm.GetIntValue =
+     * `(long)fValue`，Term.cs:117-120）。`stmt/ArgBuilders.kt` 的 SET 右值闸已按该口径
+     * 收窄为只拒 `OperandType.STR`。
      *
-     * fork 侧这一支按 `Term.cs:121-124` 的 `(long)fValue` 静默截断（`A = 1.5` 把 1 写进 A）
-     * ⇒ **残留偏离**，写进交付回执「需组长接线」。本条钉住现状文案，防止有人以为第 2 条
-     * 已把整型通道全部放开。
+     * `A = 1.5` ⇒ A = 1（向零截断）。编译层 `ErbProgramCompiler.kt` 的 `OperandType.FLOAT`
+     * 守卫不拦语句位赋值形态。
      */
     @Test
-    fun `端到端 语句位浮点落整型右值仍被语句层拒`() {
-        val e = assertFailsWith<RuntimeException> {
-            ErbSnippetHarness.run(
-                lines = listOf("@T", "A = 1.5"),
-                entry = "T",
-                predeclare = facePredeclare(),
-            )
-        }
-        assertTrue(
-            e.message.orEmpty().endsWith("SET命令:不能把字符串赋给整数变量"),
-            "期望语句层 SET 右值闸；实得「${e.message}」",
+    fun `端到端 语句位浮点落整型右值按上游静默截断`() {
+        val store = ErbSnippetHarness.run(
+            lines = listOf("@T", "A = 1.5"),
+            entry = "T",
+            predeclare = facePredeclare(),
         )
+        assertEquals(1L, intOf(store, "A"), "1.5 按 (long)fValue 向零截断为 1")
     }
 
     // ------------------------------------------------------------------

@@ -370,6 +370,12 @@ class SpecCrossTableTest {
             "dbName, sql, [param0[, param1[, ...]]]", Arity(2, -1),
             "Creator.Method.cs:2722-2743 与 NONQUERY 同构：2 槽必填 + VariadicString（OmitStart=2）⇒ 2..∞",
         ),
+        // f2bf08be8 补的第 5 条同族（蛇版四条在 2653-2743，FLOAT 变体在其后另立）：
+        "SQL_P_EXECUTE_SCALAR_FLOAT" to ArityRule(
+            "dbName, sql, [param0[, param1[, ...]]]", Arity(2, -1),
+            "Creator.Method.cs:10752-10761 与 NONQUERY 同构：2 槽必填 + VariadicString（OmitStart=2）⇒ 2..∞；" +
+                "args 的嵌套方括号是散文写法（不是 2..5）",
+        ),
     )
 
     /**
@@ -450,12 +456,13 @@ class SpecCrossTableTest {
         val yaml = parseBuiltins()
         // 4.981：271（1.824 口径）+ 28 条 fork 新增 = 299（builtin-functions.yaml:16 的 summary.total）；
         // RT2 移植侧 entity 族随 M4-2/M4-4/M4-5 逐条入表（23 + 1 = 24）⇒ 324；
-        // 2026-11-14 语料换代 261111：补蛇版数学扩展 ROUND（Creator.Method.cs:4544-4577）⇒ 325。
-        assertEquals(325, yaml.size, "builtin-functions.yaml 条目数（summary.total）")
-        assertEquals(322, Builtins.registry.size(), "注册表条目数") // 2026-11-14 语料换代：+ROUND（BuiltinsTest 同口径）
+        // 2026-11-14 语料换代 261111：补蛇版数学扩展 ROUND（Creator.Method.cs:4544-4577）；
+        // 2026-11-15 f2bf08be8：SQL 内建补齐差集 9 ⇒ 334（BuiltinsTest 同口径）。
+        assertEquals(334, yaml.size, "builtin-functions.yaml 条目数（summary.total）")
+        assertEquals(331, Builtins.registry.size(), "注册表条目数") // yaml 334 - 3 未落地缺口（knownUnregisteredBuiltins）
 
         val yamlNames = yaml.map { it.name }.toSet()
-        assertEquals(325, yamlNames.size, "builtin-functions.yaml 有重名")
+        assertEquals(334, yamlNames.size, "builtin-functions.yaml 有重名")
         val missing = yamlNames - Builtins.registry.names()
         val extra = Builtins.registry.names() - yamlNames
         assertEquals(
@@ -590,7 +597,7 @@ class SpecCrossTableTest {
                 builtinArityDivergences.values.all { it.reason.isNotBlank() },
             "白名单每条都必须写原因（不许静默跳过）",
         )
-        assertEquals(13, builtinArgsProse.size, "散文/欠表达 args 白名单条数")
+        assertEquals(14, builtinArgsProse.size, "散文/欠表达 args 白名单条数")
         // N8 裁决后 4 条注册表分歧全部对齐 C#（见 builtinArityDivergences 的 KDoc）；再冒出新分歧必须显式登记。
         assertEquals(0, builtinArityDivergences.size, "注册表 vs C# 分歧白名单条数")
     }

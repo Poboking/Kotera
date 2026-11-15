@@ -113,7 +113,8 @@ class CompatBuiltinSurfaceTest {
     @Test
     fun `ENUMFUNC 候选表与派发可见性同源`() {
         val (snake, _) = ctx(EngineFamily.SNAKE_4981)
-        assertEquals(1L, int(snake, "ENUMFUNCBEGINSWITH", Value.StrV("SQL_CONNECT")))
+        // f2bf08be8 后注册表含 SQL_CONNECT 与 SQL_CONNECTION_OPEN 两条同前缀 ⇒ 2。
+        assertEquals(2L, int(snake, "ENUMFUNCBEGINSWITH", Value.StrV("SQL_CONNECT")))
         assertTrue("SQL_CONNECT" in snake.builtinNames)
 
         // em_ee 有 ENUMFUNC 家族、没有 SQL_CONNECT：候选表裁到 0 = 与派发同源。

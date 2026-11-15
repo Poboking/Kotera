@@ -10,6 +10,7 @@ import com.eratw.port.modlivingworld.MemoryDeclarations as LwMemoryDeclarations
 import com.eratw.port.modlivingworld.RelationshipDeclarations
 import com.eratw.port.modmemory.MemoryDeclarations
 import java.io.File
+import org.junit.jupiter.api.Assumptions
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -31,9 +32,16 @@ class BuiltinManifestAssetTest {
         val candidates = listOf(
             File("../app/src/main/assets/mods/rt2"),
             File("../../app/src/main/assets/mods/rt2"),
+            // 公开分仓：app 资产在 pocket 仓（单体布局作回落）；单仓检出（CI）无资产 ⇒ 计 skipped。
+            File("../../../eratw-pocket/app/src/main/assets/mods/rt2"),
         )
-        return candidates.firstOrNull { it.isDirectory }
-            ?: error("找不到内置 RT2 manifest 资产目录（试了 ${candidates.joinToString { it.path }}）；先跑 generateBuiltinRt2Manifest")
+        val dir = candidates.firstOrNull { it.isDirectory }
+        Assumptions.assumeTrue(
+            dir != null,
+            "找不到内置 RT2 manifest 资产目录（试了 ${candidates.joinToString { it.path }}）；" +
+                "pocket 仓同级检出后此闸生效，单仓检出计 skipped",
+        )
+        return dir!! // assumeTrue 拦住 null；此处不可达 null
     }
 
     /** 全部内置载体逐个对账（真源清单 = BuiltinManifestBuild.carriers，不加第二份点名）。 */

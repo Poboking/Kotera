@@ -124,7 +124,7 @@ class StatementFamilyErrorTextDriftTest {
         RegisteredShape(F_VM, "函数下标越界(\$entryFunctionIndex)", "移植 IR 入口下标概念 ⇒ 无官方串（附三之四-1）"),
         RegisteredShape(F_VM, "函数下标越界(\$funcIndex)", "同上（_CALL 装载/执行两支）"),
         RegisteredShape(F_PROC, "函数下标越界(\$targetIndex)", "同上"),
-        RegisteredShape(F_SQL, "列下标 \$idx 越界（本行共 ", "SQL_* 为 fork 专有：reference 全库 SQL_|sqlite 0 命中（附三之四-3）"),
+        RegisteredShape(F_SQL, "SQL 执行失败：\$fn：", "SQL_* 为 fork 专有：reference 全库 SQL_|sqlite 0 命中（附三之四-3）；f2bf08be8 对齐蛇版 SqlManager 无列下标自检（驱动异常透传），旧「列下标越界」钉随文案退场改钉语句失败统一形"),
         RegisteredShape(F_SEM, "ARRAYSHIFT函数: 第2个参数溢出（\$shift）", "官方同位无闸（原生 OverflowException）；判停已钉 verify-notes §13（附三之四-4）"),
         RegisteredShape(F_SEM, "未定义的变量 \$name", "运行期折码位，官方解析期定型（附三之四-5；本 needle 覆盖多处同形生产行）"),
         RegisteredShape(F_VAR, "函数 \$fn 的第 1 个参数必须是字符串", "GETVAR 族无官方串（附三之四-6；官方 GetVarMethod 直抛 IsNotVar/IsNotInt/IsNotStr）"),
