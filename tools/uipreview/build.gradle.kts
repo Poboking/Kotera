@@ -44,8 +44,11 @@ dependencies {
 
 // 0436e2f70 / a7e9ef27e 引入的两个 PNG 视觉回归测试 import 了 app 模块（com.eratw.port.android.*）
 // 的 Compose 件，而 uipreview 是纯 JVM 模块、方向闸不允许依赖 application 模块（Gradle 也不许）——
-// 单体时代即编译不过（从未生效）。归属 = app 侧设置卡/壳层视觉回归，待 pocket 侧建 Compose Desktop
-// 渲染测试面后迁家；在迁走前排除出 test 编译面（文件保留在树，意图不丢）。
+// 当前编译不过，排除出 test 编译面（文件保留在树，意图不丢）。
+// 2026-11-17 更正：早先登记为「单体时代即编译不过、从未生效」是误判 —— 两测试 2026-11-11 引入当天
+// 曾真跑通（build/shell-preview/ 三张 PNG，2026-11-11 16:06 实跑产物），后被 app 模块演进破坏 import
+// 而失效，属回归而非死测试。归属 = app 侧设置卡/壳层视觉回归，待 pocket 侧建 Compose Desktop
+// 渲染测试面后迁家（迁家时应按当前 app 件的 import 修一遍，不是简单搬文件）。
 sourceSets.test {
     kotlin.exclude("com/eratw/port/uipreview/SettingsCardsPreviewPngTest.kt")
     kotlin.exclude("com/eratw/port/uipreview/ShellPreviewPngTest.kt")

@@ -1,6 +1,9 @@
-// [归属登记 2026-11-16] 本文件 import app 模块（com.eratw.port.android.*）的 Compose 件，
-// 而 uipreview 是纯 JVM 模块、方向闸不允许依赖 application 模块 —— 单体时代即编译不过，
-// 从未生效（私有仓 HEAD 同红）。已由 uipreview 的 sourceSets.test 排除出编译面。
+// [归属登记 2026-11-17 更正] 本文件 import app 模块（com.eratw.port.android.*）的 Compose 件，
+// 而 uipreview 是纯 JVM 模块、方向闸不允许依赖 application 模块 —— 当前编译不过，
+// 已由 uipreview 的 sourceSets.test 排除出编译面。
+// 更正 2026-11-16 的「从未生效」误判：本测试 2026-11-11 引入当天（a7e9ef27e）曾真跑通，
+// tools/uipreview/build/shell-preview/ 下三张 PNG（2026-11-11 16:06）即其实跑产物；
+// 后被 app 模块演进破坏 import 而失效，属回归、非死测试。
 // 归属 = 壳层视觉回归（需 Compose Desktop 渲染面），待 pocket 侧接线后迁家。
 package com.eratw.port.uipreview
 
