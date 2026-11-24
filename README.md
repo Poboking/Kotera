@@ -1,11 +1,11 @@
 <div align="center">
 
-# erak-engine
+# Kotera
 
 **简体中文** | [English](README_EN.md) | [日本語](README_JA.md)
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-263146?style=flat-square)](LICENSE)
-[![CI](https://github.com/Poboking/erak-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/Poboking/erak-engine/actions/workflows/ci.yml)
+[![CI](https://github.com/Poboking/Kotera/actions/workflows/ci.yml/badge.svg)](https://github.com/Poboking/Kotera/actions/workflows/ci.yml)
 ![Kotlin](https://img.shields.io/badge/Kotlin-2.0.20-7F52FF?style=flat-square)
 ![JDK](https://img.shields.io/badge/JDK-17-263146?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-JVM-6a737d?style=flat-square)
@@ -13,7 +13,7 @@
 
 **Kotlin 实现的纯 JVM ERA 引擎。**
 
-erak-engine 起源于一个朴素的需求：想在 Android 上原生地玩 EraTW，而不是套一层
+Kotera 起源于一个朴素的需求：想在 Android 上原生地玩 EraTW，而不是套一层
 模拟器。[eratw-pocket](https://github.com/Poboking/eratw-pocket) 就是这个需求的
 答案——它是用本引擎做出来的第一个 Android 原生版 EraTW（上游：画蛇添足版
 4.981），在部分低端设备上比模拟器跑得更顺畅。引擎本身不包含任何游戏数据，在
@@ -25,7 +25,7 @@ erak-engine 起源于一个朴素的需求：想在 Android 上原生地玩 EraT
 
 ## 它是什么
 
-- **语义层，不是前端。** erak-engine 负责游戏规则本身：ERB 字节码执行、变量与角色
+- **语义层，不是前端。** Kotera 负责游戏规则本身：ERB 字节码执行、变量与角色
   系统、存档、内建函数。画面以显示列表输出，交由各前端自行呈现。
 - **兼容性看齐 Emuera。** 引擎的行为基准是 Emuera 的实际表现，所有结论都要求
   落到 `specs/` 的对拍规格上，并附 Emuera 源码的 `文件:行号` 出处。
@@ -113,7 +113,7 @@ cargo build --release --manifest-path tools/erbcc-rs/Cargo.toml
 ## 仓库关系
 
 ```
-erak-engine（本仓库，MIT）     eratw-pocket（GPL-3.0）
+Kotera（本仓库，MIT）     eratw-pocket（GPL-3.0）
 ├── core-vm   ←────────────  ├── render-canvas
 ├── render    ←────────────  ├── platform
 ├── sqlite-adapter / mod-*   └── app（Compose 壳层）

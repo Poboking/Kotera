@@ -1,4 +1,4 @@
-// erak-engine 根构建脚本：仅做插件版本声明与全模块公共配置
+// Kotera 根构建脚本：仅做插件版本声明与全模块公共配置
 plugins {
     kotlin("jvm") version "2.0.20" apply false
     // uipreview（Compose Desktop 预览口）需要；版本走 gradle/libs.versions.toml 同 ref。

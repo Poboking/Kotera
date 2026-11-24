@@ -1,4 +1,4 @@
-// erak-engine 根工程 —— Kotlin 重写的 ERA 运行时（纯 JVM，零 Android 依赖）
+// Kotera 根工程 —— Kotlin 重写的 ERA 运行时（纯 JVM，零 Android 依赖）
 //
 // 模块：
 //   :core-vm        ERA 语义虚拟机（ERB 字节码执行、变量/存档/内建函数）
@@ -29,7 +29,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "erak-engine"
+rootProject.name = "Kotera"
 
 include(":core-vm")
 // SQLite 迁移：纯 JVM 适配器（core 端口 ↔ AndroidX SQLite 通用 API），桌面走 bundled-jvm 驱动。
