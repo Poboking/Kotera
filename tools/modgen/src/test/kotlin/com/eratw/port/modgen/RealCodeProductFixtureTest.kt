@@ -126,28 +126,99 @@ class RealCodeProductFixtureTest {
         )
     }
 
-    private fun writeDeterministicCodeMod(target: Path, packageId: String) {
-        Files.createDirectories(target.parent)
-        ZipOutputStream(Files.newOutputStream(target)).use { zip ->
-            putFixedEntry(zip, "classes.dex", FAKE_DEX)
-            putFixedEntry(zip, "manifest.json", innerManifestOf(packageId))
-        }
+/** 小端 16 位。 */
+    private fun le16(out: java.io.ByteArrayOutputStream, v: Int) {
+        out.write(v and 0xFF)
+        out.write((v ushr 8) and 0xFF)
     }
 
-    private fun putFixedEntry(zip: ZipOutputStream, name: String, bytes: ByteArray) {
-        // STORED（不压缩）：条目字节 = 内容原样 ⇒ 内层 code.mod 的 sha256 **跨机稳定**。
-        // DEFLATE 的压缩流随 JDK 自带的 zlib 版本而变 ⇒ 内层 sha 会漂 ⇒ 连带改掉内容寻址
-        // 文件名 ⇒ 连带改掉外层包内容 ⇒ 冻结夹具在别的 JDK 上判红（2026-11-27 在 Linux CI
-        // 上实测）。这里要的是**跨机稳定的内容寻址**，不是压缩率。
-        val entry = zipEntry(name)
-        entry.method = ZipEntry.STORED
-        entry.size = bytes.size.toLong()
-        entry.compressedSize = bytes.size.toLong()
-        entry.crc = CRC32().apply { update(bytes) }.value
-        zip.putNextEntry(entry)
-        zip.write(bytes)
-        zip.closeEntry()
+    /** 小端 32 位。 */
+    private fun le32(out: java.io.ByteArrayOutputStream, v: Int) {
+        out.write(v and 0xFF)
+        out.write((v ushr 8) and 0xFF)
+        out.write((v ushr 16) and 0xFF)
+        out.write((v ushr 24) and 0xFF)
     }
+
+    /**
+     * 确定性 zip 字节：STORED 条目、固定 DOS 时间（1980-01-01 00:00:00）、无 extra 字段、
+     * 无 data descriptor、UTF-8 文件名标志。
+     *
+     * **不走 ZipOutputStream**：JDK 的 zip 写出在不同版本下会变，而这个内层产物的
+     * sha256 又被内容寻址文件名引用 ⇒ 字节一漂，外层包内容与冻结夹具一起漂，跨机判红
+     * （2026-11-27 在 Linux CI 实测：temurin 17.0.21 与本机 17.0.20.1 写出的字节不同）。
+     * 手写头与中央目录，把字节钉成与 JDK 无关。
+     */
+    private fun deterministicZip(entries: List<Pair<String, ByteArray>>): ByteArray {
+        val body = java.io.ByteArrayOutputStream()
+        val central = java.io.ByteArrayOutputStream()
+        var offset = 0
+        for ((name, bytes) in entries) {
+            val nameBytes = name.toByteArray(Charsets.UTF_8)
+            val crc = CRC32().apply { update(bytes) }.value.toInt()
+            le32(body, 0x04034b50)          // local file header sig
+            le16(body, 20)                  // version needed
+            le16(body, 0x0800)              // flag：UTF-8 文件名
+            le16(body, 0)                   // method：STORED
+            le16(body, 0)                   // mod time（固定）
+            le16(body, 0x0021)              // mod date（1980-01-01）
+            le32(body, crc)
+            le32(body, bytes.size)          // compressed size（STORED = 原样）
+            le32(body, bytes.size)          // uncompressed size
+            le16(body, nameBytes.size)
+            le16(body, 0)                   // extra len
+            body.write(nameBytes)
+            body.write(bytes)
+
+            le32(central, 0x02014b50)       // central header sig
+            le16(central, 20)               // version made by
+            le16(central, 20)               // version needed
+            le16(central, 0x0800)
+            le16(central, 0)
+            le16(central, 0)
+            le16(central, 0x0021)
+            le32(central, crc)
+            le32(central, bytes.size)
+            le32(central, bytes.size)
+            le16(central, nameBytes.size)
+            le16(central, 0)                // extra len
+            le16(central, 0)                // comment len
+            le16(central, 0)                // disk number
+            le16(central, 0)                // internal attrs
+            le32(central, 0)                // external attrs
+            le32(central, offset)
+            central.write(nameBytes)
+            offset += 30 + nameBytes.size + bytes.size
+        }
+        val bodyBytes = body.toByteArray()
+        val centralBytes = central.toByteArray()
+        val out = java.io.ByteArrayOutputStream()
+        out.write(bodyBytes)
+        out.write(centralBytes)
+        le32(out, 0x06054b50)               // EOCD sig
+        le16(out, 0)                        // disk number
+        le16(out, 0)                        // disk with central dir
+        le16(out, entries.size)             // entries on this disk
+        le16(out, entries.size)             // total entries
+        le32(out, centralBytes.size)
+        le32(out, bodyBytes.size)
+        le16(out, 0)                        // comment len
+        return out.toByteArray()
+    }
+
+    private fun writeDeterministicCodeMod(target: Path, packageId: String) {
+        Files.createDirectories(target.parent)
+        Files.write(
+            target,
+            deterministicZip(
+                listOf(
+                    "classes.dex" to FAKE_DEX,
+                    "manifest.json" to innerManifestOf(packageId),
+                ),
+            ),
+        )
+    }
+
 
     private companion object {
         /** 与 `ModImportController.PACKAGE_ID_BYTES = 4` 同口径的十六进制位数（4 字节 = 8 字符）。 */
@@ -185,27 +256,27 @@ class RealCodeProductFixtureTest {
 
         /** 真产物 Base64（与 app 侧 `ModImportRealCodeProductEndToEndTest.FIXTURE_BASE64` 同源）。 */
         const val REAL_PACK_BASE64 =
-        "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"
+        "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"
 
         /** 代码产物 sha256 前 16 位十六进制（app 侧 `<sha16>.mod` 的文件名主体）。 */
-        const val SHA16_HEX = "dcdcd9e5844cefed"
+        const val SHA16_HEX = "8a2c3e49b48ee06c"
 
         /** 整包 sha256（跨模块哨兵，与 app 侧两个 e2e 测试的同名常量同值）。 */
         /** 真产物 zip 的**内容摘要**（与 app 侧 `FIXTURE_ZIP_CONTENT_SHA` 同值；跨机可比）。 */
         const val FIXTURE_ZIP_CONTENT_SHA =
-            "444ad36fd4beb5d9d1dd6fdd7c1c885ded8d7c52ac6e58e543112143c2cb0e80"
+            "dd3b65bbc0b3d67a16aeba9bb9f7bbc3cfbdb66f8121f42ae687e8a7f5b8ca55"
 
         fun zipEntry(name: String): ZipEntry = ZipEntry(name).apply { setTimeLocal(FIXED_ENTRY_TIMESTAMP) }
 
