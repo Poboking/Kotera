@@ -118,10 +118,12 @@ class RealCodeProductFixtureTest {
         val snapshot = repoRoot().resolve(FIXTURE_SNAPSHOT_PATH)
         Files.createDirectories(snapshot.parent)
         Files.writeString(snapshot, base64)
+        // 比**包内容**（条目名 + 未压缩字节），不比 zip 原始字节：压缩流随 JDK 自带的 zlib
+        // 版本而变，跨机不可比（2026-11-27 在 Linux CI 上实测判红，解包后内容逐字节相同）。
         assertEquals(
-            REAL_PACK_BASE64,
-            base64,
-            "真 pack-mod 产物字节变了 —— 请把 $FIXTURE_SNAPSHOT_PATH 的最新 Base64 同步到本类与" +
+            zipContentDigest(Base64.getDecoder().decode(REAL_PACK_BASE64)),
+            zipContentDigest(Files.readAllBytes(first)),
+            "真 pack-mod 产物**内容**变了 —— 请把 $FIXTURE_SNAPSHOT_PATH 的最新 Base64 同步到本类与" +
                 " app 侧 ModImportRealCodeProductEndToEndTest 的 FIXTURE_BASE64（两处同源，勿手改单侧）",
         )
     }
