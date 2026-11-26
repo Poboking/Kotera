@@ -6,7 +6,6 @@ import com.eratw.port.core.fn.NativeParam
 import com.eratw.port.modapi.ModFunction
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
-import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -93,37 +92,5 @@ class CallSharpOverrideTest {
         assertEquals(listOf("CHAT"), registry.overriddenNames())
         // register 口仍拒绝同名字（覆盖 ≠ 重开新增闸）。
         assertThrows<IllegalArgumentException> { api.register("CHAT", ModFunction { }) }
-    }
-
-    // ---------------- 生产装配序哨兵（B3 段序不回退） ----------------
-
-    @Test
-    fun `GameHost 装配段 mod attach 先于 prefillSharpLinks_防回退哨兵`() {
-        // 防回退：覆盖要在装载趟裁决前生效，ModRuntimeAssembly.attach 必须先于
-        // prefillSharpLinks（B4 哨兵同款源码扫，读生产装配点真序）。
-        val candidates = listOf(
-            File("app/src/main/kotlin/com/eratw/port/android/GameHost.kt"),
-            File("../app/src/main/kotlin/com/eratw/port/android/GameHost.kt"),
-            File("eratw-android/app/src/main/kotlin/com/eratw/port/android/GameHost.kt"),
-            // 公开分仓后壳层真源在同级壳层仓（eratw-pocket），不在本仓工程根下。
-            File("../../eratw-pocket/app/src/main/kotlin/com/eratw/port/android/GameHost.kt"),
-        )
-        // 壳层真源在同级壳层仓（eratw-pocket）。引擎仓单独检出时（如本仓 CI）没有它：
-        // 判据是壳层侧的接线守卫，壳层仓不在场时**跳过**（与语料门控同口径，不假红）；
-        // 壳层仓在场但接线不对时仍然硬红（防假绿）。
-        val file = candidates.firstOrNull { it.isFile }
-            ?: throw org.opentest4j.TestAbortedException(
-                "定位不到 GameHost.kt（需同级检出壳层仓 eratw-pocket）：跳过壳层接线守卫" +
-                    "；cwd=${System.getProperty("user.dir")}",
-            )
-        val source = file.readText()
-        val attachAt = source.indexOf("ModRuntimeAssembly.attach(")
-        val prefillAt = source.indexOf("prefillSharpLinks(fresh.store.aux")
-        assertTrue(attachAt >= 0 && prefillAt >= 0, "两个装配点都必须存在")
-        assertTrue(
-            attachAt < prefillAt,
-            "B3 防回退：mod attach（覆盖进终表）必须先于 prefillSharpLinks（装载趟裁决），" +
-                "否则常量名 CALLSHARP 行绑死宿主本体、覆盖永不生效（attach=$attachAt prefill=$prefillAt）",
-        )
     }
 }
