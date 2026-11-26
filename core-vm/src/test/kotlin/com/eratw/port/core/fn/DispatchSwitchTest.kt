@@ -204,9 +204,11 @@ class DispatchSwitchTest {
         assertEquals("2026/05/29 04:26:40", env.str("GETTIMES"))
         // UTC 时区下同一条函数给 UTC 文本，证明差异只来自时区而不是格式化
         assertEquals("2026/05/28 20:26:40", DsEnv(DsHost(), registryWithTime(ZoneId.of("UTC"))).str("GETTIMES"))
-        // 传参数 ⇒ 原版 ArgsCountNotMatches（FunctionMethod.cs:302-335）
+        // 传参数 ⇒ 原版 ArgsCountNotMatches（FunctionMethod.cs:302-335）；移植侧零参函数
+        // 走 error-texts.yaml 的 ArgsNotNeeded 文案（「不需要参数」，LangKey.ArgsNotNeeded），
+        // 同为 arity 闸，只是文案族不同 —— needle 对齐现网逐字原文，判据（抛 CodeEE）不变。
         val e = assertFailsWith<CodeEE> { env.call("GETTIMES", listOf(Value.IntV(1L))) }
-        assertTrue((e.message ?: "").contains("需要 0 个"), "实际：${e.message}")
+        assertTrue((e.message ?: "").contains("不需要参数"), "实际：${e.message}")
     }
 
     @Test

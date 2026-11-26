@@ -27,10 +27,12 @@ typealias CallDefaults = Map<String, List<Expr?>>
  * 默认值采集器：把逐函数的 `FuncLabelStmt.paramDefaults`（[ParamDefault] 列表）折成
  * [CallDefaults]，并登记**本遍拿不到常量值**的位（常量名/任意表达式/解析失败）。
  *
- * 为什么要单独统计：本遍只注入字面量常量（`ParamDefault.expr != null`），
- * 其余位保持「省略即不写」的既有行为（spec: ProcessState.cs:437）—— 语料实测
- * 1,936 处默认值里 1,918 处是字面量，18 处是常量名/带尾注的行（`C_YELLOW`、
- * `OBJ_ID_FIRST` 等）；把这些静默当成 0/"" 就是猜，所以只登记、由装载报告带出去。
+ * 为什么要单独统计：字面量与 `#DIM CONST` 常量名都在装载期折得开（原版
+ * `def = term.Restructure(exm) as SingleTerm`，spec: ErbLoader.cs:724-727），折得开的才注入；
+ * 折不开的（`VARSIZE`/`COLOR_FROMNAME` 这类装载期求值函数、带尾注的行）保持「省略即不写」
+ * 的既有行为（spec: ProcessState.cs:437）—— 把这些静默当成 0/"" 就是猜，所以只登记、
+ * 由装载报告带出去。判据面：`@材料设定D(ARG:2 = MATD_空)` 这类常量名默认值**必须**折出，
+ * 否则省略位停在 0，而 0 在道具数组里是真实道具号（2026-11-16「做菜报错」上报）。
  *
  * 调用方只应登记**可被 `CALL` 命中的定义**（重名被遮蔽的定义不在调用面内）。
  */

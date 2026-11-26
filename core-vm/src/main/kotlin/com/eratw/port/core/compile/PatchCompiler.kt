@@ -12,11 +12,13 @@ import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.ParserConfig
 import com.eratw.port.core.expr.VarInfo
 import com.eratw.port.core.frontend.ErbPreprocessor
+import com.eratw.port.core.frontend.SignatureExport
 import com.eratw.port.core.frontend.Symbols
 import com.eratw.port.core.frontend.sizeConsts
 import com.eratw.port.core.lexer.LexerConfig
 import com.eratw.port.core.lexer.LogicalLineReader
 import com.eratw.port.core.loader.BootMetadata
+import com.eratw.port.core.patch.BaseSignatureCatalog
 import com.eratw.port.core.patch.FunctionMetaRecord
 import com.eratw.port.core.patch.PatchArtifacts
 import com.eratw.port.core.patch.PatchHeader
@@ -24,6 +26,7 @@ import com.eratw.port.core.proc.FuncMeta
 import com.eratw.port.core.stmt.DefinitionScopedResolver
 import com.eratw.port.core.stmt.FuncLabelStmt
 import com.eratw.port.core.stmt.LineParser
+import com.eratw.port.core.stmt.ParamConsts
 import com.eratw.port.core.stmt.SharpStmt
 import com.eratw.port.core.stmt.Statement
 import com.eratw.port.core.stmt.SymbolTable
@@ -65,9 +68,16 @@ import com.eratw.port.core.vars.DimParser
  *
  * 1. 补丁声明全局 `#DIM`（函数外 `#DIM`/`#DIMS`，或函数体内的 GLOBAL/SAVEDATA/CHARADATA
  *    全局侧声明）——`Program.globalSlots` 构造期定死，扩全局槽牵动存档列。
- * 2. 补丁定义 base 已有同名**非事件**函数——覆盖是 override 语义，另立项（铁律：先查再拒，
- *    不静默遮蔽）。事件名（[Symbols.isEventLabelName]）放行：同名事件函数是叠加语义
- *    （见「事件函数成员」节）。
+ * 2. 补丁定义 base 已有同名**非事件**函数——**2026-11-23 KI 改判（BOARD KI-2，主人裁定
+ *    「原版 PC 能正常运行的口上必须能导入运行」）后不再整包硬拒**：撞名一律按覆盖装载
+ *    + 告警（base 侧车给不出该键签名指纹时告警明确「ABI 未校验」）。原判 = 判据参数
+ *    [overrideDeclarable] 判 false 时硬拒（防空指纹覆盖在链接期炸成启动砖化），判 true 时
+ *    声明式覆盖装载——链接期三态拒载已同步改判为告警放行（spec: SymbolCatalog.kt build
+ *    的 diagnostics 通道），砖化不再发生，预检闸失去存在意义。覆盖集不在本类携走（不设
+ *    结果字段），由 [com.eratw.port.core.mod.PatchImportTranscoder] 按「模块函数名 ∩ base
+ *    函数名」现推后写进 `descriptor.overrideFunctions`。原版锚：LabelDictionary.cs:107-113
+ *    （直接赋值后装载者胜出）+ ErbLoader.cs:466-475（只告警不拒）。事件名
+ *    （[Symbols.isEventLabelName]）恒放行：同名事件函数是叠加语义（见「事件函数成员」节）。
  * 3. 空侧车（`param-defaults` 段缺失）+ 补丁调用 base 函数省略实参——PC 全量编译会
  *    补位而补丁不会，同一行 ERB 两种行为是「静默错值」最典型的形态。表达式短路位
  *    （`&&` 右侧等）与返回类型未知的严格位保持 FuncCall 节点、实参省略不经过 callArgs，
@@ -114,9 +124,10 @@ import com.eratw.port.core.vars.DimParser
  *   FuncMeta.kt:469-472）；eventMembersByKey[事件名] = base 成员 + 补丁成员（
  *   FuncMeta.kt:465-468，成员 meta isEvent = true、defIndex 续接 base ⇒ NORMAL 桶
  *   装载序追加在全部 base 成员之后）。base 行为逐位保留：base 成员链经 base 入口
- *   原样执行。TODO(verify)：装载路（GameSession.buildPatchFunctionMetas）当前按
- *   Program 函数名重建补丁 FuncMeta 且事件位恒 false——事件成员要落进
- *   eventMembersByKey 需该重建面同步识别事件名（组长接线，见交付报告）。
+ *   原样执行。（旧 TODO(verify)「事件位恒 false」已于 2026-11-26 核销：装载路
+ *   `GameSession.buildPatchFunctionMetas` 已按事件名识别成员/入口，六项 per-function
+ *   元数据（function-metas 侧车段）也已消费，钉 = PatchCompilerTest 事件成员族 +
+ *   ModPatchLoaderTest `:904` 起的六项存活断言。）
  * - **I6-② 同名闸**对事件名放行（步骤 5）；`#DIM` 全局闸等预扫逻辑对事件成员照常适用。
  *
  * ## v1 边界（TODO(verify) 全部登记在类尾）
@@ -176,6 +187,16 @@ class PatchCompiler(
      * （app 的 `ModImportController`）恒显式传 `EffectiveConfig` 读数。
      */
     val warnNormalFunctionOverloading: Boolean = true,
+    // 覆盖声明能力判据（R7-① override 语义 = I6-② 的放开面）已于 2026-11-23 KI 改判中
+    // 删除（BOARD KI-2）：原参数 `overrideDeclarable: (String) -> Boolean` 是「base 侧车
+    // 给得出非空签名指纹才允许覆盖」的前置闸，给不出 ⇒ I6-② 整包硬拒——其存在意义是
+    // 防空指纹覆盖在链接期被签名闸炸成启动砖化。链接期三态拒载已同步改判为 diagnostics
+    // 告警放行（spec: SymbolCatalog.kt build，2026-11-23 主人裁定「原版 PC 能跑就必须能导」），
+    // 砖化不再发生，本预检闸失去存在意义：撞名一律按覆盖装载 + 告警（见 compileLocked 步骤 5）。
+    // 261111 实测「拿不到非空指纹」的 base 标签全集 = 36 个（labelset 118,195 − signatures
+    // 118,159）：7 个合成事件入口 + 1 个禁载事件成员 + 28 个非事件函数（全部位于禁载目录
+    // DLC/AI对话补丁，base 侧编译成空体保留标签名）——改判后这 28 个键从「撞名硬拒」
+    // 变为「降级覆盖装载 + ABI 未校验告警」。判据取证与附表见 <internal-workdir>/RECON-R7-NOFINGERPRINT.md。
 ) {
 
     /** 补丁源文件（相对路径用于报错定位与 `position` 字段；文本按 UTF-8 解码后的形态）。 */
@@ -227,6 +248,18 @@ class PatchCompiler(
         val sizeConsts: Map<String, Long>,
         val parseWarnings: List<String>,
         val entryFunction: String = "",
+        /**
+         * 补丁函数的真实签名指纹表（R7-① 融合方案；键大写归一，值 = 规范串 SHA-256 指纹，
+         * 与 erbcc 编译线进 `.erbm` 容器前的摘要口径逐字同源——同一 [SignatureExport]
+         * 渲染器 + [BaseSignatureCatalog.fingerprint]）。
+         *
+         * 供 [com.eratw.port.core.mod.PatchImportTranscoder] 写进覆盖模块的签名段：
+         * 覆盖名单由 Transcoder 从「模块函数名 ∩ base 函数名」现推，但签名值取本表的
+         * **补丁真实签名**而非 base 签名——链接期 ABI 闸（SymbolCatalog MODERN）
+         * 据此直比 base 指纹，签名不符即 `OverrideSignatureException` 拒装，不静默错值。
+         * 空表 = 未导出（缺省）= 覆盖路径拿不到签名，fail-closed。
+         */
+        val signatures: Map<String, String> = emptyMap(),
     )
 
     /** 预扫产物：一个 @函数 的静态信息（第二遍切片与 FuncMeta 构造都用它）。 */
@@ -348,13 +381,18 @@ class PatchCompiler(
                     sizeConsts = result.sizeConsts,
                     parseWarnings = result.parseWarnings + dropped,
                     entryFunction = result.entryFunction,
+                    signatures = result.signatures,
                 )
             } catch (e: Exception) {
-                // 只容**解析/词法**这一级（原版也是这一级按行弹栈续装）；I6 各闸
-                // （全局 #DIM / 撞 base 同名 / 省略实参 / 存档列）是设计性硬拒，不容——
+                // 只容**解析/词法**这一级（原版也是这一级按文件级 Warn 续装，spec:
+                // ErbLoader.cs:210-335 LoadErbDir 逐文件 try/catch；2026-11-23 KI 改判注记：
+                // 容错门判据从「解析失败/词法错误」两词扩到含「无法识别函数名」——该抛点
+                // （compileLocked 的 @ 行函数名识别段）原判据漏收 ⇒ 整包拒，KI-1 普查
+                // （CONTRACT-KI-IMPORT.md S8）定性为容错门漏点）；I6 各闸
+                // （全局 #DIM / 省略实参 / 存档列）是设计性硬拒，不容——
                 // 容下来就变成「补丁少了一小块但没人知道」，与禁静默错值同族。
                 val m = e.message
-                if (m == null || !(m.contains("解析失败") || m.contains("词法错误"))) throw e
+                if (m == null || !isTolerableParseFailure(m)) throw e
                 // 空面（全部函数逐个作废）已经是「带原文的最终归因」，按文件再丢一轮只会
                 // 把同一失败重编 N 遍，且报给玩家的是最后一个文件——直接原样抛。
                 if (m.contains("没有留下任何可装载的函数")) throw e
@@ -369,6 +407,16 @@ class PatchCompiler(
             }
         }
     }
+
+    /**
+     * 容错门判据（KI-1 普查 S8，2026-11-23）：解析/词法级失败（含「无法识别函数名」——
+     * 原判据漏收该抛点 ⇒ 整包拒）进文件级容错；I6 设计性硬拒（全局 #DIM / 省略实参 /
+     * 存档列）不在此列，原样上抛。抽谓词是 detekt ComplexCondition 的要求。
+     */
+    private fun isTolerableParseFailure(message: String): Boolean =
+        message.contains("解析失败") ||
+            message.contains("词法错误") ||
+            message.contains("无法识别函数名")
 
     /** 报错消息 → 肇事源（消息里最早出现的 relPath）；归因不到返回 null（调用方原样抛）。 */
     private fun attributedSource(message: String?, sources: List<SourceFile>): SourceFile? {
@@ -489,16 +537,32 @@ class PatchCompiler(
         }
 
         // ---- 步骤 5：I6-② base 已有同名函数（事件名放行——同名事件是叠加语义）----
-        for (h in heads.values) {
+        // 非事件同名（2026-11-23 KI 改判，BOARD KI-2）：**一律按覆盖装载 + 告警，不再整包
+        // 硬拒**。原判 = `overrideDeclarable` 判 false（base 侧车拿不到该键签名指纹）⇒ 整包
+        // 硬拒、判 true ⇒ 声明式覆盖装载；其存在意义是防空指纹覆盖在链接期炸成启动砖化。
+        // 链接期三态拒载已同步改判为 diagnostics 告警放行（spec: SymbolCatalog.kt build，
+        // 未声明覆盖 / 空指纹 / 指纹不符全走告警，SUPER 链照建），砖化不再发生，预检闸撤销。
+        // 原版语义背书：AddLabel 之后 SortLabel 用 `noneventLabelDic[key] = label`
+        // 直接赋值 ⇒ 后装载者胜出（spec: LabelDictionary.cs:107-113），装载期只在配置开时给
+        // level 1 告警（spec: ErbLoader.cs:466-475）；唯一会改判「最先定义者胜出」的 SortLabels()
+        // 挂在 setLabelsArg() 里，而该方法在 4.981 的两处调用点都被注释（spec: ErbLoader.cs:130、
+        // :221）⇒ 原版从不因撞名拒绝装载。
+        // 键比较必须走归一：引擎按 Config.StrComper = IGNORE CASE 比函数名（spec:
+        // IdentifierDictionary.cs:48），而 FuncHead.name 是源码原样大小写 ⇒ 只能比 heads 的大写
+        // 键。混写撞名（真包实测 @K29_FORCESubscribe）若在这里漏判，既逃过本告警又不会被声明成
+        // 覆盖（Transcoder 现推覆盖集按同款归一键），产物落盘后在链接期走未声明覆盖告警路径。
+        for ((key, h) in heads) {
             if (Symbols.isEventLabelName(h.name)) continue
-            val dup = baseKeys.firstOrNull { it == h.name }
-            if (dup != null) {
-                throw PatchCompileException(
-                    "补丁不能定义 base 已有的同名函数（覆盖是 override 语义，另立项；" +
-                        "事件函数成员是支持的——同名事件全部执行，spec: CalledFunction.cs:228-243；" +
-                        "非事件覆盖需要改写 base 调用点，另立项。R7 铁律 4 / 不变量 I6）：函数 ${h.name}" +
-                        "（补丁 ${h.file}:${h.displayLine}，base 函数表下标 ${baseIndexByName[dup]}）",
-                )
+            val dup = baseKeys.firstOrNull { it == key } ?: continue
+            // 告警门 = 原版 `!label.IsEvent && (Config.WarnNormalFunctionOverloading ||
+            // Program.AnalysisMode)`（spec: ErbLoader.cs:466）：关掉配置时覆盖照常装载，
+            // 只是不再逐条报；导入成功页的覆盖总数读数不受本门约束（禁静默的另一半）。
+            if (warnNormalFunctionOverloading) {
+                warnings +=
+                    "覆盖 base 同名函数 ${h.name}（补丁 ${h.file}:${h.displayLine}，base 函数表" +
+                        "下标 ${baseIndexByName[dup]}）——原版对同名非事件函数是后装载者胜出并" +
+                        "只告警，本包按覆盖装载（spec: LabelDictionary.cs:107-113、" +
+                        "ErbLoader.cs:466-475）"
             }
         }
 
@@ -573,7 +637,7 @@ class PatchCompiler(
                 resolver,
                 config = ParserConfig(constantKeywordLookup = constantKeywordLookup),
                 lexerConfig = lexerCfg,
-                dimConsts = consts,
+                consts = ParamConsts(ints = consts),
             )
             val parsed = LinkedHashMap<String, Pair<FuncHead, List<Statement>>>()
             for (src in sources) {
@@ -828,6 +892,51 @@ class PatchCompiler(
         }
         metas.addAll(entryMetas)
 
+        // ---- 步骤 9.5：补丁函数真实签名指纹导出（R7-① 融合方案；ABI 闸的对账面）----
+        // 与全量编译（CorpusCompile 的签名段写侧）走**同一渲染器**（下沉到 core/frontend
+        // 的 SignatureExport，erbcc 侧只余转发壳）：形参取 FuncLabelStmt 的项原文
+        // （paramRefs 含 `:n` 下标，REF 位/维度由它派生）与逐位默认值（ParamDefault 原样——
+        // LITERAL 走 expr.toString，NON_LITERAL 只登记 raw 不折值，与 base 侧 param-defaults
+        // 口径逐字同源）；返回通道取函数头三态——非方法 = null（UNKNOWN，与全量 scan.funcTypes
+        // 只收 `#FUNCTION` 族同口径），`#FUNCTIONS`/`#FUNCTIONF`/`#FUNCTION` = STR/FLOAT/INT。
+        // 键 = 切片键（大写归一）；只取有真实切片的函数（毒化函数不在 slices），与全量侧
+        // 同一收口。值与 erbcc 进容器前一致 = 规范串的 SHA-256 指纹。
+        // 关键语义（融合方案）：本表写的是**补丁自己的真实签名**。覆盖名单由 Transcoder
+        // 现推，但签名值取本表而非 base 签名——链接期 MODERN 闸直比 base 指纹，签名不符
+        // 即拒（OverrideSignatureException），不让「写 base 签名 = 恒过」架空 ABI 闸。
+        val patchCanonical = SignatureExport.export(
+            slices.mapNotNull { (key, pair) ->
+                val (head, stmts) = pair
+                val label = stmts.filterIsInstance<FuncLabelStmt>().firstOrNull()
+                    ?: return@mapNotNull null
+                val params = label.paramNames.mapIndexed { i, name ->
+                    SignatureExport.paramOf(
+                        name,
+                        label.paramRefs.getOrElse(i) { name },
+                        label.paramDefaults.getOrNull(i),
+                    )
+                }
+                SignatureExport.Source(
+                    key = key,
+                    signature = SignatureExport.FunctionSignature(
+                        params = params,
+                        returnChannel = SignatureExport.returnChannelOf(
+                            if (!head.isMethod) {
+                                null
+                            } else when {
+                                head.returnsFloat -> OperandType.FLOAT
+                                head.returnsStr -> OperandType.STR
+                                else -> OperandType.INT
+                            },
+                        ),
+                    ),
+                )
+            },
+        )
+        val patchSignatures = patchCanonical.mapValues { (_, canonical) ->
+            BaseSignatureCatalog.fingerprint(canonical)
+        }
+
         return PatchResult(
             program = program,
             functions = compiler.functions.toList(),
@@ -836,6 +945,7 @@ class PatchCompiler(
             sizeConsts = consts,
             parseWarnings = warnings,
             entryFunction = effectiveEntry,
+            signatures = patchSignatures,
         )
     }
 
@@ -1236,8 +1346,9 @@ class PatchCompiler(
 //    只丢那一行，spec: ErbLoader.cs:1215-1255 结构不匹配时告警弹栈续装），函数体外
 //    （@ 行之前的正文、reader 词法错误）的失败退到文件级由 [compile] 包装层兜。
 // 4. 【改写，wave/mod-import-event-members】补丁事件成员已放开（原 I6-① 撤销）：
-//    成员 FuncMeta 的事件桶位（#ONLY/#PRI/#LATER/#SINGLE）不采集，恒 NORMAL 桶
-//    （isOnly/isPri/isLater 全 false ⇒ eventBucket = 2）、#SINGLE 恒 false。装载序语义 =
+//    成员 FuncMeta 的事件桶位（#ONLY/#PRI/#LATER/#SINGLE）不采集，恒 NORMAL 单桶
+//    （isOnly/isPri/isLater 全 false ⇒ `eventBuckets = [2]`，四平行 if 见 `FuncMeta.kt:232-238`；
+//    桶位自 2026-11-26 起是**集合**而非标量 —— 在册 B23 已结案）、#SINGLE 恒 false。装载序语义 =
 //    「补丁成员追加在全部 base 成员之后」（defIndex 续接 base 计数），覆盖社区口上
 //    「裸 @EVENTxxx 挂钩」的主流形态；带 #PRI/#LATER 的事件成员会被静默当 NORMAL 桶
 //    成员执行（原版会插桶，spec: CalledFunction.cs:228-243），需要采集时从切片遍的
@@ -1245,8 +1356,10 @@ class PatchCompiler(
 //    （a）同名事件名的包内重复定义在本编译器是「最后成员胜出」，而原版是多成员并存
 //    （spec: LabelDictionary.cs:187-216 四桶追加）——社区包对同一事件名的多定义靠
 //    同名覆盖叠打的形态会被吞成员，待采集多成员语义时一并处理；（b）装载路
-//    （GameSession.buildPatchFunctionMetas）按 Program 函数名重建补丁 FuncMeta 且
-//    事件位恒 false，事件成员要进 eventMembersByKey 需该重建面识别事件名（组长接线）。
+//    （GameSession.buildPatchFunctionMetas）按 Program 函数名重建补丁 FuncMeta 的
+//    事件识别与六项 per-function 元数据消费**均已接线**（2026-11-26 核销旧 TODO：
+//    isMember/isEntry 按 Symbols.isEventLabelName 识别，rec 六项随包存活，钉见
+//    PatchCompilerTest 事件成员族 + ModPatchLoaderTest `:904`）。
 // 5. 【已清，R7-D2 TODO③】短路位（`&&` 右侧等）/ 返回类型未知严格位的 FuncCall 保持
 //    节点、实参省略不经过 callArgs 的 I6-④ 残余缺口已补判据：ErbProgramCompiler 的
 //    keptUserCallSink（缺省 null = 旧行为）在 padRuntimeCalls 的 userConsumed 分支上报，

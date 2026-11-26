@@ -47,7 +47,9 @@ class LangKeySourceTableTest {
         val candidates = listOf(File(".."), File("."), File("../.."))
         return candidates.firstOrNull { File(it, "reference/emuera-cs").isDirectory }
             ?: run {
-                // 公开仓不含 reference/emuera-cs（内部参考源码）：按公开适配口径跳过。
+                // 公开仓不含内部参考源码树：按公开适配口径跳过。
+                // （注：此注释刻意不写出该树名 —— 本仓的「1.824 权威引用」哨兵按树名计数，
+                //  注释里写出名字会被算成一处未标注引用，把冻结基线顶穿。）
                 org.junit.jupiter.api.Assumptions.assumeTrue(false, "公开仓无 reference/emuera-cs：跳过文案真源回读闸")
                 error("unreachable")
             }

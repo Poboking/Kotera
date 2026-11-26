@@ -157,14 +157,16 @@ object ErbcFormat {
     const val MARKER_OPCODE_MAX = 197
 
     /**
-     * 容器里**合法的操作码上界**（= [Opcode.MAX_OPCODE]，当前末条 `_EVAL_INT_JZ`(246)）。
+     * 容器里**合法的操作码上界**（= [Opcode.MAX_OPCODE]，当前末条 `_EVAL_FLOAT`(249)）。
      *
-     * 0..246 连续无空洞：VM 内部 0..28（[Opcode.INTERNAL_COUNT]）、isa 语句 29..197
+     * 0..249 连续无空洞：VM 内部 0..28（[Opcode.INTERNAL_COUNT]）、isa 语句 29..197
      * （[MARKER_OPCODE_MAX]）、编译器扩展 198..201（含 `_CALL_BY_NAME`/`_JUMP_BY_NAME`/
      * `_JUMP_DYN`/`_RETS`）、栈码组 202..243（T2-21 的 `_STK_*`，操作数直接是池下标，
      * 装载期校验见 `ErbcReader.requireStackOpPool`）、浮点返回追加段 244（`_RETF`，
      * 4.981 升版）、运行期字符串调用追加段 245（`_CALL_STR`）、条件位融合追加段
-     * 246（`_EVAL_INT_JZ`，MODERN-T1）。区间外的操作码在 VM 分派里只会落进 `else` 分支报
+     * 246（`_EVAL_INT_JZ`，MODERN-T1）、循环条件融合追加段 247..248（`_LT_JZ`/`_GT_JZ`，
+     * PERF-LOOP）、浮点实参追加段 249（`_EVAL_FLOAT`，`#DIMF` 形参的浮点实参按位型落
+     * 整型槽）。区间外的操作码在 VM 分派里只会落进 `else` 分支报
      * 「语句 <op:N> 尚未实现」—— 那是**运行期**才炸，且文案与真因（产物损坏）无关；
      * 装载期必须在 [ErbcReader] 里当场拒绝（规约 §1.6「禁止静默降级」）。
      *
@@ -332,7 +334,17 @@ object ErbcFormat {
         /** 该位有实参；false = 省略位（原版 `Arguments[i] == null`，ProcessState.cs:437 跳过不写）。 */
         const val PRESENT = 0x02
 
-        const val MASK = IS_STR or PRESENT
+        /**
+         * 该实参是浮点表达式（4.981 `#DIMF` 形参通道；原版 `TransporterFloat`，
+         * `CalledFunction.cs:174-198`）。
+         *
+         * 值仍落 **int 桶**，槽内容是按 `Double.doubleToRawLongBits` 的位型；位集时消费方
+         * 按浮点重解释（`ProcessRuntime.floatArgValue`）。追加位 = 兼容变更，不升容器
+         * version（与 [WireEnum.OPERAND_FLOAT] 同一口径，spec: `specs/erbc-format.md` §8.4）。
+         */
+        const val IS_FLOAT = 0x04
+
+        const val MASK = IS_STR or PRESENT or IS_FLOAT
     }
 
     /** `OperandType` 线值（0 位，冻结）。 */

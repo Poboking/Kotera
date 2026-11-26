@@ -6,6 +6,7 @@ import com.eratw.port.core.host.FontDisplayWidth
 import com.eratw.port.render.Grid
 import com.eratw.port.render.font.BundledFontFamilies
 import com.eratw.port.render.font.GlyphFallback
+import com.eratw.port.render.font.ResolvedFontFamilyCache
 import kotlin.math.abs
 import kotlin.math.round
 
@@ -86,12 +87,28 @@ class FontWidthRuler(
     private val cache = HashMap<String, HashMap<Int, Float>>(8)
 
     /**
+     * 「请求字体名 → 登记族」的解析缓存（与绘制侧 `CanvasConsoleView` 同一只判式，
+     * 复用 [ResolvedFontFamilyCache]）。
+     *
+     * 为什么度量侧必须有它：折行是**逐码位**问宽度（`FoldPiece.cellsAt` 前缀扫描 +
+     * 每件构造/拆分时的 `cells`），此前每个码位都要走一遍
+     * `BundledFontFamilies.resolve` 的两轮字符串归一（对请求名一遍、对八个登记族名
+     * 各一遍，共 9 个 `StringBuilder` + `toString`，且**宽度缓存命中也躲不掉**）。
+     * 2026-11-20 vivo ANR 的冻结栈正是
+     * `StringBuilder.toString ← normalize ← byFamily ← resolve ← advanceCells ← FoldPiece`，
+     * uiFrozen 1.7s 起、输入超时 5s 收走 —— 商店大页几千码位 × 9 次归一 × 折行多轮即秒级。
+     * 绘制侧 2026-11 月已修过同一问题（见 `CanvasConsoleView.drawRun` KDoc），度量侧漏接，
+     * 本字段补上。命中后这里只剩一次 HashMap 查表，零分配。
+     */
+    private val familyCache = ResolvedFontFamilyCache()
+
+    /**
      * 单码位的浮点半角格宽（真实 advance 优先，缺表/缺行退化到等宽网格）。
      *
      * @param fontName 段的请求字体名（可空；空名归一到默认族）
      */
     fun advanceCells(codePoint: Int, fontName: String): Float {
-        val family = BundledFontFamilies.resolve(fontName).family
+        val family = familyCache.resolve(fontName).family
         val perFamily = cache.getOrPut(family) { HashMap(256) }
         val cached = perFamily[codePoint]
         if (cached != null) return cached

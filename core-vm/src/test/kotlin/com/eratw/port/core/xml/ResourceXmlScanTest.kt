@@ -14,7 +14,8 @@ import kotlin.test.assertTrue
  * 读数出处（本路两根实读，语料只读）：
  * - 4.980 `eratw-画蛇添足版eratw4.980`：`resources` 下 93 个精灵表 xml，扫描链上 `i`（单图）
  *   与 `a`（动画）两种根形态都出现过；
- * - 4.981 `eraTW4.981-261017-EAGLOV3`：`resources` 下 0 个 xml —— 精灵表资源模型整批改成了
+ * - 4.981 `eraTW4.981-261111-EAGLOV3`（261017 已退役，本节读数在两根上同值）：
+ *   `resources` 下 0 个 xml —— 精灵表资源模型整批改成了
  *   webp + csv，在位 xml 只剩 `plugins` 下 4 个与 `lang/emuera.zhs.xml`（与 XmlCorpusFacts
  *   KDoc 同账）。「resources 目录还在、xml 一个没有」是语料级资源模型变化，不是移植侧装载缺陷：
  *   XmlParser / XmlPath 在 4.981 的 4 个 plugins xml 上由 RealCorpusXmlTest 全绿。

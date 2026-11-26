@@ -5,18 +5,29 @@ import kotlin.io.path.Path
 import kotlin.test.Test
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions
+import org.junit.jupiter.api.Tag
 
 /**
  * 全量语料编译冒烟（默认跳过；设置 `ERATW_CORPUS` 后运行）。
  *
- * 首选入口是 `:core-vm:corpusSmoke`（JavaExec，3g 堆，不受 test worker 限制）；
- * 本 test 保留给 `:core-vm:test` 全量回归时顺带判闸（1536m 堆，大语料有 OOM 风险，
- * 判闸以 corpusSmoke 的 GATE 退出码为准）。
+ * 闸的两个入口都跑**出包字节**：`:core-vm:corpusCompileGate`（Test，6g 堆）与
+ * `:core-vm:corpusSmoke`（JavaExec，3g 堆）。两者都由构建脚本先按 `devtools/corpus-patches` 把
+ * 语料根 staging 成硬链接副本、套 CB-* 补丁，再把 `ERATW_CORPUS`/`ERATW_GAMEDIR` 指向副本
+ * （与出包链 `:tools:erbcc:compileCorpus` 吃同一批字节）⇒ 本用例判的是**玩家包里的字节**。
+ *
+ * 为什么不在通用 `:core-vm:test` 上跑：金标准对拍（`E2EGoldenTest` / `L3HashChainTest` /
+ * `PerfGoldenInternedEquivalenceTest` / `Xml*` 系列）的 oracle 是 PC Emuera 在**真语料原文**上跑
+ * 出来的，把全域语料换成补丁字节会让那 20+ 条对拍全差（2026-11-16 实测 8237 tests / 28 failed，
+ * 红的清一色是基准对拍）⇒ 通用 test 保持原文口径。本用例判的是补丁后的字节，所以打
+ * `@Tag("corpus-gate")`、由通用 test 任务 `excludeTags` 划出（口径不同不是「这条会红所以藏起来」：
+ * 原文口径下 CB-005 的 4 行 `[[油炸跳蛋]]` rename 键必然解析失败，原版 `LexicalAnalyzer.cs:808-826`
+ * 同拒，那不是回归）。同理也没必要设 `ERATW_ALLOW_ORIGINAL_REJECTS=1` 在原文上凑绿。
  *
  * ```
- * ERATW_CORPUS=<…>/ERB ../.tooling/gradle-8.10.2/bin/gradle --no-daemon :core-vm:test --tests "*CorpusCompileSmokeTest*"
+ * ERATW_CORPUS=<游戏根>/ERB ./gradlew --configure-on-demand :core-vm:corpusCompileGate
  * ```
  */
+@Tag("corpus-gate")
 class CorpusCompileSmokeTest {
 
     @Test

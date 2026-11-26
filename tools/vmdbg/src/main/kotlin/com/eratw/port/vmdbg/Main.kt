@@ -87,15 +87,18 @@ object Cli {
                     同时自证 -Xmx 挡位真的生效（512m ⇒ maxMemoryBytes=536870912）
 
 子命令:
-  call <函数名> [--args 0,1,...] [--pre "FN1;FN2"] [--addchara 1,2] [--sets "NAME[i,j]=V;..."] [--steps N]
+  call <函数名> [--args 0,1,...] [--pre "FN1;FN2"] [--addchara 1,2] [--sets "NAME[i,j]=V;..."] [--inputs "768,0"] [--steps N]
       调用任意函数。能解析成整数的实参进 intArgs、其余进 strArgs（桶内保序）。
       --pre 先在同一 GameSession 里按序跑无实参真实函数（分号分隔；SQL_CONNECT 连接不跨进程，
             真启动链必须同会话先跑 QOL_DB_INIT 这类入口）；逐条打印 preCall[i]=...；
       --addchara 逐号走 VariableStore.addCharacter（与 ERB ADDCHARA 语句同一实现）；
       --sets 逐项走 CmdSet 的公开写单点（分号分隔，值内不含分号），三者都在目标调用前生效。
+      --inputs 按序喂给 INPUT/INPUTS 的取值面（逗号分隔；INT 等待点的项必须是整数，
+            脚本耗尽即回落缺省口径：INT 取默认/0、STR 取默认/空串）；用于「取值决定分支」
+            的真实入口复现（如菜单用玩家输入号选详情），--pre 会先消费脚本。
       输出 status/target/location/message/steps/elapsedMs/callChain + 控制台尾 10 行。
       status: PASS / NOT_FOUND / CODEEE / STEP_LIMIT / STACK_OVERFLOW / WALL_LIMIT / ERROR
-  trace <函数名> [--pre "FN1;FN2"] [--addchara 1,2] [--sets "NAME[i,j]=V;..."] [--steps N] [--capacity N] [--out <文件>]
+  trace <函数名> [--pre "FN1;FN2"] [--addchara 1,2] [--sets "NAME[i,j]=V;..."] [--inputs "768,0"] [--steps N] [--capacity N] [--out <文件>]
       依赖路1 语句探针（ProcessRuntime.statementProbe）。逐条输出「函数 行号 语句摘要 耗时ns」，
       环形缓冲定长（缺省 100000）超限丢最旧；--out 落盘代替 stdout。
   where
@@ -122,7 +125,13 @@ object Cli {
       语句覆盖率%（分母 = 函数区间语句 marker 数，分子 = distinct 执行 marker pc，
       -1 = 不适用；「执行过」≠「成功」）；执行前先写 RUNNING 占位并 flush，
       完成后原地覆写 —— 挂死时最后一行 RUNNING 即肇事者。
-      summary.md = 状态计数 + 失败指纹 TOP 表 + 语句覆盖率仪表。
+      summary.md = 状态计数 + 失败分层（fresh 线索 TOP / 已知噪声两表）+ 语句覆盖率仪表。
+  recheck --from <sweep.jsonl> [--status CODEEE,...] [--max N] [--out <目录>]
+      sweep 失败条目的 fresh 单跑批量复核（CONTRACT-DBG-TOOLING）：每条独立装配、与 sweep
+      同口径裸跑（全 0 整参 + 全空串参），产 recheck.jsonl + recheck.md 对照表。
+      结论：CONFIRMED（仍失败且同状态，真线索）/ CLEAR（fresh PASS，串染实锤）/
+      SHIFTED（仍失败但状态变了，需人工）/ NOT_FOUND（产物换过，无法复核）。
+      有 CONFIRMED 时退出码 3。一条 ≈ 全量装载，--max 默认 20。
   ledger diff --base <sweep.jsonl> --head <sweep.jsonl>
       失败指纹台账 diff：新增 / 修复 / 回归 三类 + 计数表（见 CmdLedger 的口径说明）。
   set <名字>[i,j,...] = <整数 或 "字符串">
@@ -191,6 +200,7 @@ object Cli {
                 "disasm" -> CmdDisasm.run(parsed, out, err)
                 "srcmap" -> CmdSrcMap.run(parsed, out, err)
                 "sweep" -> CmdSweep.run(parsed, out, err)
+                "recheck" -> CmdRecheck.run(parsed, out, err)
                 "ledger" -> CmdLedger.run(parsed, out, err)
                 "set" -> CmdSet.run(parsed, out, err)
                 "cheat" -> CmdSet.runCheat(parsed, out, err)
@@ -198,6 +208,7 @@ object Cli {
                 "snapshot" -> CmdSnap.run(parsed, out, err)
                 "restore" -> CmdSnap.runRestore(parsed, out, err)
                 "heap" -> CmdHeap.run(out)
+                "moddiag" -> CmdModDiag.run(parsed, out)
                 "log" -> CmdLog.run(args, out, err)
                 "explore" -> run {
                     CmdExplore.policyFactory = CmdExplore.PolicyFactory { name, seed -> createExplorePolicy(name, seed) }
@@ -240,9 +251,11 @@ class Args private constructor(
         /** 带值的选项名（其余 `--xxx` 记为布尔旗标）。 */
         private val VALUE_OPTS = setOf(
             "--erbc", "--game", "--work", "--sandbox", "--steps", "--step-wall-ms", "--args", "--out",
-            "--only", "--addchara", "--sets", "--pre",
+            "--only", "--addchara", "--sets", "--pre", "--inputs",
             "--shard", "--wall-ms", "--capacity", "-n", "--base", "--head", "--from",
             "--tags", "--watch", "--max",
+            // DBG-TOOLING 波：recheck 的状态过滤条；产物新鲜度校验的源码树根（缺省自动定位）。
+            "--status", "--source-root",
         ) + CmdExplore.VALUE_OPTS_NEEDED + CmdSrcMap.VALUE_OPTS_NEEDED
 
         fun parse(tokens: List<String>): Args {

@@ -1,0 +1,270 @@
+# mod-save.yaml — mod 扩展存档 `.rt2` 侧车容器 ABI（MODDX4-D1，2026-11-19 落 specs 权威面）
+#
+# 状态：从代码逐字段实测反推（真源纪律：每字段带代码「相对 eratw-android/ 的路径:行号」锚；
+#   代码与散文冲突以代码为准——与 era-arch-v61u.md §8 的出入清单见 MODDX4-D1 交付报告）。
+# 上位叙事（只做导航，不是权威）：era-arch-v61u.md §8（`saveNN.sav` + `.rt2` 一个逻辑存档单元、
+#   兼容性矩阵、持久化域矩阵）。本文件落定后，`.rt2` 容器字节布局以本文件为唯一权威；
+#   era-arch §8:256 的 ABI-6 v1 段清单是历史叙述（缺 v2 两段，见 compat_and_authority 节）。
+#
+# 代码真源（全部只读实测）：
+#   容器编解码     = core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt
+#   抓取/恢复编排  = core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt
+#   磁盘配对/命名  = core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt
+#   分片生产/恢复  = app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt（ModSidecarStoragePort）
+#   分段载荷格式   = core-vm/src/main/kotlin/com/eratw/port/core/mod/ModStorageSection.kt（MST1）
+#   CSV 注入包装   = core-vm/src/main/kotlin/com/eratw/port/core/save/ModCsvValueCodec.kt（R2PK）
+#
+# 术语：
+#   本体   = saveNN.sav / global.sav（PC Emuera 兼容的原版变量存档，规约 = specs/save-format.md）
+#   侧车   = 本体文件名后接 `.rt2` 的伴生容器（本文件的对象）；本体在而侧车缺/坏 = fail-closed 警告
+#   分片   = 容器里按 packageId 一包一片的 PackageChunk；容器层不解释载荷
+#   孤儿片 = 未激活（禁用/未装）包的分片；解码后原样保留、存盘原样回写
+#
+# 回归锚：core-vm/src/test/kotlin/com/eratw/port/core/save/SidecarSaveBundleTest.kt（9 用例）
+#   与本文件「byte_layout / capacity / decode_discipline」三节逐条对应。
+
+schema: 1
+
+# ---------------------------------------------------------------------------
+# 一、文件命名与配对（磁盘面）
+# ---------------------------------------------------------------------------
+files:
+  slot_unit:
+    form: 'saveNN.sav + saveNN.sav.rt2 = 一个逻辑存档单元'
+    sidecar_naming: '本体路径原样拼接 `.rt2` 后缀（同目录同名，后缀区分）'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt:385-386
+    unit_evidence: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:12
+  global_unit:
+    form: 'global.sav + global.sav.rt2（跨槽共享，与 global.sav 配对）'
+    note: >-
+      era-arch 散文与部分 KDoc 写逻辑名「global.rt2」；磁盘真名是 `global.sav.rt2`
+      （sidecarPathOf 对 globalPath 的产物），journal = `global.sav.journal`。
+    global_path_source: core-vm/src/main/kotlin/com/eratw/port/core/save/SaveConfig.kt:55
+    journal_evidence: core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt:822-831
+  journal:
+    form: 'saveNN.sav.journal / global.sav.journal（配对事务日志，与本体伴生）'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt:388
+  transaction_members:
+    form: '配对事务成员 = 本体 + 侧车两件（.part / .bak / 定序替换 / COMMITTED 全套照 SaveTransaction）'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt:476-498
+  delete_pairing:
+    form: '删除相位配对删两成员；清序 journal → 两成员残件 → .rt2 收尾'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt:792-797
+  global_bin:
+    form: '全局包短 ID 注册表另有单文件落点 rt2_pkg_registry.bin（gameRoot 根，运行期生成物）'
+    name_source: app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:288
+    location_source: app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:2264-2265
+    write_timing: 'mod.shutdown 原子写（app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:1938-1941、:2227）'
+    dual_persistence: '双落点 = 全局 bin + 每份 .rt2 的注册表快照段（core-vm/src/main/kotlin/com/eratw/port/core/entity/PackageShortIdRegistry.kt:18）'
+
+# ---------------------------------------------------------------------------
+# 二、字节布局（大端；java.io.DataOutputStream 序；段序写死）
+# ---------------------------------------------------------------------------
+byte_layout:
+  order_note: '表内 order 即字节序；encode 侧锚 = SidecarSaveBundle.encode，decode 侧逐项对称'
+  encode_entry: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:123-174
+  fields:
+    - { order: 1,  name: magic,           type: i32,      value: '0x45525432（ASCII "ERT2"）', source: 'SidecarSaveBundle.kt:197（写 :149 / 读 :240）' }
+    - { order: 2,  name: version,         type: u16,      value: '2（只认 2；v1 直接拒载，无双版本读取面）', source: 'SidecarSaveBundle.kt:199、:242；v2 缘起 KDoc :31-33' }
+    - { order: 3,  name: binding.uniqueCode,    type: i64, value: '绑定三元组第 1 位', source: 'SidecarSaveBundle.kt:151、:66-70（生产值见 binding 节）' }
+    - { order: 4,  name: binding.scriptVersion, type: i64, value: '绑定三元组第 2 位', source: 'SidecarSaveBundle.kt:152' }
+    - { order: 5,  name: binding.saveTextHash,  type: i32, value: '绑定三元组第 3 位（生产语义 = 本体容器全字节 CRC32，见 binding 节）', source: 'SidecarSaveBundle.kt:153' }
+    - { order: 6,  name: registry_snapshot,     type: 'i32 长度 + bytes', value: 'PackageShortIdRegistry.encode 原样字节（容器层不解释）', source: 'SidecarSaveBundle.kt:154-155、:23 KDoc；encode 入口 PackageShortIdRegistry.kt:100' }
+    - { order: 7,  name: virtual_no_snapshot,   type: 'i32 长度 + bytes', value: 'VirtualCharaNoRegistry.encode 原样字节；global 侧车恒空段', source: 'SidecarSaveBundle.kt:156-157、:24 KDoc；encode 入口 VirtualCharaNoRegistry.kt:127' }
+    - { order: 8,  name: entity_graph_payload,  type: 'i32 长度 + bytes', value: 'EntityPayloadCodec 输出（容器层不解释）；global 侧车恒空', source: 'SidecarSaveBundle.kt:158-159；global 恒空 = SaveService.kt:112' }
+    - { order: 9,  name: chunk_count,     type: i32,      value: '分片数（上限 4096）', source: 'SidecarSaveBundle.kt:160、:217' }
+    - { order: 10, name: chunks,          type: '逐片：i32 名长 + UTF-8 packageId + i32 载荷长 + bytes', value: '按 Package 一包一片；载荷分层见 chunk_payload 节', source: 'SidecarSaveBundle.kt:177-185；空片名拒载 :266' }
+    - { order: 11, name: decision_state_segment, type: 'i32 长度 + bytes', value: 'v2 增补尾段 1（决策态）；与 12 同进退', source: 'SidecarSaveBundle.kt:162-165、:188-193' }
+    - { order: 12, name: job_state_segment,      type: 'i32 长度 + bytes', value: 'v2 增补尾段 2（任务态）；与 11 同进退', source: 'SidecarSaveBundle.kt:162-165、:188-193' }
+    - { order: 13, name: crc32,           type: i32,      value: '对 order 1..12 全部字节的 CRC32，尾部；不含自身', source: 'SidecarSaveBundle.kt:166-173（校验 :233-237）' }
+  state_segments_gate:
+    rule: '尾段 11/12 要么都写、要么都不写：两段全空 = 增补前逐字节同形（不写任何尾段字节）'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:145-146、:162-165
+    empty_carrier: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:80-91
+    payload_codecs: '决策态 = DecisionStateCodec VERSION 2 输出、任务态 = JobSchedulerStateCodec VERSION 2 输出；容器层不解释内容'
+    codec_evidence: 'core-vm/src/main/kotlin/com/eratw/port/core/mod/DecisionStateCodec.kt:22、core-vm/src/main/kotlin/com/eratw/port/core/mod/JobSchedulerStateCodec.kt:17-21、:50'
+  min_size:
+    value: 46
+    formula: '头 26（magic 4 + version 2 + 三元组 8+8+4）+ 四段长度字 16（注册表/虚拟 NO/实体图/分片数）+ CRC 4'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:222-223
+
+# ---------------------------------------------------------------------------
+# 三、绑定三元组（.rt2 与 .sav 的同一性凭据）
+# ---------------------------------------------------------------------------
+binding:
+  fields:
+    - name: uniqueCode
+      production_value: 'GameBase.csv `コード`（gameCode）＝ .sav 头部的 UniqueCode 同源值'
+      source: 'core-vm/src/main/kotlin/com/eratw/port/core/data/csv/GameBaseLoader.kt:39/:60；写入点 core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt:468-472'
+    - name: scriptVersion
+      production_value: 'GameBase.csv `バージョン`（version）'
+      source: core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt:468-472
+    - name: saveTextHash
+      production_value: '本体 .sav 容器全字节 CRC32（存/读两侧都从同一份文件字节现算，不依赖文本回读）'
+      ruling: >-
+        era-arch §8:221 的字面命名 saveTextHash 从未定义哈希对象；生产裁定 = CRC32-of-bytes
+        是文本哈希的严格加强而非等价替换（按绑定目的「PC 往返检测配对漂移」）；威胁模型 =
+        意外漂移，非对抗性伪造。global 侧第三位 = global.sav 容器字节 CRC32（构法照抄槽档）。
+      ruling_source: core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt:390-413
+      global_source: 'core-vm/src/main/kotlin/com/eratw/port/core/save/GlobalSidecarSaveWiring.kt:39-48；FileSystemOps.kt:891/:974'
+      naming_source: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:57-64
+  check_order:
+    rule: '绑定校验先于任何写入：三元组全等（matchesBinding）才允许应用侧车；不符返回 BindingMismatch（宿主上三语警告），不是异常'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:120
+    order_source: 'core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:132-135（槽档）、:180-183（global）'
+    outcome_type: core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:62-69
+
+# ---------------------------------------------------------------------------
+# 四、容量闸（encode 前置 require；decode 同值越界拒载）
+# ---------------------------------------------------------------------------
+capacity:
+  source: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:124-144（写）、:245-258（读）
+  limits:
+    - { field: entity_graph_payload,    max: '64 MiB',  const: MAX_GRAPH_BYTES,          line: 202 }
+    - { field: registry_snapshot,       max: '8 MiB',   const: MAX_REGISTRY_BYTES,       line: 205 }
+    - { field: virtual_no_snapshot,     max: '16 MiB',  const: MAX_VIRTUAL_NO_BYTES,     line: 208 }
+    - { field: decision_state_segment,  max: '16 MiB',  const: MAX_DECISION_STATE_BYTES, line: 211 }
+    - { field: job_state_segment,       max: '16 MiB',  const: MAX_JOB_STATE_BYTES,      line: 214 }
+    - { field: chunk_count,             max: 4096,      const: MAX_CHUNKS,               line: 217 }
+    - { field: '每片载荷 payload',       max: '32 MiB',  const: MAX_CHUNK_BYTES,          line: 220 }
+  note: '决策/任务态段在 codec 内另有各自条目数闸（2 的 20 次幂条），不在容器层（SidecarSaveBundle.kt:210/:213 KDoc）'
+
+# ---------------------------------------------------------------------------
+# 五、解码纪律（fail-closed；任何一条不过 = SidecarFormatException）
+# ---------------------------------------------------------------------------
+decode_discipline:
+  exception: '容器损坏 / 版本不符 / 容量越界 / CRC 失败抛 SidecarFormatException（文案由宿主侧包三语存档错误）'
+  exception_source: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:55
+  position_note: >-
+    容器级损坏前置拦截，不进「先复位后解析」的官方 .sav 变量层语义路径（那条是 specs/save-format.md
+    §5.3 与 ADR-005 的辖区）。
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:225-229
+  rules:
+    - { id: D1, rule: '总长度 < 46 拒',                       source: 'SidecarSaveBundle.kt:232' }
+    - { id: D2, rule: 'CRC32 先于任何字段解析（对除尾 4 字节外全部字节）', source: 'SidecarSaveBundle.kt:233-237' }
+    - { id: D3, rule: 'magic 不符拒',                          source: 'SidecarSaveBundle.kt:240' }
+    - { id: D4, rule: 'version != 2 拒（v1 旧容器直接拒载，不做双版本读取面）', source: 'SidecarSaveBundle.kt:241-242；KDoc :31-33' }
+    - { id: D5, rule: '各 blob 段：长度 <0 / 超容量闸 / 超剩余字节 = 拒', source: 'SidecarSaveBundle.kt:245-252' }
+    - { id: D6, rule: '分片数 <0 或 >4096 拒；片名长 <=0 或超剩余拒；空片名拒', source: 'SidecarSaveBundle.kt:257-266' }
+    - { id: D7, rule: '分片读完后有剩余字节才读尾段；剩余不足两段（readBlob 抛）或读完后仍有剩余 = 拒', source: 'SidecarSaveBundle.kt:269-277' }
+    - { id: D8, rule: '旧档（增补前写入）无尾段 = 两段取空缺省回落，不拒载：决策态回落「未初始化 seed（宿主熵派生）+ 无动态实例」、任务态回落「无实例」', source: 'SidecarSaveBundle.kt:35-44、:87-91' }
+
+# ---------------------------------------------------------------------------
+# 六、分片载荷分层（容器层不解释；真实分层自外向内）
+# ---------------------------------------------------------------------------
+chunk_payload:
+  layering: 'PackageChunk.payload 按包可能为「裸 MST1」或「R2PK 包装（MST1 + CSV 值段）」两层'
+  r2pk:
+    magic: 'i32 0x5232504B（ASCII "R2PK"）'
+    version: 'u16 = 1'
+    fields: 'i32 长度 + MST1 存储字节 → i32 长度 + CSV 值段'
+    empty_rule: 'CSV 值段为空时不包装，载荷 = 裸 MST1 字节（旧档、纯 Base 档、未装注入位计划的会话零字节变化）；decode 见前四字节不是 "R2PK" 就当旧裸 MST1（csv 空）'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/ModCsvValueCodec.kt:21-51、:83-85
+  mst1:
+    summary: 'Mod 存储分段容器（一包一段的编码产物；写侧排序保证确定性）'
+    magic: 'i32 0x4D535431（ASCII "MST1"）'
+    version: 'u16 = 2（写出恒 v2；v1 只读：段缺 dataVersion 补 0）'
+    body: >-
+      i32 段数；每段 = u16 名长 + UTF-8 packageId + i32 条目数 + 逐条目（u16 键长 + UTF-8 键 +
+      u8 值类型：0=ABSENT 墓碑 / 1=i64 / 2=u16 长度+UTF-8 串）+ v2 段尾 i32 dataVersion（非负）
+    order_rule: 'packageId 与键按 UTF-8 字节序严格升序；乱序 / 重复 = 拒（拒绝非规范输入使孤儿段再编码逐字节不变）'
+    trailing_rule: '段表后剩余字节 = 拒'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/mod/ModStorageSection.kt:52-167（序律 :191-196）
+  csv_values:
+    rule: 'Mod CSV 注入值只进激活包自己的分片；孤儿片载荷绝不被本会话值污染（原样透传）'
+    source: 'app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:2016-2023；并集面 ModCsvValueCodec.kt:63-76'
+    spec_crossref: '持久化键 (PackageId, TableId, CanonicalKeyword, CharIdentity, Value) 与「Base 位进 .sav、Mod 位进 .rt2」语义 = era-arch-v61u.md §8:246-252'
+
+# ---------------------------------------------------------------------------
+# 七、分片分组 / 孤儿 / 生命周期（抓取与恢复的真实语义）
+# ---------------------------------------------------------------------------
+lifecycle:
+  chunk_groups:
+    form: '抓取分两组：activeChunks（本次激活包重抓）+ orphanChunks（未激活包透传）；同 packageId 不得既在激活组又在孤儿组，组内也不得重复——违者当场抛'
+    source: 'core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:215-231（合并序 = active 先 orphan 后 :230）；类型隔离 core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveWiring.kt:18-21'
+  orphan_passthrough:
+    rule: '未激活 Mod 的分片解码后原样保留、存盘时原样回写——容器层不解释分片内容，激活与否由宿主判定'
+    source: 'core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:46-47；SaveService.kt:33-37'
+  disable_not_delete:
+    rule: '禁用（deactivate）只把包移出激活集，数据整段留下；读档时不在已知包集合里的段整段保留为非激活段，再编码逐字节不变（codec 孤儿口径）'
+    source: 'core-vm/src/main/kotlin/com/eratw/port/core/mod/ModStorageStore.kt:16-19、:71-74、:187-195'
+  release:
+    rule: '显式卸载（release）= 整包遗忘：段 + dataVersion 记录 + 激活标记一起摘；抓取侧对已释放包整段跳过（段与字节减在下次存档，历史档不改写）'
+    source: 'core-vm/src/main/kotlin/com/eratw/port/core/mod/ModStorageStore.kt:272-278；app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:1991-2027'
+  restore_order:
+    rule: '恢复读序：虚拟 NO 注册表 → 包注册表 → 实体图（虚拟 NO 是 .sav 角色块里被 vanilla 变量存下的每槽身份，不先恢复会被当悬空下标）；注册表并集独立成立，不与实体灌入同事务'
+    source: 'core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:22-27、:139-145'
+  restore_rebuild:
+    rule: '宿主侧重建容器：解码各片 → R2PK 拆包 → MST1 decode(bytes, 已知包=本会话激活集) → 合并重编 → ModStorageStore.load → adoptStorage'
+    source: app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:2061-2075
+
+# ---------------------------------------------------------------------------
+# 八、槽档 vs global 侧车的形态差（同一容器 ABI，两个抓取/恢复入口）
+# ---------------------------------------------------------------------------
+slot_vs_global:
+  slot:
+    capture: 'captureBundle：注册表快照 + 实体图 + 虚拟 NO 段 + 分片（SaveService.kt:89-99）'
+    restore: 'restoreBundle：绑定校验 → 虚拟 NO → 注册表 → 实体图（SaveService.kt:132-146）'
+  global:
+    capture: 'captureGlobalBundle：实体图恒空、虚拟 NO 恒空，只带注册表快照与 Mod GLOBAL 分片；写触发 = SAVEGLOBAL（SaveService.kt:102-116）'
+    restore: >-
+      restoreGlobalBundle：只验绑定与 global 形状闸（实体图非空 = 槽档误喂，拒；虚拟 NO 非空 = 槽档误喂，拒），
+      然后分片原样交还宿主——不并注册表、不灌内核（SaveService.kt:180-191）
+    zero_payload_identity: '空内核经 EntityPayloadCodec.encode 也写版本头与名表（≥8 字节），故「零长实体载荷」唯一地标识 global 形（SaveService.kt:121-125）'
+  state_segments:
+    rule: '决策/任务态尾段在槽档与 global 两侧同口径同结构（不为任一侧另开段格式）；宿主缝未装配 = 两段都不写（旧档同形）'
+    source: app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:2031-2059、:2118-2148
+  production_note: >-
+    SaveService.captureBundle 自身不带尾段（stateSegments 缺省 EMPTY）；生产槽档字节经
+    ModSidecarStoragePort.captureRt2Bytes 重组容器再 encode，把 stateSegmentsForSave() 的
+    缝快照接上（缝缺席 = 旧档同形）。
+    source: app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:2031-2048
+
+# ---------------------------------------------------------------------------
+# 九、PC 互通口径（诚实面；玩家三语文案归 D3 波，本节只落规约）
+# ---------------------------------------------------------------------------
+compat_and_authority:
+  sav_purity:
+    rule: '.sav 文件结构保持 PC Emuera 兼容；实体数据严禁寄生 .sav 的 emData/MapValue'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:49-51
+  honest_wording:
+    rule: >-
+      .sav 本体可被 PC Emuera 读写；随行的 .rt2 扩展数据 PC 不识别——完整扩展存档不保证 PC
+      可继续游戏。PC 玩过同一槽再传回安卓 = 检测 .rt2 绑定失配/缺失 → 上警告（扩展状态可能
+      滞后或丢失），不是静默应用；不存在「100% 互通」。
+    anchors: >-
+      core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:49-51；
+      core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:28-30；
+      core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt:514-552；
+      era-arch-v61u.md:223-231（兼容性矩阵）
+  authority:
+    rule: '本文件落定（2026-11-19）后，.rt2 容器字节布局/段序/容量/拒载纪律的权威 = 本文件；era-arch-v61u.md §8:256 的 ABI-6 v1 段清单保留作历史叙述（缺 v2 虚拟 NO 段与决策/任务态尾段）'
+  inner_codecs_todo:
+    - >-
+      TODO(verify)：PackageShortIdRegistry.encode（PackageShortIdRegistry.kt:100）与
+      VirtualCharaNoRegistry.encode（VirtualCharaNoRegistry.kt:127）、EntityPayloadCodec 的
+      内层字节格式未在本文件逐字段冻结（容器层不解释）；需要时另立扩段，卡点 = 本波只冻结
+      容器 ABI 面，内层 codec 规约无既有 specs 落点。
+
+# ---------------------------------------------------------------------------
+# 十、未定项（如实登记，不假装已定）
+# ---------------------------------------------------------------------------
+todo_verify:
+  - id: T1
+    item: '全局注册表 bin（rt2_pkg_registry.bin）的装载读点'
+    detail: >-
+      写侧已锚（ModRuntimeAssembly.kt:1938-1941 shutdown 原子写）；会话装配期 bindRegistry
+      的读点在 ModRuntimeAssembly.kt:559/:2543 附近，逐行核对归 RT2 注册表装载波次，本文件
+      只登记双落点事实（PackageShortIdRegistry.kt:18）。
+  - id: T2
+    item: 'useSaveFolder 目录化存档下的伴生路径'
+    detail: >-
+      sidecarPathOf 对本体路径原样拼接，useSaveFolder=true 时本体在 sav/ 子目录
+      （SaveConfig.kt:49-55），侧车随之同目录；=false 时平铺于游戏根。未做实机双形态取样，
+      卡点 = 需要两种配置各存一次档核对文件落点。
+  - id: T3
+    item: '决策/任务态段内层格式'
+    detail: >-
+      两 codec 的内层 VERSION=2 头与条目闸锚已给（DecisionStateCodec.kt:22、
+      JobSchedulerStateCodec.kt:17-21/:50），条目级字段表未冻结进 specs；归决策/任务态
+      所属 lane 的规约波，卡点 = 本波容器层不解释载荷。

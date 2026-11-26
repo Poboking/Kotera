@@ -479,6 +479,31 @@ class MapDataAuditTest {
         assertEquals(-3L, auditInt(c, "DT_CELL_SET", aS("T"), aI(0), aS("NOPE"), aS("x")))
     }
 
+    @Test
+    fun `DT_CELL_SET 写 DBNull 到不可空列当场中止且原值不动（复刻 NoNullAllowed）`() {
+        val c = auditCtx()
+        auditInt(c, "DT_CREATE", aS("T"))
+        // 空表上加不可空列不抛（探针 B4）；DefaultValue 让行能过 Rows.Add 边界（探针 D3）。
+        // DefaultValue 用语句层 DT_COLUMN_OPTIONS 的落地入口 dtColumnOptionsDefault 注入
+        // （MapDataTableMethods.kt:954，StatementExecutor DT_COLUMN_OPTIONS 分支调它）。
+        auditInt(c, "DT_COLUMN_ADD", aS("T"), aS("n"), aI(4), aI(0))
+        dtColumnOptionsDefault(c.store, "T", "n", aI(7))
+        val id = auditInt(c, "DT_ROW_ADD", aS("T"))
+        assertEquals(7L, auditInt(c, "DT_CELL_GET", aS("T"), aI(id), aS("n"), aI(1)))
+        // RECON-STAB-A A2 的第 6 抛点（6 处裸异常映射里此前唯一没钉桩的一个）：3 参形态 =
+        // 显式写 DBNull（:2596-2599），不可空列在写入点当场抛 NoNullAllowedException
+        // （FunctionMethodCreator.cs:2598；dotnet 8 探针 D2）。链路无 try（FunctionMethodTerm.cs:20-23，
+        // ERB 无通用 try 块，verify-notes §13.3 已核）⇒ 分歧 C 的裸 CLR→裸 JVM 映射抛
+        // IllegalStateException，**不是 CodeEE**：原版裸异常穿到 DoScript 顶层宽捕获
+        // （Process.cs:462-477）→ handleException 意外分支（Process.cs:651-660；skia
+        // Process.cs:693-701）红字上屏、会话保留；移植侧同构收口在壳层
+        // （GameHost runtimeFaultAction → RUNTIME_FAULT，stab-c A1 批 bb21e0f1a）。
+        assertFailsWith<IllegalStateException> { auditInt(c, "DT_CELL_SET", aS("T"), aI(0), aS("n")) }
+        // 探针 D2b：异常后原值不动（默认值 7 仍在，没被写成 DBNull）。
+        assertEquals(7L, auditInt(c, "DT_CELL_GET", aS("T"), aI(id), aS("n"), aI(1)))
+        assertEquals(0L, auditInt(c, "DT_CELL_ISNULL", aS("T"), aI(id), aS("n"), aI(1)))
+    }
+
     // ==================================================================
     // 分歧 A：DT_SELECT 的有 dest 形态（本路补钉，草稿没盖）
     // ==================================================================

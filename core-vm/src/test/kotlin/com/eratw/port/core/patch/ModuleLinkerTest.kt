@@ -6,6 +6,12 @@ import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.ResolverPolicy
 import com.eratw.port.core.code.SlotAddr
 import com.eratw.port.core.code.OverrideSignatureException
+import com.eratw.port.core.code.VirtualMachine
+import com.eratw.port.core.code.VmHost
+import com.eratw.port.core.err.CodeEE
+import com.eratw.port.core.expr.EvalContext
+import com.eratw.port.core.expr.Value
+import com.eratw.port.core.expr.VariableReader
 import com.eratw.port.core.proc.FuncMeta
 import java.util.Locale
 import kotlin.test.Test
@@ -221,8 +227,9 @@ class ModuleLinkerTest {
     }
 
     @Test
-    fun `覆盖base被签名闸拒绝`() {
-        // base 候选签名恒空（完整签名导出落地前）→ MODERN 覆盖 base 一律拒，fail-closed。
+    fun `KI-2 覆盖base缺指纹改告警放行_不再拒装`() {
+        // base 候选签名恒空（完整签名导出落地前）→ 2026-11-23 KI 改判后覆盖 base 告警
+        // 放行（原 fail-closed 拒装反转），last-wins 照常胜出。
         val b = CodeBuilder()
         b.declareFunction("BASEFN", b.here(), arity = 0, slotCount = 1)
         b.emit(Opcode._RET, SlotAddr.NONE, 0, 0, 0)
@@ -233,10 +240,22 @@ class ModuleLinkerTest {
             functions = listOf(FuncMeta(index = 0, key = "BASEFN")),
             signatures = mapOf("BASEFN" to "sig-anything"),
         )
-        val ex = assertFailsWith<OverrideSignatureException> {
-            linkAll(covarier)
-        }
-        assertTrue("BASEFN" in ex.message!!, ex.message)
+        val diags = mutableListOf<String>()
+        val linked = ModuleLinker.link(
+            LinkInputs(
+                compileBase(), baseMetas, listOf(covarier),
+                ResolverPolicy.MODERN, diagnostics = { diags += it },
+            ),
+        )
+        assertTrue(
+            diags.any { it.contains("BASEFN") && it.contains("ABI 未校验") },
+            "缺指纹覆盖告警点名函数: $diags",
+        )
+        assertEquals(
+            linked.catalog.winnerIndexOf("BASEFN"),
+            linked.catalog.winnerIndexOf("BASEFN"),
+            "链接照常产出胜者（放行证明）",
+        )
     }
 
     @Test
@@ -246,5 +265,123 @@ class ModuleLinkerTest {
             ModuleLinker.link(LinkInputs(compileBase(), shortMetas, listOf(moduleC()), ResolverPolicy.MODERN))
         }
         assertTrue("不同长" in ex.message!!, ex.message)
+    }
+
+    // ------------------------------------------------------------------
+    // S9 改判：未解析导入 → 缺名残桩（CONTRACT-S9-MISSING-CALL.md L2/L3/L4）
+    // ------------------------------------------------------------------
+
+    /** 死调用模块：DEAD 体内 `_CALL` 外部哨兵指向 GHOST（组合里没有提供者）。 */
+    private fun moduleGhost(tryBit: Boolean = false): LinkableModule {
+        val b = CodeBuilder()
+        b.declareFunction("DEAD", b.here(), arity = 0, slotCount = 1)
+        // b = argc | bit31(try)：S9 C1 的编译期 TRY 家族位（链接期判折 NOP / 残桩）。
+        b.emit(Opcode._CALL, CallSentinels.external(0), if (tryBit) Int.MIN_VALUE else 0, SlotAddr.NONE, 0)
+        b.emit(Opcode._RET, SlotAddr.NONE, 0, 0, 1)
+        val prog = b.build(0)
+        return TestModule(
+            descriptor = ModuleDescriptor(packageId = "mod.ghost", externalCalls = listOf("GHOST")),
+            program = prog,
+            functions = listOf(FuncMeta(index = 0, key = "DEAD")),
+        )
+    }
+
+    @Test
+    fun `S9改判_可解析组合零合成_函数表与告警面不变`() {
+        val diags = mutableListOf<String>()
+        val linked = ModuleLinker.link(
+            LinkInputs(
+                compileBase(), baseMetas, listOf(moduleA()),
+                ResolverPolicy.MODERN, diagnostics = { diags += it },
+            ),
+        )
+        val p = linked.program
+        // 可解析导入（AEXT → BASEFN）不触发残桩合成：函数表 = base 2 + 模块 5 = 7，
+        // 无表尾追加（契约判据 2：既有组合产物字节不变）。
+        assertEquals(7, p.functions.size)
+        // 导入支决议照旧：AEXT 的 _CALL（绝对 pc 7）直指 BASEFN 物理下标 1。
+        assertEquals(Opcode._CALL, p.op(7))
+        assertEquals(1, p.a(7))
+        // 告警面零输出（无 unresolved）。
+        assertTrue(diags.none { it.contains("无法解析") }, diags.toString())
+    }
+
+    @Test
+    fun `S9改判_缺名导入链接为残桩不丢链`() {
+        val diags = mutableListOf<String>()
+        val linked = ModuleLinker.link(
+            LinkInputs(
+                compileBase(), baseMetas, listOf(moduleGhost()),
+                ResolverPolicy.MODERN, diagnostics = { diags += it },
+            ),
+        )
+        val p = linked.program
+        // 函数表：base 2 + 模块 1 + 残桩 1 = 4；残桩在表尾、name = 导入原文名（栈可读）。
+        assertEquals(4, p.functions.size)
+        assertEquals("GHOST", p.functions[3].name)
+        // entryPc 是 pc 域：base 2 指令 + 模块 2 指令之后 = 绝对 pc 4（函数下标域的 3 是另一回事）。
+        assertEquals(4, p.functions[3].entryPc)
+        // 死 _CALL（模块内 pc 0 → 绝对 pc 2）改写为残桩**函数下标** 3。
+        assertEquals(Opcode._CALL, p.op(2))
+        assertEquals(3, p.a(2))
+        // 残桩体三指令（pc [4,7)）：_EVAL_STR(StrLiteral("GHOST")) → R0；_CALL_BY_NAME R0；_RET。
+        assertEquals(Opcode._EVAL_STR, p.op(4))
+        val nameExpr = p.expr(p.a(4)) as com.eratw.port.core.expr.StrLiteral
+        assertEquals("GHOST", nameExpr.value)
+        assertEquals(Opcode._CALL_BY_NAME, p.op(5))
+        assertEquals(Opcode._RET, p.op(6))
+        // 残桩进 catalog（合成键·MISSING·GHOST）且 dispatch 覆盖整表（恒等项）。
+        assertEquals(4, linked.catalog.dispatch.size)
+        assertEquals(3, linked.catalog.winnerIndexOf("·MISSING·GHOST"))
+        // 告警点名缺失名（汇导入告警面）。
+        assertTrue(diags.any { it.contains("GHOST") && it.contains("无法解析") }, diags.toString())
+    }
+
+    @Test
+    fun `S9改判_TRY家族死链接为折NOP`() {
+        val linked = ModuleLinker.link(
+            LinkInputs(compileBase(), baseMetas, listOf(moduleGhost(tryBit = true)), ResolverPolicy.MODERN),
+        )
+        val p = linked.program
+        // 死 _CALL（绝对 pc 2，b bit31 = TRY）→ 整条折 NOP（a/b/c 全 0），
+        // 同 TRY 族缺目标跳过语义（spec: FunctionIdentifier.cs:3577-3588）。
+        assertEquals(Opcode._NOP, p.op(2))
+        assertEquals(0, p.a(2))
+        assertEquals(0, p.b(2))
+        assertEquals(0, p.c(2))
+        // 残桩仍合成（其余调用点可共享），但本死链不再指向它。
+        assertEquals(4, p.functions.size)
+    }
+
+    @Test
+    fun `S9改判_死调用运行期才报错_原版原文`() {
+        val linked = ModuleLinker.link(
+            LinkInputs(compileBase(), baseMetas, listOf(moduleGhost()), ResolverPolicy.MODERN),
+        )
+        var resolvedName: String? = null
+        val host = object : VmHost {
+            override fun print(text: String) = Unit
+
+            // 残桩的 _EVAL_STR 需要求值语境（StrLiteral 求值不触 variables）。
+            override val evalContext: EvalContext = object : EvalContext {
+                override lateinit var variables: VariableReader
+
+                override fun callFunction(name: String, args: List<Value?>): Value =
+                    error("残桩 E2E 不应有表达式函数调用：$name")
+            }
+
+            // 记录到达名以证明残桩把名字送进了运行期解析器；返回 null = 未命中
+            //（非 try → NotDefinedFunc，spec: FunctionIdentifier.cs:3581）。
+            override fun resolveFunctionIndex(name: String): Int? {
+                resolvedName = name
+                return null
+            }
+        }
+        val vm = VirtualMachine(linked.program, host, functionDispatch = linked.catalog.dispatch)
+        // 直接从 DEAD（绝对下标 2）跑：base 入口不含死调用。
+        val e = assertFailsWith<CodeEE> { vm.run(2) }
+        assertEquals("GHOST", resolvedName)
+        assertTrue(e.message!!.contains("没有找到指定的函数"), e.message!!)
+        assertTrue(e.message!!.contains("GHOST"), e.message!!)
     }
 }

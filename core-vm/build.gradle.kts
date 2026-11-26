@@ -1,4 +1,6 @@
+import com.eratw.port.buildlogic.CorpusPatchPlan
 import com.eratw.port.buildlogic.corpus
+import com.eratw.port.buildlogic.planCorpusPatches
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
@@ -29,6 +31,14 @@ dependencies {
     // A6 e2e 装置专用：符号表扫描（装载序/dimSpecs）+ 桥接映射器 com.erbcc.bridge.buildFuncDims。
     // 方向安全：erbcc(main) → core-vm(main)；core-vm(test) → erbcc(main) 无环（测试源集独立）。
     testImplementation(project(":tools:erbcc"))
+    // 台架对拍（Lane T，ModTestingParityTest）：把 mod-testing 的 TestWorld / 三面 recorder 直接编进
+    // 测试源集，用「真台架 vs 真引擎」代替「镜像转写 + 源码文本哨兵」。
+    // 方向：2026-11-17 起 mod-testing(main) 多了一条 `implementation(:core-vm)`（资源面复用真
+    // ModResourceStore，见该模块 build 脚本注释），故这里是「core-vm(test) → mod-testing(main) →
+    // core-vm(main)」的跨源集往返；main 源集之间仍单向（core-vm(main) 不依赖 mod-testing），
+    // Gradle 任务图无环：core-vm:compileKotlin → mod-testing:compileKotlin → core-vm:compileTestKotlin。
+    // 测试源集独立，不进主产物。
+    testImplementation(project(":mod-testing"))
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +137,90 @@ fun Test.wireRealArtifacts() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 语料冒烟闸的语料口径 = 出包的那批字节（CB-* staging），不是真语料原文（2026-11-16 修）
+//
+// 病灶：`:core-vm:corpusSmoke` 与 `:core-vm:test`（带 ERATW_CORPUS 的全量语料回归）直编
+// **真语料原文**，而生产链 `:tools:erbcc:compileCorpus` 先按 `devtools/corpus-patches` 把语料根
+// staging 成硬链接副本、套 CB-* 补丁后才编（CorpusPatches.kt 的 sha 三档判定）。于是冒烟闸在
+// 当前复刻目标（261111）上必红，且红得没有判定力：唯一残值 `CASE [[油炸跳蛋]]` 4 行
+// （`蕾米莉亚色情特化v1.3/M_KOJO_K16_5_日常系指令.ERB:6312/6366/6420/6474`）正是 CB-005 补的
+// rename 键 —— 它被归成「原版也会拒」，可**玩家包里的这 4 行是可解析的**（补丁在 staging 期已补键）。
+// 反过来，补丁若把语料改坏（套用后引入解析失败、新版式让套用器失手），这套闸也看不见 —— 它压根
+// 没编过补丁后的字节。
+//
+// 修法（不改任何闸判据、不改语料、不加白名单）：把「闸吃哪个根」对齐生产链 —— 与 erbcc 同源调用
+// buildSrc 的 [planCorpusPatches]（同 index、同 sha 三档、同 staging 语义）。
+// 判「套用」⇒ 闸吃 staging 副本（ERB 是补丁后字节，兄弟件 CSV/emuera.config 一并成套，故
+// `CorpusValidator.loadRenameDic` 读到的是修后 `CSV/_Rename.csv`）；判「跳过」⇒ 原样直编真语料
+// （4.980 canonical 根命中 skip-sha256，行为与改前逐字一致）；未知漂移 ⇒ planCorpusPatches 判红，
+// 冒烟闸跟着红（不再静默放过）。
+//
+// **staging 只进 `corpusCompileGate` 与 `corpusSmoke`，不许扩到 `:core-vm:test` 全域**：金标准
+// 对拍（`E2EGoldenTest` / `L3HashChainTest` / `PerfGoldenInternedEquivalenceTest` / `Xml*` 系列）
+// 的 oracle 是 PC Emuera 在**真语料原文**上跑出来的，喂补丁字节会让 20+ 条对拍全差 —— 2026-11-16
+// 实测全域 staging 后 8237 tests / 28 failed，红的清一色是这类基准对拍。所以闸的字节口径只由
+// 专闸负责，通用 test 任务保持原文口径。
+//
+// staging 放本模块 `build/corpus-staging`（与 erbcc 的 `tools/erbcc/build/corpus-staging` 各管各的，
+// 不跨模块读他人 build 目录，并行构建安全）；硬链接同卷零拷贝，跨卷自动回落流式拷贝。
+// ---------------------------------------------------------------------------
+
+/** 语料内容补丁资产目录（与 `:tools:erbcc:compileCorpus` 同一个单源，specs/corpus-bugs.md §3）。 */
+val corpusPatchesDir: File = rootProject.projectDir.resolve("devtools/corpus-patches")
+
+/**
+ * 把 [corpusRoot] 解析成「闸该编的那份语料」：有补丁要套 ⇒ staging 副本；否则原样。
+ *
+ * 判定与套用完全复用 buildSrc 的 [planCorpusPatches]（生产链同一个函数、同一份 index），
+ * 闸与水线的补丁口径不会各自漂移。**执行期调用**（doFirst）：它会清并重建 staging 目录。
+ */
+fun stagedCorpusForSmoke(corpusRoot: File, stagingParent: File): File {
+    if (!corpusPatchesDir.resolve("index.yaml").isFile) return corpusRoot
+    return when (
+        val plan = planCorpusPatches(
+            corpusRoot = corpusRoot,
+            patchesDir = corpusPatchesDir,
+            stagingRoot = stagingParent,
+            logger = logger,
+        )
+    ) {
+        is CorpusPatchPlan.None -> {
+            plan.reasons.forEach { logger.lifecycle("[corpus-patches] $it") }
+            corpusRoot
+        }
+        is CorpusPatchPlan.Staged -> {
+            logger.lifecycle(
+                "[corpus-patches] 冒烟闸改吃 staging 副本（已套 ${plan.applied.joinToString { it.id }}）：" +
+                    plan.corpusRoot.absolutePath,
+            )
+            plan.corpusRoot
+        }
+    }
+}
+
+/**
+ * 把任务级 environ 切到「出包字节」：按 [stagedCorpusForSmoke] 判「套补丁 ⇒ 换 staging 根」。
+ *
+ * 入参是**任务级** environment（= configureEach 的 ERATW_* 透传 + 该任务自己的覆盖），不回读外部
+ * env —— `gate981Corpus` 一类任务在注册时已把两根覆盖成 4.981 根，回读外部会把口径盖掉。
+ * 只在「原 GAMEDIR = 语料根的父目录」时同步 GAMEDIR（成对设置），指向别处的组合保持原样。
+ *
+ * @return 需要覆盖的键值（空 = 不需要动：没设语料根，或该根命中补丁表的「跳过」档）。
+ */
+fun shippingCorpusOverride(env: Map<String, Any?>, stagingParent: File): Map<String, String> {
+    val raw = (env["ERATW_CORPUS"] as? String)?.trim().orEmpty()
+    if (raw.isEmpty()) return emptyMap()
+    val rawRoot = File(raw).absoluteFile
+    val staged = stagedCorpusForSmoke(rawRoot, stagingParent)
+    if (staged == rawRoot) return emptyMap()
+    val out = mutableMapOf("ERATW_CORPUS" to staged.absolutePath)
+    if ((env["ERATW_GAMEDIR"] as? String)?.let { File(it).absoluteFile } == rawRoot.parentFile) {
+        out["ERATW_GAMEDIR"] = staged.parentFile.absolutePath
+    }
+    return out
+}
+
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     // 全量语料（2.6M 行）的语句 AST + 编译产物需要更大堆；默认 512m 会 OOM 掉 worker，
@@ -150,6 +244,8 @@ tasks.withType<Test>().configureEach {
     // **不生成也不计 skipped**，看着仍是全绿（2026-11-12 实测丢过一轮）。
     // 这里把 ERATW_* 整体登记为输入：内容变了必须重跑，内容没变仍允许 UP-TO-DATE。
     inputs.property("eratwEnv", eratwEnv.entries.joinToString("\n") { "${it.key}=${it.value}" })
+    // 语料口径**不在这里切 staging**：金标准对拍要真语料原文（见上方 staging 段的注释）。
+    // 出包字节口径由专闸 `corpusCompileGate` / 直跑入口 `corpusSmoke` 负责。
     // 跨环境取证旋钮：ERATW_TEST_TZ=America/New_York 一类 → test JVM 的 user.timezone。
     // 用于验证 L3 链常量对系统时区的免疫性（修复前用它抓时区泄漏簇，修复后用它验收）。
     System.getenv("ERATW_TEST_TZ")?.let { systemProperty("user.timezone", it) }
@@ -167,6 +263,22 @@ tasks.withType<Test>().configureEach {
     // §5 标准闸从此真的跑「外部真实存档只读解析与逐字节回环」与「真档改一个变量再写形状保持」
     // （改前这两条只在 -PwithRealArtifacts 档里才被接线，标准闸每次都是 skip = 假绿）。
     wireRealSaveSamples()
+}
+
+/**
+ * 通用 `:core-vm:test` 不收 `@Tag("corpus-gate")` —— 语料**字节口径**用例的法定入口是
+ * `:core-vm:corpusCompileGate`（Test，6g）与 `:core-vm:corpusSmoke`（JavaExec），两者都先按
+ * `devtools/corpus-patches` staging 再注入 `ERATW_CORPUS`/`ERATW_GAMEDIR`，判的是**玩家包里的字节**。
+ *
+ * 划出通用闸不是「这条会红所以藏起来」，是**口径不同**：`CorpusCompileSmokeTest` 断言补丁后
+ * 0 解析失败 / 0 失败切片；通用闸必须喂真语料原文（金标准对拍的 oracle 就是原文），而原文上
+ * CB-005 的 4 行 `CASE [[油炸跳蛋]]` rename 键必然解析失败（原版 `LexicalAnalyzer.cs:808-826` 同拒）
+ * ⇒ 在通用闸里它永远红 1 条，且判的是玩家永远拿不到的字节。`excludeTags` 是单一 PostDiscoveryFilter，
+ * 与既有名字过滤是「且」关系，不会影响本仓其他圈定（`gate981Corpus` / `gateRealArtifacts`
+ * 的名单里本来就没有它）。家族形状照 `@Tag("realArtifacts")`：Tag 先当口径标记，圈定仍在任务侧。
+ */
+tasks.named<Test>("test") {
+    useJUnitPlatform { excludeTags("corpus-gate") }
 }
 
 /**
@@ -479,6 +591,55 @@ tasks.register<JavaExec>("corpusSmoke") {
     // 环境），与 :core-vm:test / bootSmoke / perfBaseline 同写法。缺 env 现在由 CorpusSmokeMain
     // 直接 exit 2，不再「打印一句 return 0」。
     System.getenv().filterKeys { it.startsWith("ERATW_") }.forEach { (k, v) -> environment(k, v) }
+    // 语料口径对齐生产链（见上方 staging 段的注释）：有 CB-* 要套就编 staging 副本，与出包链
+    // `:tools:erbcc:compileCorpus` 吃同一批字节。
+    inputs.dir(corpusPatchesDir).withPropertyName("corpusPatches").optional(true)
+    doFirst {
+        shippingCorpusOverride(environment, layout.buildDirectory.dir("corpus-staging").get().asFile)
+            .forEach { (k, v) -> environment(k, v) }
+    }
+}
+
+/**
+ * 全量语料编译冒烟闸（`CorpusCompileSmokeTest` 的**出包字节口径**入口）。
+ *
+ * 与 `:core-vm:test` 的关系：通用 test 任务跑的是**真语料原文**（金标准对拍的 oracle 就是原文，
+ * 换不得，见上方 staging 段注释），而本闸先把语料按 `devtools/corpus-patches` staging 成副本再编
+ * ⇒ 判的是**玩家包里的字节**。冒烟用例本身不变（同一份断言、同一份基线 0/0），只是吃哪个根由
+ * 任务决定。堆 6g 与 `corpusSmoke` 同挡（3g 在 `CodeBuilder.emit` 实测 OOM）。
+ *
+ * ```
+ * ./gradlew --configure-on-demand :core-vm:corpusCompileGate    # 语料根由 ERATW_CORPUS 给
+ * ```
+ */
+tasks.register<Test>("corpusCompileGate") {
+    group = "verification"
+    description = "全量语料编译冒烟闸（出包字节口径：先按 devtools/corpus-patches staging 再编）"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform()
+    filter {
+        includeTestsMatching("*CorpusCompileSmokeTest*")
+        // 语句层全量回归同属「玩家包字节」口径：原文上 CB-005 的 4 行 rename 键必然解析失败，
+        // 只有补丁后的字节才是 0 失败（见 `CorpusStmtTest` 类 KDoc）。
+        includeTestsMatching("*CorpusStmtTest*")
+    }
+    maxHeapSize = "6g"
+    outputs.upToDateWhen { false }
+    System.getenv().filterKeys { it.startsWith("ERATW_") }.forEach { (k, v) -> environment(k, v) }
+    inputs.property(
+        "eratwEnv",
+        System.getenv().filterKeys { it.startsWith("ERATW_") }.toSortedMap()
+            .entries.joinToString("\n") { "${it.key}=${it.value}" },
+    )
+    inputs.dir(corpusPatchesDir).withPropertyName("corpusPatches").optional(true)
+    doFirst {
+        require(!(environment["ERATW_CORPUS"] as? String).isNullOrBlank()) {
+            "corpusCompileGate 需要 ERATW_CORPUS 指到 <游戏根>/ERB（本闸不许静默空转）"
+        }
+        shippingCorpusOverride(environment, layout.buildDirectory.dir("corpus-staging").get().asFile)
+            .forEach { (k, v) -> environment(k, v) }
+    }
 }
 
 /**

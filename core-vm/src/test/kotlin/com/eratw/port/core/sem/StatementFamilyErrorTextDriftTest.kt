@@ -24,6 +24,11 @@ import kotlin.test.assertTrue
  *
  * 判「不改-两表不同文」「不改-无官方串」的枚（附三族）没有枚举可对照，退化为**形状钉**：
  * needle 原样在位 ⇒ 红绿任一变化都要重新走裁定，不许静默改文。
+ *
+ * 2026-11-17 起本闸同时钉 **arity 文案族**（函数实参个数四支 + 成对变参支，
+ * `specs/error-texts.yaml` 第十二节）：生产者在 `fn/Builtins.kt` 的 `checkArity` 与
+ * `fn/MapDataTableMethods.kt` 的成对兜底，装载期那两侧（`compile/ArgSignatureCheck`、
+ * erbcc `PairedArgLoadCheck`）的逐字钉在各自的测试里，同一枚键、同一个展开形。
  */
 class StatementFamilyErrorTextDriftTest {
 
@@ -88,6 +93,20 @@ class StatementFamilyErrorTextDriftTest {
         Wired(F_USERVAR, "LangKey.TransparentUnsupported.renderZhs()", LangKey.TransparentUnsupported, emptyArray()),
         // ---- vars/VarDef.kt：本波接线枚 ----
         Wired(F_VARDEF, "throw getSizeNonExistDim(name)", LangKey.GetSizeNonExistDim, arrayOf("G0")),
+        // ---- arity 文案族（2026-11-17 整族收编）：运行期四支由 BuiltinMethod.checkArity 抛、
+        //      成对支由 DT_ROW_ADD/SET 的运行期兜底抛（装载期同键的另一侧见
+        //      compile/ArgSignatureCheckTest 与 erbcc PairedArgLoadCheckTest 的逐字钉）----
+        Wired(F_BUILTINS, "CodeEE.keyed(LangKey.TooManyFuncArgs", LangKey.TooManyFuncArgs, arrayOf("GET_MONTH")),
+        Wired(F_BUILTINS, "CodeEE.keyed(LangKey.NotEnoughArgs", LangKey.NotEnoughArgs, arrayOf("MIN", 1)),
+        Wired(
+            F_BUILTINS, "CodeEE.keyed(LangKey.ArgsCountNotMatches", LangKey.ArgsCountNotMatches,
+            arrayOf("ABS", 1, 0),
+        ),
+        Wired(F_BUILTINS, "CodeEE.keyed(LangKey.ArgsNotNeeded", LangKey.ArgsNotNeeded, arrayOf("GETTIMES")),
+        Wired(
+            F_MAPDT, "CodeEE.keyed(LangKey.ArgsNotFitExpr, \"DT_ROW_ADD\"", LangKey.ArgsNotFitExpr,
+            arrayOf("DT_ROW_ADD", 2, 1, 2),
+        ),
     )
 
     private val registeredShapes: List<RegisteredShape> = listOf(
@@ -124,7 +143,8 @@ class StatementFamilyErrorTextDriftTest {
         RegisteredShape(F_VM, "函数下标越界(\$entryFunctionIndex)", "移植 IR 入口下标概念 ⇒ 无官方串（附三之四-1）"),
         RegisteredShape(F_VM, "函数下标越界(\$funcIndex)", "同上（_CALL 装载/执行两支）"),
         RegisteredShape(F_PROC, "函数下标越界(\$targetIndex)", "同上"),
-        RegisteredShape(F_SQL, "SQL 执行失败：\$fn：", "SQL_* 为 fork 专有：reference 全库 SQL_|sqlite 0 命中（附三之四-3）；f2bf08be8 对齐蛇版 SqlManager 无列下标自检（驱动异常透传），旧「列下标越界」钉随文案退场改钉语句失败统一形"),
+        RegisteredShape(F_SQL, "SQL 执行失败：\$fn：", "SQL_* 为 fork 专有：reference 全库 SQL_|sqlite 0 命中（附三之四-3）；" +
+            "f2bf08be8 对齐蛇版 SqlManager 无列下标自检（驱动异常透传），旧「列下标越界」钉随文案退场改钉语句失败统一形"),
         RegisteredShape(F_SEM, "ARRAYSHIFT函数: 第2个参数溢出（\$shift）", "官方同位无闸（原生 OverflowException）；判停已钉 verify-notes §13（附三之四-4）"),
         RegisteredShape(F_SEM, "未定义的变量 \$name", "运行期折码位，官方解析期定型（附三之四-5；本 needle 覆盖多处同形生产行）"),
         RegisteredShape(F_VAR, "函数 \$fn 的第 1 个参数必须是字符串", "GETVAR 族无官方串（附三之四-6；官方 GetVarMethod 直抛 IsNotVar/IsNotInt/IsNotStr）"),
@@ -223,6 +243,15 @@ class StatementFamilyErrorTextDriftTest {
         // 本波接线枚的屏上新形：
         assertEquals("不能将透明(Transparent)指定为颜色", LangKey.TransparentUnsupported.renderZhs())
         assertEquals("试图获取一个不存在该维度的数组变量\"G0\"的长度", LangKey.GetSizeNonExistDim.renderZhs("G0"))
+        // arity 文案族五枚（2026-11-17 整族收编）：屏上基串 = 官方 zhs 逐字，
+        // 函数名在冒号前（reference 形；语料根表把名字放在冒号后 ⇒ 本族不记 zhs_root_xml）。
+        assertEquals("GET_MONTH函数: 参数过多", LangKey.TooManyFuncArgs.renderZhs("GET_MONTH"))
+        assertEquals("MIN函数: 至少需要1个参数", LangKey.NotEnoughArgs.renderZhs("MIN", 1))
+        assertEquals("ABS函数: 需要1个参数，但传入了0个", LangKey.ArgsCountNotMatches.renderZhs("ABS", 1, 0))
+        assertEquals("GETTIMES函数: 不需要参数", LangKey.ArgsNotNeeded.renderZhs("GETTIMES"))
+        assertEquals("DT_ROW_ADD函数: 参数数量(2)不满足1+2n", LangKey.ArgsNotFitExpr.renderZhs("DT_ROW_ADD", 2, 1, 2))
+        // eng 档同族（两版 eng 表逐字同文，只差行号）
+        assertEquals("GET_MONTH: Too many arguments", LangKey.TooManyFuncArgs.renderEn("GET_MONTH"))
     }
 
     @Test
@@ -274,5 +303,7 @@ class StatementFamilyErrorTextDriftTest {
         const val F_PROC = "proc/ProcessRuntime.kt"
         const val F_SQL = "sql/SqlMethods.kt"
         const val F_HTML = "fn/HtmlStrict.kt"
+        const val F_BUILTINS = "fn/Builtins.kt"
+        const val F_MAPDT = "fn/MapDataTableMethods.kt"
     }
 }

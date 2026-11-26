@@ -6,63 +6,52 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * 指令链收尾那次按键等待（`Process.cs:2450-2453` 的 `setWait()`）在**生产宿主**上的适用范围。
+ * 指令链收尾那次按键等待（`Process.cs:2450-2453` 的 `setWait()`）在**生产宿主**上的口径。
  *
- * 背景：原版口径是「凡走 `SOURCE_CHECK` 的指令都等一次」（`Process.cs:2417`），移植侧照抄后
- * 手机上表现为「每条指令回菜单前都要多戳一下」。移动（训练码 400）每走一步就 `RETURN 1`
- * 回训练链（`魔改内容/qol/qol_MAP.ERB:59-66`），于是那一下落在每次移动之后 —— 地图还在屏上，
- * 玩家下一次点目的地被这次等待吃掉，观感是「点了没反应」（2026-11-02 玩家反馈）。
+ * 原版：凡走 `SOURCE_CHECK` 的指令都等一次（`Process.cs:2417` 无条件置位，`:2449-2455` 消费；
+ * `RESULT == 0` 走 `endCallComXX` 的另一支、不经 `SOURCE_CHECK`，故不等）。移植侧照抄后手机上
+ * 表现为「每条指令回菜单前多戳一下」—— 2026-11-02 曾把它收窄成「只清掃被拒」，2026-11-22
+ * 玩家反馈「口上根本看不见、还得往上翻阅」（那行提示被下个回合的整帧重绘刷掉），于是按原版
+ * 全量恢复，收窄降级成设置项「指令后等一次按键」的一档（缺省开 = 原版）。
  *
- * 现在的口径（[ConsoleBeginHost.commandEndWaitComCodes]）：
- * 只对**被语料拒掉**的清掃（`CSV/Train.csv:199` 的 410；`COMF410 掃除.ERB:18-26` 只打一行提示
- * 就 `RETURN -1`）等一次，其余一律不等 —— 既保住「提示行不被整帧刷掉」的原始动机
- * （BOARD 2026-11-01），又不给高频操作加点击。
+ * 本类钉的是宿主侧最终语义：总闸开着就**不看指令码、不看 `RESULT`** 一律等，关掉就一律不等。
+ * 状态机侧「判定输入在 `endCallComXX` 那一刻取」的口径见 `BeginFlowTest`。
  */
 class CommandEndWaitPolicyTest {
 
-    private fun host(codes: Set<Int>? = setOf(BeginFlow.COM_CLEANING)) = ConsoleBeginHost(
+    private fun host(wait: Boolean = true) = ConsoleBeginHost(
         input = QueueInputSink(),
         console = LineBufferConsoleSink(clientWidth = 40),
-        commandEndWaitComCodes = codes,
+        waitAfterCommand = wait,
     )
 
-    /** 清掃被拒（`RETURN -1`）：等一次 —— 那行「就算不扫除可以吧」要被钉在屏上。 */
+    /** 缺省 = 原版：成功、被拒、任何训练码都等一次。 */
     @Test
-    fun `清扫被拒时收尾等待`() {
-        assertTrue(host().shouldWaitAfterCommand(BeginFlow.COM_CLEANING, -1L))
-    }
-
-    /** 清掃成功（`RETURN 1`）：不等 —— 成功那一路输出本来就长，不需要额外点击。 */
-    @Test
-    fun `清扫成功时不等`() {
-        assertFalse(host().shouldWaitAfterCommand(BeginFlow.COM_CLEANING, 1L))
-    }
-
-    /** 移动（400）无论成败都不等：`QOL_COM400` 走一步就 `RETURN 1`、退出地图 `RETURN -1`。 */
-    @Test
-    fun `移动无论成败都不等`() {
+    fun `总闸缺省开着时每条指令都等一次`() {
         val h = host()
-        assertFalse(h.shouldWaitAfterCommand(400, 1L), "走了一步就回训练链，不能多要一次点击")
-        assertFalse(h.shouldWaitAfterCommand(400, -1L), "退出地图同样不再多要一次点击")
+        assertTrue(h.shouldWaitAfterCommand(400, 1L), "移动成功也等：原版口径不看指令码")
+        assertTrue(h.shouldWaitAfterCommand(410, -1L), "清掃被拒等：那行提示要钉在屏上")
+        assertTrue(h.shouldWaitAfterCommand(82, -1L), "其余被拒指令同样等")
     }
 
-    /** 其余被拒指令也不等（本次收窄只认清掃；要放宽就换 `commandEndWaitComCodes`）。 */
+    /** 玩家关掉设置项 = 整条链都不等（含清掃被拒那条老动机）。 */
     @Test
-    fun `其他指令被拒时不等`() {
-        assertFalse(host().shouldWaitAfterCommand(82, -1L))
+    fun `总闸关掉后谁都不等`() {
+        val h = host(wait = false)
+        assertFalse(h.shouldWaitAfterCommand(410, -1L))
+        assertFalse(h.shouldWaitAfterCommand(400, 1L))
     }
 
-    /** `null` = 恢复原版「每条指令都等一次」，供对照与回退。 */
+    /** 判定与指令码、`RESULT` 都无关：开关是唯一的自变量。 */
     @Test
-    fun `传 null 时恢复原版口径每条指令都等`() {
-        val h = host(codes = null)
-        assertTrue(h.shouldWaitAfterCommand(400, 1L))
-        assertTrue(h.shouldWaitAfterCommand(BeginFlow.COM_CLEANING, -1L))
-    }
-
-    /** 空集 = 永不等（只想验证「完全没有收尾等待」时的形态）。 */
-    @Test
-    fun `传空集时永不等`() {
-        assertFalse(host(codes = emptySet()).shouldWaitAfterCommand(BeginFlow.COM_CLEANING, -1L))
+    fun `判定只看总闸不看指令码与返回值`() {
+        val on = host()
+        val off = host(wait = false)
+        for (code in intArrayOf(400, 410, 82, 0, 9999)) {
+            for (result in longArrayOf(-1L, 0L, 1L)) {
+                assertTrue(on.shouldWaitAfterCommand(code, result), "开：$code / $result 要等")
+                assertFalse(off.shouldWaitAfterCommand(code, result), "关：$code / $result 不等")
+            }
+        }
     }
 }

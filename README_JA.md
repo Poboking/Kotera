@@ -53,6 +53,9 @@ EraTW をネイティブに遊びたい。[eratw-pocket](https://github.com/Pobo
 | `sqlite-adapter` | `SqlDriver` ポートの AndroidX SQLite アダプタ：同梱 seed DB を書き込み可能なコピーに落とし、原子リフレッシュ（SQLite 実エンジンのプラットフォーム接続） |
 | `mod-api` | RT2 Mod SDK の API 面：エンティティ / イベント / 関数 / Hook などの宣言とホストコンテキスト |
 | `mod-family` / `mod-memory` / `mod-livingworld` | 内蔵公式 Mod：家族系譜・記憶・生界（同梱 manifest の真のソース） |
+| `mod-registry` | キャリアレジストリ：ビルド時に各 `mod-*` モジュールの `@ModCarrier` 付き宣言 object を走査し、唯一の `ModRegistry` を生成する（ホストはキャリアモジュールを個別に列挙しなくてよい） |
+| `mod-template` | Mod 作者ツールチェーン：最小キャリアのテンプレート骨格（写すためのもので、本番の `ModRegistry` には**入らない**） |
+| `mod-testing` | Mod 作者ツールチェーン：`:mod-api` の能力面に対するインメモリ実装と `runMod` 組み立て。エンジンを起動せずに Mod のロジックを試せる |
 | `tools/erbcc` | ERB / ERH → `erbc.v1` バイトコードコンテナコンパイラ。コーパスコンパイル・シンボル監査・Rust 対拍接続を含む |
 | `tools/erbcc-rs` | erbcc の Rust 側実装（Cargo プロジェクト）。Kotlin コンパイラとのバイト単位対拍用 |
 | `tools/modgen` | RT2 モジュール / manifest ジェネレータ（内蔵 Mod とデモモジュールのビルド入口） |
@@ -77,12 +80,13 @@ JDK 17 以上が必要です。コマンドはすべてリポジトリのルー�
 ./gradlew :tools:vmdbg:installDist  # デバッグ CLI
 ```
 
-CI と同等のコマンド（12 モジュールをまとめて実行）：
+CI と同等のコマンド（15 モジュールをまとめて実行）：
 
 ```bash
 ./gradlew --no-daemon \
   :core-vm:test :render:test :sqlite-adapter:test \
   :mod-api:test :mod-family:test :mod-memory:test :mod-livingworld:test \
+  :mod-registry:test :mod-testing:test :mod-template:test \
   :tools:erbcc:test :tools:modgen:test :tools:modgen-accessors:test \
   :tools:vmdbg:test :tools:uipreview:test
 ```

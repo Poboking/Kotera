@@ -36,44 +36,64 @@ object EntityPayloadCodec {
     private const val TYPE_INT: Byte = 0
     private const val TYPE_STR: Byte = 1
 
-    /** 编码（[snapshot] → 大端字节）。 */
+    /** [encode] 的初始缓冲下限；估算只当提示，超出就靠写口自己扩。 */
+    private const val MIN_CAPACITY: Int = 256
+
+    /** 每个字段除名字外的定宽开销：u16 名字长度前缀 2 + 类型 1 + entityRef 1 + 计数 4。 */
+    private const val FIELD_FIXED_BYTES: Int = 8
+
+    /**
+     * 编码（[snapshot] → 大端字节）。
+     *
+     * **不许按估算预分配定长缓冲**（2026-11-20 真机判例）：本方法原先用
+     * `estimateSize` 的结果直接 `ByteBuffer.allocate`，而该估算对每个字段少算 8 字节
+     * （[writeName] 的 u16 长度前缀 2 + 类型 1 + entityRef 1 + 计数 4），字段数一多就
+     * 越过预分配 ⇒ `BufferOverflowException`（message 为 null，屏上只会显示成一句
+     * 莫名其妙的「存档失败原因: stage=capture+encode BufferOverflowException:null」）。
+     * 只在两三个字段的小内核上测不出：64 字节余量把这段欠账盖住了。
+     *
+     * 正确形态是**可增长写口**：容量估算只当初始提示，正确性不依赖它。
+     */
     fun encode(snapshot: EntitySnapshot): ByteArray {
-        val buf = ByteBuffer.allocate(estimateSize(snapshot))
-        buf.putInt(VERSION)
-        buf.putInt(snapshot.slots.size)
+        val out = java.io.ByteArrayOutputStream(estimateSize(snapshot).coerceAtLeast(MIN_CAPACITY))
+        // DataOutputStream 与大端 ByteBuffer 逐字节同构（writeShort/Int/Long 都是大端）。
+        val buf = java.io.DataOutputStream(out)
+        buf.writeInt(VERSION)
+        buf.writeInt(snapshot.slots.size)
         for (s in snapshot.slots) {
-            buf.putInt(s.slot)
-            buf.putShort(s.generation.toShort())
-            buf.putShort(s.pkgShortId.toShort())
-            buf.put(s.state.toByte())
-            buf.putShort(s.archetypeIdx.toShort())
+            buf.writeInt(s.slot)
+            buf.writeShort(s.generation)
+            buf.writeShort(s.pkgShortId)
+            buf.writeByte(s.state)
+            buf.writeShort(s.archetypeIdx)
         }
         writeNameTable(buf, snapshot.archetypes)
-        buf.putShort(snapshot.fields.size.toShort())
+        buf.writeShort(snapshot.fields.size)
         for (f in snapshot.fields) {
             writeName(buf, f.name)
-            buf.put(if (f.type == ComponentFieldType.INT) TYPE_INT else TYPE_STR)
-            buf.put(if (f.isEntityRef) 1 else 0)
-            buf.putInt(f.intValues.size)
+            buf.writeByte((if (f.type == ComponentFieldType.INT) TYPE_INT else TYPE_STR).toInt())
+            buf.writeByte(if (f.isEntityRef) 1 else 0)
+            buf.writeInt(f.intValues.size)
             for (p in f.intValues) {
-                buf.putInt(p.slot)
-                buf.putLong(p.value)
+                buf.writeInt(p.slot)
+                buf.writeLong(p.value)
             }
-            buf.putInt(f.strValues.size)
+            buf.writeInt(f.strValues.size)
             for (p in f.strValues) {
-                buf.putInt(p.slot)
+                buf.writeInt(p.slot)
                 writeName(buf, p.value)
             }
         }
         writeNameTable(buf, snapshot.relationKinds)
-        buf.putInt(snapshot.edges.size)
+        buf.writeInt(snapshot.edges.size)
         for (e in snapshot.edges) {
-            buf.putLong(e.from)
-            buf.putShort(e.kindIdx.toShort())
-            buf.putLong(e.to)
-            buf.putLong(e.value)
+            buf.writeLong(e.from)
+            buf.writeShort(e.kindIdx)
+            buf.writeLong(e.to)
+            buf.writeLong(e.value)
         }
-        return buf.array().copyOfRange(0, buf.position())
+        buf.flush()
+        return out.toByteArray()
     }
 
     /** 解码（字节 → [snapshot]）；判据见类 KDoc。截断统一包成 [IllegalArgumentException]。 */
@@ -185,17 +205,17 @@ object EntityPayloadCodec {
     // 名表与容量估算
     // ------------------------------------------------------------------
 
-    private fun writeNameTable(buf: ByteBuffer, names: List<String>) {
+    private fun writeNameTable(buf: java.io.DataOutputStream, names: List<String>) {
         require(names.size <= 0xFFFF) { "名表超 u16 容量: ${names.size}" }
-        buf.putShort(names.size.toShort())
+        buf.writeShort(names.size)
         for (n in names) writeName(buf, n)
     }
 
-    private fun writeName(buf: ByteBuffer, name: String) {
+    private fun writeName(buf: java.io.DataOutputStream, name: String) {
         val bytes = name.toByteArray(StandardCharsets.UTF_8)
         require(bytes.size <= 0xFFFF) { "名字超 u16 容量（${bytes.size} 字节）: $name" }
-        buf.putShort(bytes.size.toShort())
-        buf.put(bytes)
+        buf.writeShort(bytes.size)
+        buf.write(bytes)
     }
 
     private fun readNameTable(buf: ByteBuffer, what: String): List<String> {
@@ -215,12 +235,19 @@ object EntityPayloadCodec {
         return String(bytes, StandardCharsets.UTF_8)
     }
 
+    /**
+     * 初始容量提示（**不是**字节数上界，正确性不依赖它）。
+     *
+     * 早期版本把它当定长缓冲用，字段多时越界；现在只喂 [encode] 的初始容量。
+     * 字段那段按实测宽度给（名字 u16 前缀 2 + 类型 1 + entityRef 1 + 计数 4 = 8 字节开销），
+     * 免得一上手就扩容。
+     */
     private fun estimateSize(s: EntitySnapshot): Int {
         var n = 16
         n += s.slots.size * 13
         n += 2 + s.archetypes.sumOf { 2 + it.toByteArray(StandardCharsets.UTF_8).size }
         for (f in s.fields) {
-            n += 4 + f.name.toByteArray(StandardCharsets.UTF_8).size
+            n += FIELD_FIXED_BYTES + f.name.toByteArray(StandardCharsets.UTF_8).size
             n += f.intValues.size * 12 + f.strValues.sumOf { 6 + it.value.toByteArray(StandardCharsets.UTF_8).size }
         }
         n += 2 + s.relationKinds.sumOf { 2 + it.toByteArray(StandardCharsets.UTF_8).size }

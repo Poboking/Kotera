@@ -85,6 +85,8 @@ class ModContextImplTest {
         nativeMethods: NativeMethodRegistry = NativeMethodRegistry(),
         intVarView: (String) -> Long = { 0L },
         strVarView: (String) -> String = { "" },
+        hasIntVarView: ((String) -> Boolean)? = null,
+        hasStrVarView: ((String) -> Boolean)? = null,
         registrationSink: (Registration) -> Unit = {},
     ): ModContextImpl = ModContextImpl(
         packageId = packageId,
@@ -96,6 +98,8 @@ class ModContextImplTest {
         runtime = runtime,
         intVarView = intVarView,
         strVarView = strVarView,
+        hasIntVarView = hasIntVarView,
+        hasStrVarView = hasStrVarView,
         registrationSink = registrationSink,
     )
 
@@ -252,6 +256,34 @@ class ModContextImplTest {
     }
 
     @Test
+    fun `gameState 存在性探测 供给存在时声明答真缺失答假`() {
+        val wired = newContext(
+            "modA",
+            hasIntVarView = { it == "DAY" },
+            hasStrVarView = { it == "PLACE" },
+        )
+        assertTrue(wired.gameState.hasIntVar("DAY"))
+        assertFalse(wired.gameState.hasIntVar("MISSING"))
+        assertTrue(wired.gameState.hasStrVar("PLACE"))
+        assertFalse(wired.gameState.hasStrVar("MISSING"))
+    }
+
+    @Test
+    fun `gameState 存在探测未供给时缺省恒假且哨兵语义零变化`() {
+        val def = newContext("modA")
+        assertFalse(def.gameState.hasIntVar("ANY"))
+        assertFalse(def.gameState.hasStrVar("ANY"))
+        // K1 冻结契约：探测位缺省（未接线形态）不改变读侧哨兵语义——缺变量仍 0 / 空串，不抛。
+        assertEquals(0L, def.gameState.getIntVar("ANY"))
+        assertEquals("", def.gameState.getStrVar("ANY"))
+        // 供给已接线时同样如此：探测 true / false 之外的缺变量读数走哨兵原路。
+        val wired = newContext("modA", hasIntVarView = { it == "DAY" })
+        assertTrue(wired.gameState.hasIntVar("DAY"))
+        assertFalse(wired.gameState.hasIntVar("MISSING"))
+        assertEquals(0L, wired.gameState.getIntVar("MISSING"))
+    }
+
+    @Test
     fun `ui 撤销后立即不再命中`() {
         val ctx = newContext("modA")
         var clicks = 0
@@ -290,5 +322,29 @@ class ModContextImplTest {
         val snapshot = newSnapshot("modA")
         assertThrows<IllegalArgumentException> { newContext("ghost", snapshot) }
         assertThrows<IllegalArgumentException> { newContext("   ", snapshot) }
+    }
+
+    /**
+     * 反向证明：宿主 adopt 之前 [ModContextImpl.services] 必须是显式 fail-closed 桩。
+     *
+     * 若它返回空注册表（或静默 no-op），作者会以为服务发布生效了，装配缺失被静默吞掉；
+     * 这里四个入口都要求抛错并点名 packageId。
+     */
+    @Test
+    fun `未 adopt 服务注册表时 services 是显式 fail-closed 桩`() {
+        val ctx = newContext("modA")
+        val operations: List<() -> Any?> = listOf(
+            { ctx.services.find(CharSequence::class.java) },
+            { ctx.services.publish(CharSequence::class.java, "impl", ctx.packageId) },
+            { ctx.services.owners(CharSequence::class.java) },
+            { ctx.services.publishedTypes() },
+        )
+        for (operation in operations) {
+            val failure = assertThrows<UnsupportedOperationException> { operation() }
+            assertTrue(
+                failure.message.orEmpty().contains("modA"),
+                "fail-closed 文案必须点名 packageId：${failure.message}",
+            )
+        }
     }
 }

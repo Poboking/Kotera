@@ -135,6 +135,20 @@ class BeginFlowTest {
             newGameCount++
         }
 
+        /** `BeginHost.onNewGameStarted`（mod 侧新局通知）被调到的次数。 */
+        var newGameStartedCount = 0
+
+        /** `BeginHost.onSaveLoaded`（mod 侧读档通知）被调到的次数。 */
+        var saveLoadedCount = 0
+
+        override fun onNewGameStarted() {
+            newGameStartedCount++
+        }
+
+        override fun onSaveLoaded() {
+            saveLoadedCount++
+        }
+
         override fun autoSave(): Boolean = autoSaveEnabled
         override fun awaitUserComInput(): Long? {
             userComInputCalls++
@@ -826,7 +840,8 @@ class BeginFlowTest {
             events += "EVENTFIRST"
         }
         calls.afterCall = { name -> if (name == "SYSTEM_TITLE") calls.pending = BeginType.FIRST }
-        val flow = BeginFlow(calls, FakeHost())
+        val host = FakeHost()
+        val flow = BeginFlow(calls, host)
 
         flow.select(BeginType.TITLE)
         val step = flow.step()
@@ -836,12 +851,17 @@ class BeginFlowTest {
         assertEquals(SystemStateCode.First_Begin, flow.state)
         assertEquals(SystemStateCode.First_Begin, step.to)
         assertEquals(null, calls.pending, "pending 必须在脚本返回同一步被消费掉")
+        // 这条路径就是 eraTW 的真实形态（`BEGIN FIRST` 使 onNewGameSelected 永不执行）：
+        // 新局通知必须在这里发，且必须已排在 pending BEGIN 消费之后。
+        assertEquals(0, host.newGameCount, "onNewGameSelected 在 eraTW 路径上不执行")
+        assertEquals(0, host.newGameStartedCount, "通知要等 EVENTFIRST 跑完再发")
 
         // 下一次 step 直接进 beginFirst（不再有额外的「先消费 pending」空转步）。
         val first = flow.step()
         assertEquals(StepOutcome.CALLED, first.outcome)
         assertEquals("EVENTFIRST", first.calledFunction)
         assertEquals(SystemStateCode.Normal, flow.state)
+        assertEquals(1, host.newGameStartedCount, "新开一局恰好发一次 mod 通知")
     }
 
     /**

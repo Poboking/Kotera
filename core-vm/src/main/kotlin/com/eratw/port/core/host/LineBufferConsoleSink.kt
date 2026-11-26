@@ -888,6 +888,14 @@ class LineBufferConsoleSink(
     fun currentOptions(): List<ConsoleOption> = optionSnapshot
 
     /**
+     * 最近一次等待请求（[noteInputWait] 的入参原样保留）。null = 本会话还没进入过等待。
+     *
+     * 供语义拦截装置装配页面（HYB-1）：等待形态决定这一页收不收值、超时推不推进，
+     * 界面据此决定控件可点性。**不**参与任何原版语义，也没有第二个写入点。
+     */
+    fun currentWait(): InputRequest? = waitRequest
+
+    /**
      * 输入等待入口：按原版 `EmueraConsole.newGeneration()` 推进按钮世代，并冻结可点集合。
      *
      * 口径逐条对：
@@ -904,6 +912,9 @@ class LineBufferConsoleSink(
      * 「上一次等待之后的新行」切页，也不再按 `[N]` 的前缀形态猜。
      */
     override fun noteInputWait(request: InputRequest) {
+        // 语义页数据源：等待请求原样留档（HYB-1）。放在方法最前——本方法有早退分支
+        // （非取值等待），而语义页同样需要知道「这一页在等回车」。
+        waitRequest = request
         // 原版进入等待前 RunEmueraProgram 会 PrintFlush(force: false)（EmueraConsole.cs:1094→:1107）：
         // 没有以换行收尾的 PRINTN 段、以及 `HTML_PRINT …, 1`（追加到打印缓冲的按钮段）
         // 都在这一刻上屏。不补这一下，标题页那个 `<div>…<button value='4'>五子棋</button></div>`
@@ -915,6 +926,7 @@ class LineBufferConsoleSink(
             // NeedValue == false：原版 newGeneration 直接返回，世代原样保留。
             optionSnapshot = emptyList()
             publishOptionsIfDirty()
+            fireFramePublished()
             return
         }
         newGeneration(request)
@@ -923,6 +935,11 @@ class LineBufferConsoleSink(
         // [publishOptionsIfDirty] 的 KDoc）：帧口径快照在这里补一次，且必须放在
         // [newGeneration] 之后 —— 世代已定，收集到的才是玩家眼前这一屏的可点集合。
         publishOptionsIfDirty()
+        // 输入等待点的「DoEvents 时刻」（PLAY-INPUT-LATE）：此刻行表已 flush、按钮世代已定、
+        // 帧口径选项快照已换新 —— 宿主在这里回放执行期滞留的入力，用的就是**当刻**版面
+        // （原版脚本跑到 WaitInput 时消息泵取消息并命中，EmueraConsole.cs:1040-1082）。
+        // 必须排在 publishFrame 之后、waitInput 阻塞之前：早一步 Option 集还是上一页的。
+        fireFramePublished()
     }
 
     /**
@@ -1487,6 +1504,10 @@ class LineBufferConsoleSink(
         val cleared = clearedRanges(src, clear)
         if (!src.contains("<button", ignoreCase = true)) return emptyList()
         val out = ArrayList<HtmlOption>()
+        // 前缀字色**单趟**建表：旧实现对每颗按钮都从下标 0 重扫一遍（O(颗数 × 串长)），
+        // 2026-11-20 真机 ANR 的 UI 线程栈顶就停在 `Character.isWhitespace` —— 正是这类
+        // 逐字符重扫叠出来的。建表 O(串长)，查询 O(log 标签数)，每颗按钮只剩常数开销。
+        val fontColors = enclosingFontColors(src)
         val pending = sources.toMutableList()
         var pos = 0
         // 列号累加：`measuredEnd` 之前的可见文本已经折进 `col`，下一个按钮只需补上
@@ -1557,8 +1578,7 @@ class LineBufferConsoleSink(
                     startCol = start,
                     endCol = end,
                     groupId = groupId,
-                    colorRgb = htmlOptionColorRgb(src.substring(openEnd + 1, close))
-                        ?: htmlEnclosingFontColorRgb(src, open),
+                    colorRgb = htmlOptionColorRgb(innerTag) ?: fontColors.at(open),
                 ),
             )
         }
@@ -1588,6 +1608,31 @@ class LineBufferConsoleSink(
      * 把 [inside] 传下去，而不是每行重新开一次。
      */
     private class ClearButtonScan(var inside: Boolean)
+
+    /**
+     * 前缀字色索引：[starts] 是 `<font>` 标签**闭合之后**的下标（生效点），[colors] 是同点的当前字色
+     * （-1 = 无显式色，查询方折算成 null）。
+     *
+     * 建一次、查多次：按钮循环按下标升序问色，二分即可。数组不可变，跨线程只读安全。
+     */
+    private class EnclosingFontColors(private val starts: IntArray, private val colors: IntArray) {
+        fun at(before: Int): Int? {
+            var lo = 0
+            var hi = starts.size - 1
+            var hit = -1
+            while (lo <= hi) {
+                val mid = (lo + hi) ushr 1
+                if (starts[mid] <= before) {
+                    hit = mid
+                    lo = mid + 1
+                } else {
+                    hi = mid - 1
+                }
+            }
+            if (hit < 0) return null
+            return colors[hit].takeIf { it >= 0 }
+        }
+    }
 
     /**
      * 本行原文里 `<clearbutton>` 覆盖的区间（源码下标，左闭右开），并把行尾状态写回 [clear]。
@@ -1693,7 +1738,9 @@ class LineBufferConsoleSink(
      */
     @Suppress("CyclomaticComplexMethod", "NestedBlockDepth", "ReturnCount", "ComplexCondition")
     private fun htmlOptionColorRgb(html: String): Int? {
-        val src = HTML_COMMENT_REGEX.replace(html, "")
+        // 绝大多数按钮正文没有注释：先做一次 `contains` 短路，省掉每颗按钮一次正则替换
+        // （`<!--.*?-->` 带 DOT_MATCHES_ALL，无注释时也在整串上跑一遍）。
+        val src = if (html.contains("<!--")) HTML_COMMENT_REGEX.replace(html, "") else html
         var pos = 0
         while (pos < src.length) {
             val open = src.indexOf('<', pos)
@@ -1720,24 +1767,33 @@ class LineBufferConsoleSink(
     }
 
     /**
-     * 按钮**开标签之前**最近一层未闭合 `<font color>` 的颜色。
+     * 单趟扫出「每个 `<font>` 标签生效点 → 当前字色」的索引，语义与旧的逐按钮前缀扫描逐点一致：
      *
-     * 语料的指令栏是 `<font color='#64fa8c'><shape space><button value=…>…</button></font>`：
-     * 颜色写在按钮外面，只扫按钮正文会漏掉。这里按 HTML 的栈语义走到按钮位置，
-     * 只维护 font 栈；其他标签不改变字色。只用于右栏色块提示，渲染仍归 `HtmlRunFlatten`。
+     * - 只认 `<font>` 的嵌套栈，其他标签不改变字色；
+     * - 标签**跨过**查询点时不算（旧实现 `end >= before` 就 break）——索引里用 `end + 1`
+     *   作生效点、查询取 `<= before`，两边是同一条边界；
+     * - 注释里的 `<font>` 不算（旧实现的注释分支整段跳过）；
+     * - 闭合标签弹栈、无 `color` 的开标签继承当前色（`:1750-1757` 的既有语义）。
+     *
+     * 复杂度：建表 O(串长 + 标签数)，查询 O(log 标签数)。旧实现是每颗按钮 O(串长)，
+     * 一屏几十颗按钮时是 O(颗数 × 串长)。
      */
     @Suppress("CyclomaticComplexMethod", "NestedBlockDepth", "ReturnCount", "ComplexCondition")
-    private fun htmlEnclosingFontColorRgb(src: String, before: Int): Int? {
+    private fun enclosingFontColors(src: String): EnclosingFontColors {
+        // 超长段不建表：颜色只服务右栏色块，缺色不影响可玩性；20 万字符的段本就不该出现，
+        // 这里只是防「坏数据把 UI 拖死」的硬闸（宁可少一块色，不许卡一帧）。
+        if (src.length > FONT_COLOR_INDEX_MAX_CHARS) return EMPTY_FONT_COLORS
+        val starts = ArrayList<Int>()
+        val colors = ArrayList<Int>()
         val stack = ArrayList<Int?>()
         var current: Int? = null
         var pos = 0
-        while (pos < before) {
+        while (pos < src.length) {
             val open = src.indexOf('<', pos)
-            if (open < 0 || open >= before) break
-            if (open + 1 >= src.length) break
+            if (open < 0 || open + 1 >= src.length) break
             if (src.startsWith("<!--", open)) {
                 val end = src.indexOf("-->", open + 4)
-                pos = if (end < 0 || end >= before) before else end + 3
+                pos = if (end < 0) src.length else end + 3
                 continue
             }
             val closing = src[open + 1] == '/'
@@ -1745,7 +1801,7 @@ class LineBufferConsoleSink(
             while (i < src.length && !src[i].isWhitespace() && src[i] != '>' && src[i] != '/') i++
             val name = src.substring(open + (if (closing) 2 else 1), i)
             val end = findTagEnd(src, i)
-            if (end < 0 || end >= before) break
+            if (end < 0) break
             if (name.equals("font", ignoreCase = true)) {
                 if (closing) {
                     if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex)
@@ -1755,10 +1811,12 @@ class LineBufferConsoleSink(
                     stack.add(color ?: current)
                     current = stack.last()
                 }
+                starts.add(end + 1)
+                colors.add(current ?: -1)
             }
             pos = end + 1
         }
-        return current
+        return EnclosingFontColors(starts.toIntArray(), colors.toIntArray())
     }
 
     /** HTML `color` 属性 → `0xRRGGBB`；未知色返回 null（只用于显示提示，不参与脚本语义）。 */
@@ -2437,6 +2495,35 @@ class LineBufferConsoleSink(
         lastPublishedVisibleSerial = serial
         lastProgressPublishAtMs = nowMs
         publishOptionsIfDirty()
+        fireFramePublished()
+    }
+
+    /**
+     * 帧已上屏的宿主回调（PLAY-INPUT-LATE · 2026-11-23）：每次**真的**产出一份新发布帧
+     * （[flushGateOnce] 的脏帧、[publishProgressFrame] 的页中帧）后同步调一次，VM 线程。
+     *
+     * 用途 = 宿主侧的「`DoEvents` 时机」：原版脚本与消息泵同线程，玩家在执行期点的那一下
+     * 只是躺在消息队列里，直到脚本跑到 `WaitInput` 的 `DoEvents`（`EmueraConsole.cs:1040-1082`）
+     * 才被**按当刻版面**取出去解释。移植侧宿主拿不到那个时刻，本回调就是它的落点：
+     * 帧一发布（版面已定、[publishedOptions] 已同刻换新），宿主可以在这里回放
+     * `LateInputQueue` 里滞留的执行期入力，并按这一帧的选项集裁决命中（见 `GameHost.replayLateInputs`）。
+     *
+     * 约定：
+     * - null（缺省）= 无宿主观察者，零开销；
+     * - 触发点 = [noteInputWait] 的收尾（每个输入等待入口恰好一次：行表已 flush、按钮世代已定、
+     *   帧口径选项快照已换新 —— 即原版 `WaitInput` 里 `DoEvents` 取消息的那一刻）与
+     *   [publishProgressFrame]（页中保活真的发布了一帧）；`publishFrame` 本身**不**触发，
+     *   因为那时选项集还是上一页的（`noteInputWait` 才冻结当刻按钮集）；
+     * - 回调**不得**在这里回写 `displayLines`（此刻闸可能刚打开，宿主若要交入力应交给输入队列，
+     *   而不是直接写控制台）；回调要保持便宜（VM 线程同步调用）。
+     */
+    @Volatile
+    var onFramePublished: (() -> Unit)? = null
+
+    /** 读一次 @Volatile 引用再调（见 [onFramePublished]）。 */
+    private fun fireFramePublished() {
+        val hook = onFramePublished ?: return
+        hook()
     }
 
     /**
@@ -4068,6 +4155,19 @@ class LineBufferConsoleSink(
     @Volatile
     private var optionSnapshot: List<ConsoleOption> = emptyList()
 
+    /**
+     * 最近一次等待请求（HYB-1 语义拦截装置的数据源之一）。
+     *
+     * 语义页必须知道「这一页在等什么」才能判定可点性与等待形态；而 [noteInputWait] 的入参
+     * 是唯一的真源，此前没有对外读数。写点只有 [noteInputWait]（VM 线程），读点
+     * [currentWait]（UI 线程）⇒ volatile。
+     *
+     * 只记**最近一次**，不按有效性出闸：等待是否还在进行由调用方用输入队列的
+     * `isAwaiting` 判定（本类不知道队列状态，凭空猜会把旧页当新页发布）。
+     */
+    @Volatile
+    private var waitRequest: InputRequest? = null
+
     private var foreColor: Int? = null
     private var backColor: Int? = null
     private var styleMask = 0
@@ -5232,6 +5332,17 @@ class LineBufferConsoleSink(
 
         /** HTML 注释：按钮抽取前先剥掉（注释里的标签不参与渲染，也不该进选项栏）。 */
         private val HTML_COMMENT_REGEX = Regex("""<!--.*?-->""", RegexOption.DOT_MATCHES_ALL)
+
+        /**
+         * 前缀字色索引的建表上限（字符数）。超过就整段不建表、颜色一律缺省。
+         *
+         * 颜色只服务右栏色块提示，不参与脚本语义；一段超过 20 万字符的 HTML 本就不该出现，
+         * 这道闸只防「坏数据把 UI 线程拖死」——宁可少一块色，不许卡一帧（2026-11-20 ANR）。
+         */
+        private const val FONT_COLOR_INDEX_MAX_CHARS = 200_000
+
+        /** 超限/空段的共享空索引（查询恒 null，无分配）。 */
+        private val EMPTY_FONT_COLORS = EnclosingFontColors(IntArray(0), IntArray(0))
 
         /** 行首序号前缀（`[0] `、`[ 12] `），只清行首，不动 `返回 [9]` 这种行中序号。 */
         private val ORDINAL_PREFIX_REGEX = Regex("""^\[\s*\d{1,4}\s*\]\s*""")

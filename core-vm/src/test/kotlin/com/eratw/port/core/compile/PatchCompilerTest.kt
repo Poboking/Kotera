@@ -1065,21 +1065,190 @@ class PatchCompilerTest {
     }
 
     @Test
-    fun `文件级容错不放行 I6 闸——撞 base 同名仍硬拒`() {
-        // 容错只覆盖解析/词法这一级；I6（全局 #DIM / 撞 base 同名 / 省略实参）是设计性硬拒，
-        // 容下来 = 补丁少一小块没人知道，与「禁静默错值」同族。
+    fun `KI-2 撞名不再属于容错边界外——同批好坏文件都装载并逐条告警`() {
+        // 2026-11-23 KI 改判：撞 base 同名不再是错误（覆盖装载 + 告警），原「容错不吞
+        // I6-②」的钉桩随语义反转——两个文件都编译成功，撞名告警逐条出。
         val (_, meta, counts) = compileBase()
-        val bad = "@A_ONE\nPRINTL DUP\nRETURN 0\n"
-        val ex = assertFailsWith<PatchCompiler.PatchCompileException>("撞 base 同名的文件不许被静默跳过") {
-            PatchCompiler(meta, counts, patchSymbols()).compile(
-                listOf(
-                    PatchCompiler.SourceFile("mods/a_good.ERB", "@B_GOOD\nRETURN 0\n"),
-                    PatchCompiler.SourceFile("mods/z_bad.ERB", bad),
-                ),
-                "B_GOOD",
+        PatchCompiler(meta, counts, patchSymbols()).compile(
+            listOf(
+                PatchCompiler.SourceFile("mods/a_good.ERB", "@B_GOOD\nRETURN 0\n"),
+                PatchCompiler.SourceFile("mods/z_dup.ERB", "@A_ONE\nPRINTL DUP\nRETURN 0\n"),
+            ),
+            "B_GOOD",
+        ).let { r ->
+            assertEquals(2, r.program.functions.size, "好文件与撞名文件都进函数表")
+            assertTrue(
+                r.parseWarnings.any { it.contains("A_ONE") && it.contains("覆盖 base 同名函数") },
+                "撞名告警照出: ${r.parseWarnings}",
             )
         }
-        assertTrue(ex.message!!.contains("A_ONE"), "仍须点名冲突函数: ${ex.message}")
+    }
+
+    /** R7-①（2026-11-23 KI 改判后）：撞名一律覆盖装载，判据参数已撤销。 */
+    private fun patchCompileOverride(
+        meta: BootMetadata,
+        counts: PatchCompiler.BaseCounts,
+        source: String,
+        entry: String,
+    ): PatchCompiler.PatchResult = PatchCompiler(
+        meta,
+        counts,
+        patchSymbols(),
+    ).compile(listOf(PatchCompiler.SourceFile("mods/kojo.ERB", source)), entry)
+
+    @Test
+    fun `R7-① 判据为真——撞名函数编成声明式覆盖并逐条告警`() {
+        val (_, meta, counts) = compileBase()
+        val src = "@A_ONE\nPRINTL OVR\nRETURN 0\n\n@B_NEW\nRETURN 0\n"
+        val r = patchCompileOverride(meta, counts, src, "A_ONE")
+        assertEquals(
+            1,
+            r.parseWarnings.count { it.contains("A_ONE") && it.contains("覆盖 base 同名函数") },
+            "覆盖告警必须逐条点名，实得: ${r.parseWarnings}",
+        )
+        assertEquals(
+            1, r.parseWarnings.count { it.contains("A_ONE") && it.contains("覆盖 base 同名函数") },
+            "门开时逐条出覆盖告警（原版 level 1 告警的对应物），实际: ${r.parseWarnings}",
+        )
+        // 覆盖函数与加性函数同批装载：整包不再因一个撞名就死。
+        assertEquals(2, r.program.functions.size, "覆盖函数照常进补丁段")
+    }
+
+    @Test
+    fun `R7-① 告警门关掉——覆盖装载照旧但零告警`() {
+        val (_, meta, counts) = compileBase()
+        val src = "@A_ONE\nPRINTL OVR\nRETURN 0\n"
+        val on = patchCompileOverride(meta, counts, src, "A_ONE")
+        val off = PatchCompiler(
+            meta,
+            counts,
+            patchSymbols(),
+            warnNormalFunctionOverloading = false,
+        ).compile(listOf(PatchCompiler.SourceFile("mods/kojo.ERB", src)), "A_ONE")
+        assertEquals(on.program.functions.size, off.program.functions.size, "告警门不改装载面")
+        assertContentEquals(on.program.code, off.program.code, "告警门只改「发不发」，指令流逐字相同")
+        assertTrue(off.parseWarnings.none { it.contains("覆盖 base 同名函数") }, "门关零告警：${off.parseWarnings}")
+    }
+
+    /**
+     * 2026-11-23 KI 改判（BOARD KI-2）：原「判 false 的键维持硬拒」用例反转——撞名一律
+     * 覆盖装载，不再有判据分档。两个撞名键都放行 + 逐条告警（原版 ErbLoader.cs:466-475）。
+     */
+    @Test
+    fun `KI-2 撞名一律覆盖装载——不再有判据分档硬拒`() {
+        val (_, meta, counts) = compileBase()
+        val src = "@A_ONE\nPRINTL OVR1\nRETURN 0\n\n@A_TWO(N)\nRETURN 0\n"
+        val r = patchCompileOverride(meta, counts, src, "A_ONE")
+        assertEquals(
+            2,
+            r.parseWarnings.count { it.contains("覆盖 base 同名函数") },
+            "两个撞名键都放行并逐条告警，实得: ${r.parseWarnings}",
+        )
+        assertEquals(2, r.program.functions.size, "两个撞名函数都照常进补丁段")
+    }
+
+    /**
+     * 大小写折叠虫（2026-11-17 真包整包首撞，风神少女 `@K29_FORCESubscribe`）：引擎按
+     * `Config.StrComper` = IGNORE CASE 比较函数名（spec: IdentifierDictionary.cs:48），而旧
+     * 步骤 5 拿 `FuncHead.name` 的**源码原样大小写**去比侧车大写键 ⇒ 混合大小写的撞名既逃过
+     * I6-②、又不会被声明成覆盖，产物落盘后在链接期抛 SymbolConflictException——
+     * 「导入成功但带这个包开不了局」。判据必须走归一键。
+     */
+    @Test
+    fun `R7-① 大小写混写也要认出撞名——按 IGNORE CASE 归一比较`() {
+        val (_, meta, counts) = compileBase()
+        val r = patchCompileOverride(meta, counts, "@a_one\nPRINTL OVR\nRETURN 0\n", "A_ONE")
+        assertEquals(
+            1, r.parseWarnings.count { it.contains("覆盖 base 同名函数") },
+            "小写书写的同名函数也要认出撞名并出覆盖告警，实得: " + r.parseWarnings,
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // R7-① 余项（RECON-R7-NOFINGERPRINT）：无指纹 base 标签的收录判据
+    // ------------------------------------------------------------------
+
+    // 生产判据形状的纯 JVM 替身（原 `declarableFromSignatureTable`）已随 2026-11-23 KI 改判
+    // 删除：签名指纹可得性不再决定放行/拒载（撞名一律覆盖装载，BOARD KI-2），判据替身无消费面。
+
+    /**
+     * 261111 侧车实测形状：base labelset 有名（118,195 条）而签名段无键（118,159 条），
+     * 差集 36 个（RECON-R7-NOFINGERPRINT.md §2 附表）。撞上这批键的口上包（如覆盖禁载
+     * 目录 DLC/AI对话补丁 空体标签的包）：**2026-11-23 KI 改判（BOARD KI-2）后不再整包
+     * 硬拒**——按覆盖装载放行 + 覆盖告警（链接期三态拒载同步改判为 diagnostics 告警
+     * 放行，spec: SymbolCatalog.kt build），导入不再被这批键挡住。
+     */
+    @Test
+    fun `KI-2 无指纹键撞名——按覆盖装载放行不再整包硬拒`() {
+        val (_, meta, counts) = compileBase()
+        // A_ONE 不在任何签名表里 = base 侧车给不出该键的非空签名指纹（36 个无指纹标签形状），
+        // 改判后照样放行（原判 assertFailsWith<PatchCompileException> 反转为编译成功断言）。
+        val r = patchCompileOverride(meta, counts, "@A_ONE\nPRINTL OVR\nRETURN 0\n", "A_ONE")
+        assertEquals(
+            1,
+            r.parseWarnings.count { it.contains("A_ONE") && it.contains("覆盖 base 同名函数") },
+            "无指纹撞名键照样出覆盖告警，实得: ${r.parseWarnings}",
+        )
+        assertEquals(1, r.program.functions.size, "无指纹撞名函数照常进补丁段")
+    }
+
+    /**
+     * 与上一例同夹具同补丁。反向证明面（2026-11-23 KI 改判后语义更新）：签名段有无指纹
+ * 不再决定「放行/拒载」（撞名一律放行），本例改钉**融合方案的数据面**：覆盖键的补丁真实
+     * 签名随 [PatchCompiler.PatchResult.signatures] 导出（步骤 9.5），供 Transcoder 写容器
+     * 签名段（链接期 diagnostics 告警面用）。
+     */
+    @Test
+    fun `KI-2 覆盖键补丁真实签名照常导出——容器签名段数据面不回退`() {
+        val (_, meta, counts) = compileBase()
+        val r = patchCompileOverride(
+            meta, counts, "@A_ONE\nPRINTL OVR\nRETURN 0\n", "A_ONE",
+        )
+        assertEquals(
+            1, r.parseWarnings.count { it.contains("A_ONE") && it.contains("覆盖 base 同名函数") },
+            "覆盖告警逐条点名: ${r.parseWarnings}",
+        )
+        assertEquals(1, r.program.functions.size, "覆盖函数照常进补丁段（本源只定义 A_ONE 一个函数）")
+        val fp = r.signatures["A_ONE"]
+        assertTrue(
+            !fp.isNullOrEmpty() && fp.length == 64,
+            "覆盖键的补丁真实指纹必须非空（SHA-256 十六进制），实得: ${r.signatures}",
+        )
+    }
+
+    /**
+     * 36 个无指纹标签里 8 个是事件族（7 个合成事件入口 + 1 个禁载文件里的成员
+     * `EVENTCOMEND#1096`，RECON-R7-NOFINGERPRINT.md §2）：事件名在步骤 5 恒放行
+     * （同名事件 = 叠加语义，spec: CalledFunction.cs:228-243），签名指纹判据对事件键
+     * 不生效——口上给事件名加成员不会因 base 侧查不到指纹被拒（261111 的事件键全部
+     * 无指纹，本例钉住这批键不构成导入障碍）。
+     */
+    @Test
+    fun `R7-① 事件族不受无指纹闸影响——base 事件键无指纹仍放行叠加`() {
+        val (_, meta, counts) = compileBase()
+        val withEvent = BootMetadata(
+            functions = meta.functions + FuncMeta(
+                index = counts.functionCount,
+                key = "EVENTTRAIN",
+                isEvent = true,
+                defIndex = counts.functionCount,
+                position = "mini.ERB:99",
+            ),
+            methodTypes = meta.methodTypes,
+            paramDefaults = meta.paramDefaults,
+            dimParseConfig = meta.dimParseConfig,
+        )
+        val r = patchCompileOverride(
+            withEvent, counts, "@EVENTTRAIN\nPRINTL T\nRETURN 0\n", "EVENTTRAIN",
+        )
+        assertTrue(
+            r.program.functions.any { it.name.startsWith("EVENTTRAIN#") },
+            "事件成员照常编出: ${r.program.functions.map { it.name }}",
+        )
+        assertTrue(
+            r.program.functions.any { it.name == "EVENTTRAIN" },
+            "合成入口照常编出: ${r.program.functions.map { it.name }}",
+        )
     }
 
     @Test
@@ -1119,18 +1288,10 @@ class PatchCompilerTest {
         assertTrue(msg.contains("mods/patch.ERB:2"), "错误消息必须带文件:行，实际: $msg")
     }
 
-    @Test
-    fun `I6 三——补丁定义 base 同名函数编译期拒绝并点名`() {
-        val (_, meta, counts) = compileBase()
-        val src = "@A_ONE\nPRINTL DUP\nRETURN 0\n"
-        val ex = assertFailsWith<PatchCompiler.PatchCompileException>("base 同名函数必须编译期拒绝（R7 铁律 4）") {
-            patchCompile(meta, counts, patchSymbols(), source = src, entry = "A_ONE")
-        }
-        val msg = ex.message ?: ""
-        assertTrue(msg.contains("A_ONE"), "错误消息必须点名函数名，实际: $msg")
-        assertTrue(msg.contains("mods/patch.ERB:1"), "错误消息必须带文件:行，实际: $msg")
-        assertTrue(msg.contains("base"), "错误消息必须说明与 base 的冲突，实际: $msg")
-    }
+    // 「I6 三——补丁定义 base 同名函数编译期拒绝并点名」已随 2026-11-23 KI 改判（BOARD KI-2）
+    // 删除：撞名不再编译期拒绝，其行为由「R7-① 判据为真——撞名函数编成声明式覆盖并逐条告警」
+    // 与「KI-2 撞名一律覆盖装载——不再有判据分档硬拒」「KI-2 无指纹键撞名——按覆盖装载放行
+    // 不再整包硬拒」三例共同钉住。
 
     @Test
     fun `I6 四——空侧车下补丁省略实参编译期拒绝并点名`() {

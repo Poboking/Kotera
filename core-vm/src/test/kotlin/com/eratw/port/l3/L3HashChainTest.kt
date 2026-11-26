@@ -364,8 +364,8 @@ class L3HashChainTest {
         val tail = run.tail()
         val update = System.getenv("ERATW_L3_UPDATE") == "1"
         val probe = profileProbe
-        val headName = "REGISTERED_HEAD" + (probe.profile?.constantSuffix ?: "_<档位后缀>")
-        val tailName = "REGISTERED_TAIL" + (probe.profile?.constantSuffix ?: "_<档位后缀>")
+        val headName = "REGISTERED_HEAD" + pasteSuffix
+        val tailName = "REGISTERED_TAIL" + pasteSuffix
         val block = StringBuilder()
         block.append("\n## (b) 登记常量（自产快照，非 PC 基准；按语料档位分组）\n\n")
         block.append("- 档位: ").append(profileLabel).append('\n')
@@ -720,10 +720,18 @@ class L3HashChainTest {
             get() = "档位=" + profileLabel + "（判定依据: " + profileProbe.source + "；语料根=" +
                 corpusRoot + "）；链值只对同档语料可比 ⇒ 先查档位与语料根，再查状态演化（(a) 节）"
 
-        /** 档位在报告/消息里的写法；判不出时如实写自述版本，不留空白。 */
+        /** 档位在报告/消息里的写法；判不出时如实写自述版本，不留空白。4.981 档另标语料代。 */
         private val profileLabel: String
-            get() = profileProbe.profile?.let { p: CorpusProfile -> p.version + " " + p.label }
+            get() = profileProbe.profile?.let { p: CorpusProfile -> p.version + " " + p.label + generationNote(p) }
                 ?: ("未登记（语料自述版本=" + (profileProbe.version ?: "未知") + "）")
+
+        /** 4.981 档的语料代注记（261111 出货 / 261017 退役留档）；其他档位为空串。 */
+        private fun generationNote(profile: CorpusProfile): String = when (profile) {
+            CorpusProfile.ERA_TW_4_981 ->
+                if (isShipping4_981Generation) "（语料代 261111，出货根）" else "（语料代 261017，退役留档）"
+
+            CorpusProfile.ERA_TW_4_980 -> ""
+        }
 
         /**
          * 当前语料根 = GoldenPipeline 已解析 CSV 目录的上级 —— 与装置实际装载的语料同源
@@ -754,8 +762,40 @@ class L3HashChainTest {
         /** 档位 → 该档的登记（链头, 链尾）。`when` 穷举：新增档位不补值编译不过（有意的闸）。 */
         private fun registeredValues(profile: CorpusProfile): Pair<Long, Long> = when (profile) {
             CorpusProfile.ERA_TW_4_980 -> Pair(REGISTERED_HEAD_4_980, REGISTERED_TAIL_4_980)
-            CorpusProfile.ERA_TW_4_981 -> Pair(REGISTERED_HEAD, REGISTERED_TAIL)
+            CorpusProfile.ERA_TW_4_981 -> if (isShipping4_981Generation) {
+                Pair(REGISTERED_HEAD, REGISTERED_TAIL)
+            } else {
+                Pair(REGISTERED_HEAD_4_981_261017, REGISTERED_TAIL_4_981_261017)
+            }
         }
+
+        /**
+         * 4.981 档内部再分语料代（出货 261111 vs 退役留档 261017）。
+         *
+         * 判据复用装载侧的唯一权威口径 [com.eratw.port.boot.CorpusProfile.detect]（读 `ERB/DIM.ERH`
+         * 的 `#DIM CONST NOW_VERSION`）：认得出本类在册档 = 当前出货代；认不出（退役代未在册，按红线 2
+         * 判红）⇒ 落回退役代的历史登记值，让 golden 回归对拍根仍可跑，而不会把「未登记版本」的
+         * 判红面偷偷扩到整个 L3。
+         */
+        private val isShipping4_981Generation: Boolean by lazy {
+            runCatching { com.eratw.port.boot.CorpusProfile.detect(GoldenPipeline.gameCsvDir()) }
+                .getOrNull() == com.eratw.port.boot.CorpusProfile.V4_981
+        }
+
+        /**
+         * (b) 报告里可粘贴的常量名后缀：4.981 档要能把两代语料分别粘回各自一组常量
+         * （退役代贴 `_4_981_261017`，出货代贴空后缀），别让一次 `ERATW_L3_UPDATE=1` 覆盖另一代。
+         */
+        private val pasteSuffix: String
+            get() {
+                val profile = profileProbe.profile ?: return "_<档位后缀>"
+                val base = profile.constantSuffix
+                return if (profile == CorpusProfile.ERA_TW_4_981 && !isShipping4_981Generation) {
+                    base + "_4_981_261017"
+                } else {
+                    base
+                }
+            }
 
         /** 契约里的版本串形状（`4.980` / `4.981`；前后不接数字，避免吃掉 14.980 之类的长串）。 */
         private val CORPUS_VERSION_TOKEN = Regex("""(?<!\d)(4\.\d{3})(?!\d)""")
@@ -1021,20 +1061,39 @@ class L3HashChainTest {
         // **4.981 档**（[CorpusProfile] 的 constantSuffix 为空，两值逐字节未动）。新增 4.980 档常量组 ——
         // 4.980 根是 ERATW_GAMEDIR 缺省回落档（GoldenPipeline.GAME_DIR_NAME），此前在该根上跑全量 Gate
         // 必假红 1。两组值均由测试自带 ERATW_L3_UPDATE=1 在各自语料根上实测（build/l3-report.md「(b)」节粘回）：
-        //   4.981（eraTW4.981-261017-EAGLOV3）：HEAD 6b50957a5909ca4e / TAIL 277b9ad9822d4372
-        //   4.980（eratw-画蛇添足版eratw4.980）  ：HEAD 1f21ddc2dc33fa0c / TAIL a9f288b733ba362a
+        // 2026-11-17 语料换代 261017→261111 起，4.981 档**一词两代**：出货根 261111 与退役留档根
+        // 261017 的语料内容不同（`CSV/Palam.csv` 简体化等），链值逐代不同，故登记值也分两组 ——
+        // 【出货代 261111】REGISTERED_HEAD/TAIL（无后缀）；
+        // 【退役代 261017】REGISTERED_HEAD_4_981_261017/TAIL（`docs/golden-runbook.md` 的回归对拍根仍在用）。
+        // 两组值都由本测试自带 ERATW_L3_UPDATE=1 在各自语料根上实测（build/l3-report.md「(b)」节粘回），
+        // 代别判定见 `isShipping4_981Generation`（复用 boot 侧唯一权威的 NOW_VERSION 口径）。
+        // 重落顺序（免得互相覆盖）：先在退役根 261017 上重落→再在出货根 261111 上重落；
+        // 重落前先在 261017 上复跑 E2E/L3/Perf/InternedArgs 四类全绿 ⇒ 引擎语义未动，差异只来自语料内容。
+        //   4.981 · 261111（eraTW4.981-261111-EAGLOV3）：HEAD 394a1d74acf3f3a8 / TAIL 670efe87927fcc9c
+        //   4.981 · 261017（eraTW4.981-261017-EAGLOV3，退役留档）：HEAD 4adacc0ca976468c / TAIL e06fabbb1cd1fb50
+        //   4.980（eratw-画蛇添足版eratw4.980）  ：HEAD ff8a3f45c181e82c / TAIL 3cf32415615f4df2
         // 4.980 链头与 11-05/11-11 两条记录逐位一致（首节输入面未动）；链尾相对 11-05 落定值
         // -5121219222006767564 已随 origin/main 收编的语义推进重落（末节驻留/图形读数面，口径同
         // 10-30/audit-w2 条目）。本次 (a)/(f) 全绿 ⇒ 装置自洽，非装置回归。
         private const val REGISTRY_READY = true
 
-        /** 4.981 档（官方闸口径）链头/链尾登记值。 */
-        private const val REGISTERED_HEAD = 7732844912907504206L
-        private const val REGISTERED_TAIL = 2845037848597185394L
+        /** 4.981 档（官方闸口径，语料 261111）链头/链尾登记值。 */
+        private const val REGISTERED_HEAD = 4128144395393561512L
+        private const val REGISTERED_TAIL = 7426152693812415644L
+
+        /**
+         * 4.981 档的**前一语料代**（261017，2026-11-14 退役留档）链头/链尾登记值。
+         *
+         * 留这一组是有意的：261017 根至今仍是 golden 回归对拍根（`docs/golden-runbook.md`），
+         * 而本类的档位判定只按 `eraTW_Version` 认到 4.981、拆不出语料代 —— 两代语料内容差
+         * （`CSV/Palam.csv` 简体化等）会让链值整体不同，只钉一组必然在另一根上假红。
+         */
+        private const val REGISTERED_HEAD_4_981_261017 = 5393847858484364940L
+        private const val REGISTERED_TAIL_4_981_261017 = -2274410466668053680L
 
         /** 4.980 档（画蛇添足版，ERATW_GAMEDIR 缺省回落档）链头/链尾登记值。 */
-        private const val REGISTERED_HEAD_4_980 = 2243317918395005452L
-        private const val REGISTERED_TAIL_4_980 = -6200743416507517398L
+        private const val REGISTERED_HEAD_4_980 = -33144478420047828L
+        private const val REGISTERED_TAIL_4_980 = 4391893735862914546L
 
         /** 私有 `#DIM` 的归属函数键（`FuncMeta.key` 大写去重排序），喂给 [StateHash] 的 user-private 簇。 */
         private val functionKeys: List<String> =

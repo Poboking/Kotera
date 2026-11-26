@@ -5,7 +5,13 @@ import com.eratw.port.core.vars.VariableStore
 /**
  * 「约会中／路人子」现场读数（diag-datingsync）：**只读**观察口，语义零改动。
  *
- * ## 为什么要有这个口
+ * ## 领域边界（2026-11-19 兼容层解耦）
+ * 本类是**通用读数机制**：「读哪个变量、用哪个元素号、取哪一位」由 [ForensicsLayout] 注入，
+ * 取值算法本身不含任何具体 era 游戏的语料知识。eraTW 的 AutoConst 坐标集中在其宿主侧
+ * `EratwForensicsLayout`；别的 era 游戏不注入（[ForensicsLayout.DISABLED]）⇒ 本口整段
+ * isEmpty、零读取，jar 里不再携带 eraTW 语料坐标（业务零耦合铁律，era-arch-v61u.md §0）。
+ *
+ * ## 为什么要有这个口（历史取证，保留溯源）
  * 2026-11-01 两条玩家反馈的取证结论（判定链全文见 BOARD 的交 u981 一节）：
  *
  * 一、「我一个人去寺子屋，慧音却说"约会中吗？感情真好呢"」= **4.980 语料判式缺陷**。
@@ -50,20 +56,16 @@ import com.eratw.port.core.vars.VariableStore
  * 等包升 4.981 后两条还能对拍。4.981 基准取不到时（`GENSOKYO_MAP_FIX` 未声明，
  * 或 bit0 开而 `GMF_HOME_MAP` 未声明）只放弃 4.981 口径，4.980 口径照出。
  *
- * ## 常量出处（随包语料 4.980/4.981 的 AutoConst 头，只读事实；改语料必须同步这里）
+ * ## 常量出处（语料坐标现由宿主布局注入，见 EratwForensicsLayout）
+ * 下列 AutoConst 值曾硬编码于此，2026-11-19 外置；出处保留供溯源（改语料同步宿主布局）：
  * - `CFLAG_约会中 = 12`（`Headers/AutoConst_CFLAG.ERH:24`，别名表 `CSV/CFLAG.als:12`）
- * - `FLAG_约会的对象 = 73`（`Headers/AutoConst_FLAG.ERH:63`，`情事発覚.ERB` 用它传对象号）
+ * - `FLAG_约会的对象 = 73`（`Headers/AutoConst_FLAG.ERH:63`）
  * - `TFLAG_一日一回 = 199`（`Headers/AutoConst_TFLAG.ERH:124`）
  * - `TALENT_路人 = 300`（`Headers/AutoConst_Talent.ERH:249`）
- * - `CFLAG_現在位置 = 300`（`Headers/AutoConst_CFLAG.ERH:90`，`SET_CMN.ERB:331-332` 道中写入 97xx）
- * - `CFLAG_同行 = 320`（`Headers/AutoConst_CFLAG.ERH:105`，`情事発覚.ERB:682-683` 接受邀请时置 60）
- * - `TFLAG_约会道中 = TFLAG_デート道中 = 229`（`Headers/AutoConst_TFLAG.ERH:219-220`，
- *   `SET_CMN.ERB:336` 写入、`EVENTCOMEND2.ERB:62-77` 倒计时）
- * - `GENSOKYO_MAP_FIX`（`ERB/DLC/DLC.ERH:139`）与 `GMF_HOME_MAP`
- *   （`ERB/DLC/GENSOKYO_MAP_FIX/GENSOKYO_MAP_FIX.ERH:2`）都是 `#DIM SAVEDATA`
- * - 位号 9 = `EVENTTURNEND.ERB:262` 的 `GETBIT(TFLAG:一日一回, 9)` 与 SETBIT 侧同源
- * - `GETBIT` 的位算法 = `(值 shr 位) and 1`，与本包 `PureMethods` 的 GETBIT 同式
- *   （spec: FunctionMethodCreator.cs:4766-4791）
+ * - `CFLAG_現在位置 = 300`（`Headers/AutoConst_CFLAG.ERH:90`）
+ * - `CFLAG_同行 = 320`（`Headers/AutoConst_CFLAG.ERH:105`）
+ * - `TFLAG_约会道中 = 229`（`Headers/AutoConst_TFLAG.ERH:219-220`）
+ * - `GETBIT` 的位算法 = `(值 shr 位) and 1`（spec: FunctionMethodCreator.cs:4766-4791）
  * - MASTER 的角色号走 [VariableStore] 的角色指针（spec: VariableEvaluator.cs:2728-2736，
  *   数组被禁时取 -1）——负号时该行读数降级为不可用，不抛。
  *
@@ -78,7 +80,7 @@ data class DatingForensics(
     val charaNum: Int?,
     /** 满足 `CFLAG:no:约会中 != MAIN_MAP` 的角色数——4.980 语料眼里"正在约会"的人数（独处误报的分子）。 */
     val mismatchCount: Int?,
-    /** 前 [MISMATCH_DETAIL_LIMIT] 条 `no:值` 明细（与 [mismatchCount] 同生死）。 */
+    /** 前 [ForensicsLayout.mismatchDetailLimit] 条 `no:值` 明细（与 [mismatchCount] 同生死）。 */
     val mismatchDetails: List<String>?,
     /** `GETBIT(GENSOKYO_MAP_FIX, 0)`——`GMF_GETBIT("幻想乡大地图")`，4.981 基准的开关位。 */
     val gmfMapBit: Long?,
@@ -91,7 +93,7 @@ data class DatingForensics(
     val homeMap: Long?,
     /** 满足 `CFLAG:no:约会中 != 家MAP` 的角色数——4.981 `CHK_DATENOW` 眼里"正在约会"的人数。 */
     val homeMismatchCount: Int?,
-    /** 前 [MISMATCH_DETAIL_LIMIT] 条 `no:值` 明细（与 [homeMismatchCount] 同生死）。 */
+    /** 前 [ForensicsLayout.mismatchDetailLimit] 条 `no:值` 明细（与 [homeMismatchCount] 同生死）。 */
     val homeMismatchDetails: List<String>?,
     /** `TFLAG:约会道中`——道中倒计时（>1000=按回合扣、0=已到达/未在道中）。 */
     val dateTravel: Long?,
@@ -119,136 +121,135 @@ data class DatingForensics(
     /**
      * 语料侧的 `#DIM SAVEDATA` 基准（`MAIN_MAP` / `RANDOM_CHARANUM`）一个都没读到 =
      * 这行没有信息量（系统变量 `FLAG`/`CFLAG`/`TFLAG` 恒可读，会把空行填成一片 0），
-     * 出网侧据此整行省略。
+     * 出网侧据此整行省略。宿主未注入布局（[ForensicsLayout.DISABLED]）也走这里。
      */
     val isEmpty: Boolean
         get() = mainMap == null && randomCharaNum == null
 
-    /** 单行渲染：缺的字段直接不出现，`明细` 空表时只留计数。 */
-    fun render(): String = buildString {
-        append("约会现场：")
+    /**
+     * 单行渲染：缺的字段直接不出现，`明细` 空表时只留计数。
+     * 标签由宿主注入（[labels]）；core 不含任何具体游戏的展示文案。
+     */
+    fun render(labels: ForensicsLabels): String = buildString {
+        append(labels.title)
         var first = true
         fun part(text: String) {
             if (!first) append(' ')
             first = false
             append(text)
         }
-        mainMap?.let { part("MAIN_MAP=$it") }
-        gmfMapBit?.let { part("GMF位=$it") }
-        gmfHomeMap?.let { part("GMF家MAP=$it") }
-        homeMap?.let { part("家MAP=$it") }
-        mismatchCount?.let { part("约会中≠MAIN_MAP=$it/${charaNum ?: 0}") }
-        mismatchDetails?.takeIf { it.isNotEmpty() }?.let { part("明细[${it.joinToString(",")}]") }
-        homeMismatchCount?.let { part("约会中≠家MAP=$it/${charaNum ?: 0}") }
-        homeMismatchDetails?.takeIf { it.isNotEmpty() }?.let { part("家明细[${it.joinToString(",")}]") }
-        dateTravel?.let { part("约会道中=$it") }
-        masterDate?.let { part("MASTER约会中=$it") }
-        masterPos?.let { part("MASTER现在位置=$it") }
-        masterTogether?.let { part("MASTER同行=$it") }
-        affairTarget?.let { part("约会的对象=$it") }
-        targetDate?.let { part("对象约会中=$it") }
-        targetPos?.let { part("对象现在位置=$it") }
-        targetTogether?.let { part("对象同行=$it") }
-        randomCharaNum?.let { part("路人号=$it") }
-        mobTalent?.let { part("路人天赋=$it") }
-        forgetBit?.let { part("忘记位=$it") }
+        mainMap?.let { part("${labels.mainMap}=$it") }
+        gmfMapBit?.let { part("${labels.gmfBit}=$it") }
+        gmfHomeMap?.let { part("${labels.gmfHomeMap}=$it") }
+        homeMap?.let { part("${labels.homeMap}=$it") }
+        mismatchCount?.let { part("${labels.mismatch}=$it/${charaNum ?: 0}") }
+        mismatchDetails?.takeIf { it.isNotEmpty() }?.let { part("${labels.detailPrefix}[${it.joinToString(",")}]") }
+        homeMismatchCount?.let { part("${labels.homeMismatch}=$it/${charaNum ?: 0}") }
+        homeMismatchDetails?.takeIf { it.isNotEmpty() }?.let {
+            part("${labels.homeDetailPrefix}[${it.joinToString(",")}]")
+        }
+        dateTravel?.let { part("${labels.dateTravel}=$it") }
+        masterDate?.let { part("${labels.masterDate}=$it") }
+        masterPos?.let { part("${labels.masterPos}=$it") }
+        masterTogether?.let { part("${labels.masterTogether}=$it") }
+        affairTarget?.let { part("${labels.affairTarget}=$it") }
+        targetDate?.let { part("${labels.targetDate}=$it") }
+        targetPos?.let { part("${labels.targetPos}=$it") }
+        targetTogether?.let { part("${labels.targetTogether}=$it") }
+        randomCharaNum?.let { part("${labels.randomChara}=$it") }
+        mobTalent?.let { part("${labels.mobTalent}=$it") }
+        forgetBit?.let { part("${labels.forgetBit}=$it") }
     }
 
+    /** 兼容重载：用中性默认标签（[ForensicsLabels.DEFAULT]），无 eraTW 文案。 */
+    fun render(): String = render(ForensicsLabels.DEFAULT)
+
     companion object {
-        /** `CFLAG` 的 `约会中` 元素号（`AutoConst_CFLAG.ERH:24`）。 */
-        const val CFLAG_DATING: Long = 12L
-
-        /** `CFLAG` 的 `現在位置` 元素号（`AutoConst_CFLAG.ERH:90`）。 */
+        /**
+         * `CFLAG` 的 `現在位置` 元素号（eraTW `AutoConst_CFLAG.ERH:90` = 300）。
+         *
+         * **兼容锚，非通用知识**：保留仅为不打断既有装配点对 `DatingForensics.CFLAG_POSITION`
+         * 的引用（ModDX-4 M4 witness frame 读数源）。新代码一律走 [ForensicsLayout.cflagPosition]
+         * 注入；跨 era 复用时宿主提供自己的元素号。诊断本体已不再使用此常量。
+         */
+        @Deprecated(
+            "改用 ForensicsLayout.cflagPosition 注入；此常量仅为 M4 witness 装配点兼容锚，将在其迁移后移除。",
+            ReplaceWith("layout.cflagPosition"),
+        )
         const val CFLAG_POSITION: Long = 300L
-
-        /** `CFLAG` 的 `同行` 元素号（`AutoConst_CFLAG.ERH:105`）。 */
-        const val CFLAG_TOGETHER: Long = 320L
-
-        /** `FLAG` 的 `约会的对象` 元素号（`AutoConst_FLAG.ERH:63`）。 */
-        const val FLAG_AFFAIR_TARGET: Long = 73L
-
-        /** `TFLAG` 的 `约会道中` 元素号（`AutoConst_TFLAG.ERH:219-220`，`デート道中` 同号）。 */
-        const val TFLAG_DATE_TRAVEL: Long = 229L
-
-        /** `TFLAG` 的 `一日一回` 元素号（`AutoConst_TFLAG.ERH:124`）。 */
-        const val TFLAG_ONCE_PER_DAY: Long = 199L
-
-        /** `TALENT` 的 `路人` 元素号（`AutoConst_Talent.ERH:249`）。 */
-        const val TALENT_MOBGIRL: Long = 300L
-
-        /** 路人子结算位在 `TFLAG:一日一回` 里的位号（`EVENTTURNEND.ERB:262`）。 */
-        const val FORGET_BIT: Int = 9
-
-        /** `GENSOKYO_MAP_FIX` 里"幻想乡大地图"的位号（`幻想乡地图重修.ERB:417`）。 */
-        const val GMF_MAP_BIT: Int = 0
-
-        /** 明细最多几条——崩溃报告行长有限，12 条足够看出是不是"整池都脏"。 */
-        const val MISMATCH_DETAIL_LIMIT: Int = 12
     }
 }
 
 /**
- * 从活 store 取「约会中／路人子」读数（口径见 [DatingForensics] 类头）。
+ * 从活 store 按注入的 [layout] 取「约会中／路人子」读数（口径见 [DatingForensics] 类头）。
  *
+ * [layout] = [ForensicsLayout.DISABLED]（宿主非 eraTW）⇒ 整段 isEmpty、不读任何变量。
  * 崩溃线程上允许读到近似值（与 `GameHost` 既有诊断口同款取舍）；本函数**不持锁、不复制、
  * 不写任何变量**，逐格 `runCatching`，任一读不到只让那一格变 null。
  */
-fun datingForensics(store: VariableStore): DatingForensics {
-    fun read(name: String, vararg indices: Long): Long? =
-        runCatching { store.readInt(name, longArrayOf(*indices)) }.getOrNull()
+fun datingForensics(store: VariableStore, layout: ForensicsLayout): DatingForensics {
+    fun read(name: String?, vararg indices: Long): Long? =
+        if (name == null) null
+        else runCatching { store.readInt(name, longArrayOf(*indices)) }.getOrNull()
 
-    val mainMap = read("MAIN_MAP", 0L)
+    val mainMap = layout.mainMapVar?.let { read(it, layout.mainMapIndex) }
     val charaNum = runCatching { store.characters.count }.getOrNull()
 
-    // 4.981 GET_HOME_MAP()（COMMON2.ERB:92-99）的复算：GETBIT 的位算法 = (值 shr 位) and 1。
-    // 开关位读不到 ⇒ 4.981 口径整体无基准；bit0 开而 GMF_HOME_MAP 未声明同理。
-    val gmfMapBit = read("GENSOKYO_MAP_FIX", 0L)?.let { (it shr DatingForensics.GMF_MAP_BIT) and 1L }
-    val gmfHomeMap = read("GMF_HOME_MAP", 0L)
+    // 4.981 GET_HOME_MAP() 的复算：GETBIT 的位算法 = (值 shr 位) and 1。
+    // 开关位读不到 ⇒ 4.981 口径整体无基准；bit 开而家地图基准未声明同理。
+    val gmfMapBit = layout.gmfFixVar?.let { v ->
+        read(v, 0L)?.let { (it shr layout.gmfMapBit) and 1L }
+    }
+    val gmfHomeMap = layout.gmfHomeMapVar?.let { read(it, 0L) }
     val homeMap = when (gmfMapBit) {
         null -> null
         0L -> mainMap
         else -> gmfHomeMap
     }
 
-    // 判式逐字复刻语料：`情事発覚.ERB:474-475` 的 FOR 1..CHARANUM + CHK_DATENOW。
-    // 4.980 的 CHK_DATENOW(v) = (v != MAIN_MAP)；4.981 改成 (v != GET_HOME_MAP())。
-    // 各基准读不到时只放弃该口径（无基准则计数无意义）。
+    // 判式逐字复刻语料：4.980 的 CHK_DATENOW(v) = (v != MAIN_MAP)；
+    // 4.981 改成 (v != GET_HOME_MAP())。各基准读不到时只放弃该口径。
     fun mismatch(basis: Long?): Pair<Int, List<String>>? {
-        if (basis == null || charaNum == null) return null
+        val datingSlot = layout.cflagDating
+        if (basis == null || charaNum == null || datingSlot == null) return null
         return runCatching {
             val details = ArrayList<String>()
             var count = 0
             for (no in 0 until charaNum) {
-                val v = runCatching { store.readInt("CFLAG", longArrayOf(no.toLong(), DatingForensics.CFLAG_DATING)) }.getOrNull()
+                val v = runCatching {
+                    store.readInt(layout.cflagVar, longArrayOf(no.toLong(), datingSlot))
+                }.getOrNull()
                 if (v != null && v != basis) {
                     count++
-                    if (details.size < DatingForensics.MISMATCH_DETAIL_LIMIT) details += "$no:$v"
+                    if (details.size < layout.mismatchDetailLimit) details += "$no:$v"
                 }
             }
             count to details
         }.getOrNull()
     }
 
-    val mismatch = mismatch(mainMap) // 4.980 口径
-    val homeMismatch = mismatch(homeMap) // 4.981 口径
+    val mismatch = mismatch(mainMap)       // 4.980 口径
+    val homeMismatch = mismatch(homeMap)   // 4.981 口径
 
-    val master = runCatching { store.charaPointer("MASTER") }.getOrNull()
-    val masterDate = if (master != null && master >= 0) read("CFLAG", master, DatingForensics.CFLAG_DATING) else null
-    val masterPos = if (master != null && master >= 0) read("CFLAG", master, DatingForensics.CFLAG_POSITION) else null
-    val masterTogether =
-        if (master != null && master >= 0) read("CFLAG", master, DatingForensics.CFLAG_TOGETHER) else null
+    val master = runCatching { store.charaPointer(layout.masterVar) }.getOrNull()
+    fun masterCflag(slot: Long?): Long? =
+        if (master != null && master >= 0 && slot != null) read(layout.cflagVar, master, slot) else null
+    val masterDate = masterCflag(layout.cflagDating)
+    val masterPos = masterCflag(layout.cflagPosition)
+    val masterTogether = masterCflag(layout.cflagTogether)
 
-    val randomCharaNum = read("RANDOM_CHARANUM", 0L)
-    val mobTalent = randomCharaNum?.let { read("TALENT", it, DatingForensics.TALENT_MOBGIRL) }
-    val forgetBit = read("TFLAG", DatingForensics.TFLAG_ONCE_PER_DAY)?.let {
-        (it shr DatingForensics.FORGET_BIT) and 1L
+    val randomCharaNum = layout.randomCharaVar?.let { read(it, 0L) }
+    val mobTalent = randomCharaNum?.let { n ->
+        layout.talentMobgirl?.let { slot -> read(layout.talentVar, n, slot) }
     }
-
-    val dateTravel = read("TFLAG", DatingForensics.TFLAG_DATE_TRAVEL)
-
-    val affairTarget = read("FLAG", DatingForensics.FLAG_AFFAIR_TARGET)
-    fun readTarget(elem: Long): Long? =
-        if (affairTarget != null && affairTarget >= 0) read("CFLAG", affairTarget, elem) else null
+    val forgetBit = layout.tflagOncePerDay?.let { slot ->
+        read(layout.tflagVar, slot)?.let { (it shr layout.forgetBit) and 1L }
+    }
+    val dateTravel = layout.tflagDateTravel?.let { read(layout.tflagVar, it) }
+    val affairTarget = layout.flagAffairTarget?.let { read(layout.flagVar, it) }
+    fun readTarget(elem: Long?): Long? =
+        if (affairTarget != null && affairTarget >= 0 && elem != null)
+            read(layout.cflagVar, affairTarget, elem) else null
 
     return DatingForensics(
         mainMap = mainMap,
@@ -265,11 +266,17 @@ fun datingForensics(store: VariableStore): DatingForensics {
         masterPos = masterPos,
         masterTogether = masterTogether,
         affairTarget = affairTarget,
-        targetDate = readTarget(DatingForensics.CFLAG_DATING),
-        targetPos = readTarget(DatingForensics.CFLAG_POSITION),
-        targetTogether = readTarget(DatingForensics.CFLAG_TOGETHER),
+        targetDate = readTarget(layout.cflagDating),
+        targetPos = readTarget(layout.cflagPosition),
+        targetTogether = readTarget(layout.cflagTogether),
         randomCharaNum = randomCharaNum,
         mobTalent = mobTalent,
         forgetBit = forgetBit,
     )
 }
+
+/**
+ * 兼容重载：未注入布局 = [ForensicsLayout.DISABLED]，整段 isEmpty、零读取。
+ * 供尚未迁移到宿主布局的调用点安全降级；新调用一律显式传 [layout]。
+ */
+fun datingForensics(store: VariableStore): DatingForensics = datingForensics(store, ForensicsLayout.DISABLED)

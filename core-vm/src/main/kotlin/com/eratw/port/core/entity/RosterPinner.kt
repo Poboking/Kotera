@@ -135,6 +135,18 @@ class RosterPinner(
         shiftAfter(deletedIndex)
     }
 
+    /**
+     * 世界重置（接口契约）：整表清空 ⇒ 丢关系基线 + 映射重建为空（世代递增）。
+     *
+     * 本类是 MR-2b-1 的 fake 原型（判定锚，不接生产 store 的整表清空缝）；实现与生产桥
+     * [RealCharaSlotProjector.onWorldReset] 同口径，差别只在原型不持虚拟 NO 注册表
+     * （号表回收归生产桥 + [VirtualCharaNoRegistry.resetIdentities]）。
+     */
+    override fun onWorldReset() {
+        relations?.forgetAll()
+        rewrite(emptyMap())
+    }
+
     /** 大于 [deletedIndex] 的行号左移 1（两向映射同步重建）。 */
     private fun shiftAfter(deletedIndex: Int) {
         rewrite(

@@ -26,5 +26,11 @@ object ManifestFactory {
         exportedMacros = source.exportedMacros,
         artifactSha256 = source.artifactSha256,
         charaRoutes = source.charaRoutes,
+        displayName = source.displayName,
+        author = source.author,
+        description = source.description,
+        settings = source.settings,
+        declarationPositions = source.declarationPositions,
+        writeGrants = source.writeGrants,
     )
 }

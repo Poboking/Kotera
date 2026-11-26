@@ -1,5 +1,6 @@
 package com.eratw.port.core.host
 
+import com.eratw.port.core.mod.EraA3AssetOverlay
 import java.io.File
 
 /**
@@ -120,5 +121,28 @@ object SoundResourcePaths {
 
     /** 以游戏根（`Program.ExeDir` 口径）为基准：根下的 `sound/`。 */
     fun resolveInGameRoot(gameRoot: File, name: String): File? =
-        resolve(File(gameRoot, SOUND_DIR_NAME), name)
+        resolveInGameRoot(gameRoot, name, EraA3AssetOverlay.AssetMap.EMPTY)
+
+    /**
+     * 带覆盖表的游戏根解析口（ERA-A3 方案 B / 二期 B，BGM 真消费面）。
+     *
+     * 「先过侧车映射，再回落官方」：名字命中 BGM 映射且 mod 资源文件在场 ⇒ 返回 mod 文件；
+     * 否则（无映射 / 目标缺失 / 坏档空表）落回既有 [resolveInGameRoot]，逐字等同改造前。
+     * 映射目标相对 gameRoot（`mods/rt2/<pkg>.assets/<modName>`），与官方 `sound/` 同处一根，
+     * 交给播放器的是同一形态的绝对路径，下游 `FileSoundSourceResolver` 的格式闸不感知来源差异。
+     *
+     * 生产装配点在 `FileSoundSourceResolver.forGameRoot`（`FileSoundSourceResolver.kt:91`）——
+     * 该文件不在本波独占面，注入覆盖表属「需组长接线」；本口 + 上面的空表重载保证未接线时
+     * 现有 BGM 解析逐字不变。
+     *
+     * fail-closed：只认**文件在场**的映射目标（`isFile`），目标无效回落官方，不静默吞错也不崩。
+     */
+    fun resolveInGameRoot(gameRoot: File, name: String, assetOverlay: EraA3AssetOverlay.AssetMap): File? {
+        val target = assetOverlay.sound(name)
+        if (target != null) {
+            val modFile = File(gameRoot, target.resourcePath)
+            if (modFile.isFile) return modFile
+        }
+        return resolve(File(gameRoot, SOUND_DIR_NAME), name)
+    }
 }

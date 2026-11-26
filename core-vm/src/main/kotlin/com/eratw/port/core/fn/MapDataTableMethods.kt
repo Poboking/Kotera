@@ -9,6 +9,7 @@ import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.StrLiteral
 import com.eratw.port.core.expr.Value
 import com.eratw.port.core.expr.VarRef
+import com.eratw.port.core.lexer.LangKey
 import com.eratw.port.core.vars.VariableStore
 import com.eratw.port.core.xml.XmlElement
 import com.eratw.port.core.xml.XmlParseException
@@ -189,7 +190,8 @@ internal fun registerDataTableMethods(r: BuiltinRegistry) {
     // `tools/erbcc` 装载期即上屏 ParserMediator 告警（见 PairedArgLoadCheck.kt）。
     // 运行期 CodeEE 保留为**非 erbcc 装载路径**（直接 evalRef 调用 / 补丁编译装置）的兜底：
     // 对 erbc 产物相位它已成不可达防线，但删掉会让直接构造 Expr 列表的调用静默少写一对。
-    // 报错文案两侧一致（MapDataAuditTest 的审计 KDoc 登记相位差已闭合）。
+    // 报错文案两侧一致：运行期与装载期同取 `LangKey.ArgsNotFitExpr`（arity 文案族整族收编，
+    // 键与触发支见 specs/error-texts.yaml 第十二节；MapDataAuditTest 的审计 KDoc 登记相位差已闭合）。
     r.register(BuiltinMethod("DT_ROW_SET", I_, 4, -1, variadicGroup = VariadicGroup(2, 2, 5, 4), evalRef = { c, e -> dtRowSet(c, e) }) { c, a ->
         dtRowSet(c, a.toExprs())
     })
@@ -1132,7 +1134,11 @@ private fun dtRowAdd(c: BuiltinContext, e: List<Expr?>): Value {
     } else {
         var i = 1
         while (i < e.size) {
-            if (i + 1 >= e.size) throw CodeEE("函数 DT_ROW_ADD 的「列名, 值」参数个数不成对")
+            if (i + 1 >= e.size) {
+                // 官方成对变参组分支（ArgsNotFitExpr，spec: FunctionMethod.cs:191 的实参表
+                // 函数名 / 个数 / 组起点 / 组长）⇒ 与装载期 erbcc 那条同源同文（两侧一致）。
+                throw CodeEE.keyed(LangKey.ArgsNotFitExpr, "DT_ROW_ADD", e.size, 1, 2)
+            }
             // 空位实参（如 `DT_ROW_ADD "T", "C", ` 尾随逗号）在原版**解析期**就被
             // CheckArgumentTypeEx 拒绝（本函数 ArgTypeList 无 OmitStart ⇒ 缺省 -1，
             // FunctionMethodCreator.cs:2140-2155；FunctionMethod.cs:198-205
@@ -1218,7 +1224,10 @@ private fun dtRowSet(c: BuiltinContext, e: List<Expr?>): Value {
     } else {
         var i = 2
         while (i < e.size) {
-            if (i + 1 >= e.size) throw CodeEE("函数 DT_ROW_SET 的「列名, 值」参数个数不成对")
+            if (i + 1 >= e.size) {
+                // 同 [dtRowAdd]：组起点 2、组长 2（VariadicGroup(2, 2, 5, 4)）
+                throw CodeEE.keyed(LangKey.ArgsNotFitExpr, "DT_ROW_SET", e.size, 2, 2)
+            }
             // 空位实参同 [dtRowAdd] 成对形态：原版 CheckArgumentTypeEx 解析期拒绝
             //（本函数第一份 ArgTypeList 无 OmitStart ⇒ 缺省 -1，FunctionMethodCreator.cs:2168-2187；
             //FunctionMethod.cs:198-205 ⇒ ArgCanNotBeNull），运行期同文案拒绝（RESIDUE-BX2 R4）。

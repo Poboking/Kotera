@@ -1,6 +1,7 @@
 package com.eratw.port.core.mod
 
 import com.eratw.port.core.code.CodeBuilder
+import com.eratw.port.core.code.EventRegistry
 import com.eratw.port.core.code.Opcode
 import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.ResolverPolicy
@@ -16,6 +17,7 @@ import com.eratw.port.core.patch.ManifestSource
 import com.eratw.port.core.patch.ModuleDescriptor
 import com.eratw.port.core.patch.ModuleLinker
 import com.eratw.port.core.proc.FuncMeta
+import com.eratw.port.core.vars.DimSpec
 import java.util.Locale
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -38,7 +40,8 @@ import kotlin.test.assertTrue
  * - 模块体内 `CALL_SUPER` ⇒ 链接器回填前实现并置 DIRECT 位，经三表后仍回 111；
  * - 只加新函数（无覆盖）⇒ `hasOverrides=false`、`functionDispatch=null`（性能闸快路径）；
  * - 装配链路（真 Manifest 解码 + 真声明事务）→ plan 可派生；无 Mod 旁路 ⇒ null；
- * - 三表脱节（program 函数表被换小）⇒ 构造期拒绝，不留给运行期错函数。
+ * - 三表脱节（program 函数表被换小）⇒ 构造期拒绝，不留给运行期错函数；
+ * - 链接产物 catalog 随链保留（同一实例；withPrivateDims 重建路也不弃）（SUPCAT-W 判据 1）。
  */
 class ModChainRuntimePlanTest {
 
@@ -198,6 +201,50 @@ class ModChainRuntimePlanTest {
             baseMetas = baseMetas,
         )
         assertNull(ModChainRuntimePlan.of(bypass), "无 Mod 必须完全旁路")
+    }
+
+    // ------------------------------------------------------------------
+    // SUPCAT-W 判据 1：链接产物 catalog 随链保留（同一实例，派生不复制）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `plan保留链接产物catalog同一实例`() {
+        val linked = linked(listOf(overrideModule(overrideProgram(222L))))
+        val plan = ModChainRuntimePlan.of(linked)
+        assertTrue(
+            plan.catalog === linked.catalog,
+            "SUPCAT-W 判据 1：plan.catalog 必须是链接产物同一实例（只共享引用，不复制不二次装配）",
+        )
+    }
+
+    @Test
+    fun `withPrivateDims重建路径也载带catalog`() {
+        val linked = linked(listOf(overrideModule(overrideProgram(222L))))
+        // descriptor 带 privateDims ⇒ of(chain) 走 withPrivateDims 重建路：判据 1 的
+        // 「派生处保留，不再弃」必须在这条重建路上同样成立。
+        val chain = AssembledChain(
+            program = linked.program,
+            descriptors = listOf(
+                ModuleDescriptor(
+                    packageId = "mod.ovr",
+                    overrideFunctions = setOf("X"),
+                    privateDims = mapOf(
+                        "X" to listOf(DimSpec("PRIV_X", isStr = false, dims = intArrayOf())),
+                    ),
+                ),
+            ),
+            snapshot = null,
+            linked = linked,
+            eventRegistry = EventRegistry.of(linked.catalog),
+            hasOverrides = true,
+            byPassed = false,
+        )
+        val plan = requireNotNull(ModChainRuntimePlan.of(chain))
+        assertEquals(1, plan.privateDims.size, "夹具前提：privateDims 非空才走 withPrivateDims 重建路")
+        assertTrue(
+            plan.catalog === linked.catalog,
+            "重建路必须载带 catalog 同一实例（不许在 withPrivateDims 派生处弃掉）",
+        )
     }
 
     // ------------------------------------------------------------------

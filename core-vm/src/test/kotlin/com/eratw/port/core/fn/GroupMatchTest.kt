@@ -230,7 +230,9 @@ class GroupMatchTest {
         val c = ctx()
         for (name in listOf("GROUPMATCH", "NOSAMES", "ALLSAMES")) {
             val e = assertFailsWith<CodeEE> { intOf(c, name, i(1)) }
-            assertContains(e.message!!, "至少 2 个")
+            // 移植侧走 error-texts.yaml 的 NotEnoughArgs 文案（「至少需要{1}个参数」），
+            // LangKey.NotEnoughArgs；needle 逐字对齐现网，判据（抛 CodeEE）不变。
+            assertContains(e.message!!, "至少需要2个")
             assertContains(e.message!!, name)
         }
         // 空实参表：原版 NotEnoughArgs 同样先拦（TypeCheck 早于求值）

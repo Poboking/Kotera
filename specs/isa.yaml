@@ -1481,6 +1481,24 @@ instructions:
 #      真机正常出日历；1.824 口径会让「婚礼策划 → 日期」抛「GET_MONTH函数: 参数过多」。
 #      逐位：REF 形参必须是带下标的 VariableTerm 且类型匹配（:147-163）；缺失实参取 #DIM ARG 默认值 Def[i]（:167），
 #      无默认且 CompatiFuncArgOptional 关 -> 错（:168-172）；int/str 失配按 CompatiFuncArgAutoConvert 决定是否 TOSTR 包裹（:174-198）。
+#      **Def[i] 与调用点的名字形态无关**（2026-11-17 PC 实测校准）：`CALLFORM "SHOW_INT"()` 与
+#      `TRYCCALLFORM %funcName% , args` 这类运行期名调用，省略位同样取被调 `CalledFunction.Def[i]`
+#      （探针宿主 1824+v24+EMv18+EEv56+Skiav16 ⇒ `dynDefaultInt=7`、`dynDefaultStr=[abc]`）。
+#      ⇒ 移植侧把形参默认值表（侧车 `param-defaults`）**留到运行期**，在
+#      `ProcessRuntime.bindOmittedArgDefault` 的省略位顶替；编译期 `padOmittedArgs` 只覆盖
+#      「编译期能定名」的调用点（`ErbProgramCompiler.kt:2049-2050`），`CALLFORM`/`TRYCALLFORM`/
+#      `TRYCCALLFORM` 必须由运行期补，否则省略位静默落成隐式 0/""。
+#      **形参位是 #DIMF 浮点变量时（4.981 fork 第三型，见 variables.yaml 的 #DIMF）**：省略位
+#      写浮点列、整型实参按 int → float 提升写入（2026-11-17 PC 实测：`CALL DIMF_F, 0` 得 1.5、
+#      `CALL DIMF_F, 0, 2` 得 2.0）⇒ 移植侧在 `ProcessRuntime.bindOmittedArgDefault` 与
+#      `bindCallArgs` 都按 `spec.isFloat` 走 writeFloat（落 writeInt 会抛「浮点变量不能写入整数」）。
+#      **浮点实参（`CALL F, 0, 2.5`）**：PC 实测允许，且只能进浮点形参 ——
+#      `CALL DIMF_F, 0, 2.5` 得 2.5、`CALL F_ARGF2, 0, 2.5` 得 2.5；浮点实参给 int/str 形参
+#      或 `ARG`/`ARGS` 时原版装载期即拒（`CanNotConvertFloatToInt/Str`）。
+#      移植侧落地：帧模型只有整型列/字符串列 ⇒ 编译期发 `_EVAL_FLOAT`（a = 表达式池下标、
+#      b = 帧内整型槽）把值按 `doubleToRawLongBits` **位型**写槽，`CallArg.isFloat` 标记该桶位
+#      （ERBC 段 7 flags bit2），绑定点 `ProcessRuntime.floatArgValue` 重解释；失配在绑定点抛
+#      CodeEE（可观察行为与原版装载期拒绝等价）。
 #   2) UserDefinedFunctionArgument.SetTransporter UserDefinedFunctionArgument.cs:35-69 —— **按下标升序把全部实参求完值**
 #      落到 TransporterInt/Str/Ref（:37-68）。即：所有实参在调用者侧求值完毕，才开始写被调方 ARG，
 #      实参表达式里的副作用不会看到"半新半旧的 ARG 帧"。

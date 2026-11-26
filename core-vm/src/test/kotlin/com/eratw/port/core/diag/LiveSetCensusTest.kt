@@ -4,6 +4,7 @@ import com.eratw.port.core.code.Assembler
 import com.eratw.port.core.code.CodeBuilder
 import com.eratw.port.core.code.Opcode
 import com.eratw.port.core.code.SlotAddr
+import com.eratw.port.core.host.LineBufferConsoleSink
 import com.eratw.port.core.stmt.FunctionCode
 import com.eratw.port.core.stmt.InstructionStmt
 import com.eratw.port.core.stmt.VoidArgument
@@ -331,6 +332,8 @@ class LiveSetCensusTest {
             " 全局整数(实占) ", " 整数(容量行) ", " 每角色整数 ", "(已含上两列)",
             // 2026-11-15 补账：运行期代码缓存三件套（节点块/逐出/规范表/内建串池）
             "｜代码缓存：节点块 ", " 逐出 ", " 规范 ", " 串池 ",
+            // 2026-11-17 lane-o：语句缓存水位（块/逐出/钉/溢）—— 只在段尾追加
+            " 语句缓存 块 ",
         )) {
             assertTrue(frag in line, "新增标签没进账面：`$frag` → $line")
         }
@@ -365,5 +368,229 @@ class LiveSetCensusTest {
             "｜代码缓存：节点块 - 逐出 - 规范 - 串池 -" in line,
             "非惰性档四读数必须成文为 -：$line",
         )
+    }
+
+    /**
+     * 语句缓存水位（2026-11-17 lane-o-arginterner）：`CodeCacheCensus` 的
+     * `stmtBlocks/stmtEvictions/stmtPins/stmtPinOverflow` 四枚早就在册
+     * （`core-vm/src/main/kotlin/com/eratw/port/core/code/Program.kt:481-490`），代码缓存段
+     * 却只印前四枚 ⇒「`9a9446621` 的块级 LRU 上界到底生效没有」在真机上无法验证
+     * （`RUNTIME_STMT_ENTRY_BUDGET` = 1 shl 17 条 ⇒ 32 块；判据 = 块数贴 32 而逐出在涨）。
+     *
+     * 本闸钉两件事：
+     * 1. 无读数（非惰性池）四枚都成文 `-`，不是 0（0 会被读成「确为零」）；
+     * 2. 有读数时四枚逐字成文，仍在 triage 前缀行内、报告面每行不超单行闸。
+     */
+    @Test
+    fun `语句缓存水位成文且无读数给哨兵`() {
+        val none = LiveSetCensus.census(
+            programWithInstructions(2), VariableStore(), null, null, null, fullScan = false,
+        )
+        val noneLine = none.render()
+        assertTrue(
+            " 语句缓存 块 -/逐出 -/钉 -/溢 -" in noneLine,
+            "非惰性档语句缓存四枚必须成文为 -：$noneLine",
+        )
+        // 反向：既有代码缓存四键一字未动（本路只在段尾追加，不改名、不换序）。
+        assertTrue(
+            "｜代码缓存：节点块 - 逐出 - 规范 - 串池 -" in noneLine,
+            "既有四键的前缀被动了：$noneLine",
+        )
+        // 真读数形状：块数贴 32（上界已武装）、逐出清零以外的增长 = LRU 在干活。
+        val live = none.copy(
+            codeCacheStmtBlocks = 32L,
+            codeCacheStmtEvictions = 17L,
+            codeCacheStmtPins = 120L,
+            codeCacheStmtPinOverflow = 0L,
+        )
+        val line = live.render()
+        assertTrue(
+            " 语句缓存 块 32/逐出 17/钉 120/溢 0" in line,
+            "语句缓存水位没进账面：$line",
+        )
+        assertTrue(line.none { it == '\n' }, "仍然单行")
+        assertTrue(line.startsWith("Java 堆结构账面"), "行首前缀漂了：$line")
+        // 报告面：仍在最后一段里，且每行不超单行闸（超了会在报告里被剪尾）。
+        val lines = live.renderReportLines()
+        assertTrue("语句缓存 块 32" in lines.last(), "报告面缺语句缓存段：$lines")
+        for (l in lines) {
+            assertTrue(
+                l.length <= ErrorReport.LINE_MAX_CHARS,
+                "报告面成文超单行闸（${l.length}）：$l",
+            )
+        }
+    }
+
+    // ---- 报告面断行（2026-11-17 lane-g-mem）：单行 ~430 字会被 400 字闸剪掉代码缓存四键 ----
+
+    /**
+     * **定向形状闸**：报告面成文必须把账面断成多条物理行，四条代码缓存键一条不少，
+     * 且每条都不超 [ErrorReport.LINE_MAX_CHARS]。
+     *
+     * 真机三份 OOM 报告（`1794882330035-eratw-report-20261116-114529.txt:181`）里这一行以
+     * `代码缓存：节点块 …（超长截断）` 收尾：读数在、报告里没有。判据 = 报告拼装侧的
+     * `ErrorReport.clip` 按 [ErrorReport.LINE_MAX_CHARS]（400）逐行剪尾，而 `render()` 那一整行
+     * 满档 ~430 字 ⇒ 尾部 25 字（正好是四键）恒丢。
+     *
+     * 本闸只钉报告面那一口（[LiveSetCensus.Census.renderReportLines]）；`render()` 仍然是单行
+     * 给轨迹面用的，行为不变（上两条用例在钉）。
+     */
+    @Test
+    fun `报告面断行后代码缓存四键全在且每行不超单行闸`() {
+        val store = VariableStore()
+        val c = LiveSetCensus.census(programWithInstructions(2), store, null, null, null, fullScan = false)
+        val lines = c.renderReportLines()
+        val joined = lines.joinToString("\n")
+        // 行内不许有残留换行（每条元素就是一个物理行）。
+        for (l in lines) assertTrue(l.none { it == '\n' }, "元素里不许自带换行：$l")
+        // 四键一个不少，且都在最后一段里。
+        for (k in listOf("｜代码缓存：节点块 ", " 逐出 ", " 规范 ", " 串池 ")) {
+            assertTrue(k in joined, "报告面成文缺键 `$k`：$joined")
+        }
+        assertTrue(
+            "｜代码缓存：" in lines.last(),
+            "代码缓存段必须是最后一段（尾部被切就是这个形状）：$lines",
+        )
+        // 每行都不超报告单行闸 —— 超了就会在报告里被剪。
+        for (l in lines) {
+            assertTrue(
+                l.length <= ErrorReport.LINE_MAX_CHARS,
+                "报告面成文超单行闸（${l.length} > ${ErrorReport.LINE_MAX_CHARS}）：$l",
+            )
+        }
+        // 首行仍以 triage 前缀打头，续行也必须以同一前缀打头（`triage_reports.py:435-436`
+        // 的 `startswith(HEAP_CENSUS_REPORT_PREFIX)` 判段靠这个）。
+        assertTrue(lines.first().startsWith("Java 堆结构账面"), "首行前缀漂了：${lines.first()}")
+        for (l in lines.drop(1)) {
+            assertTrue(l.startsWith("Java 堆结构账面"), "续行必须仍以 triage 前缀打头：$l")
+        }
+    }
+
+    /**
+     * 反向证明的同族检查：**未断行的整串确实超闸**，所以上一条不是空断言。
+     *
+     * 真机满档读数才超；本类 fixture 的读数短（全 `-`/个位数），因此这里按真机数字量级
+     * 合成一份「同形状」的整串，验证「整串 > 400 字」这一前提成立、而按段断行后每段都合规。
+     * 真报告里的红/绿由 `ErrorReportTest` 的两条用例（含真跑的反向）钉住。
+     */
+    @Test
+    fun `真机量级的整串确实超过报告单行闸而断行后不超`() {
+        val deviceLine = "Java 堆结构账面（估算口径，非 dominator tree；对象头/对齐不计=低估，串按 UTF-16=高估串本体）" +
+            " ｜装载：函数 119163 指令 5095619 全局槽 0 表达式 357793 语句 1940630" +
+            " 物化语句 41887 物化函数 6920 扁平片驻/建 0/0" +
+            " ｜指令流常驻 0MiB 行表 0MiB 实参索引 1MiB 串池 18405 条/约 0MiB" +
+            " ｜运行：全局整数(声明) 15MiB 全局整数(实占) 15MiB 全局串格 0MiB 角色 168/容 193" +
+            " 整数(容量行) 40MiB CSTR 0MiB 每角色整数 220096B 容量冗余(已含上两列) 5MiB 驻留串表 81959 条" +
+            " ｜行缓冲：显示 1500 逻辑 74516 段 2910 待发缓冲 空" +
+            " ｜图形 Java：正号段像素 70MiB 负号段 CSV 22MiB" +
+            " ｜代码缓存：节点块 256 逐出 16 规范 131072 串池 4096"
+        assertTrue(
+            deviceLine.length > ErrorReport.LINE_MAX_CHARS,
+            "真机量级整串应当超过 ${ErrorReport.LINE_MAX_CHARS} 字，实际 ${deviceLine.length} 字（前提失效）",
+        )
+        // 按段界断行（与 renderReportLines 同一口径：320 字预算）后，每行都合规。
+        val budget = 320
+        val segs = deviceLine.split(" ｜").let { listOf(it.first()) + it.drop(1).map { s -> " ｜$s" } }
+        val built = ArrayList<String>()
+        var cur = ""
+        for (s in segs) {
+            if (cur.isNotEmpty() && cur.length + s.length > budget) {
+                built.add(cur)
+                cur = "Java 堆结构账面（续）"
+            }
+            cur += s
+        }
+        if (cur.isNotEmpty()) built.add(cur)
+        assertTrue(built.size >= 2, "断行没生效：$built")
+        for (l in built) {
+            assertTrue(
+                l.length <= ErrorReport.LINE_MAX_CHARS,
+                "断行后仍超闸（${l.length}）：$l",
+            )
+        }
+        assertTrue("｜代码缓存：节点块 256" in built.last(), "四键得落在断行后的某一行里：$built")
+    }
+
+    // ---- 行缓冲字节下界（2026-11-17 lane-i）----
+
+    /**
+     * [LiveSetCensus.Census.displayTextChars] 必须等于同一次 `console.lines()` 快照里逐段
+     * `text.length` 之和，且 `fullScan=false` 时与 [LiveSetCensus.Census.displaySegmentCount]
+     * 同为 -1（热路径不取、不半报）。
+     *
+     * 为什么要这条：真机三份 OOM 报告（Xiaomi 24069RA21C）的行缓冲只有
+     * 「显示 1500 逻辑 74516 段 2910」三个计数（`1794882330035-eratw-report-20261116-114529.txt:181`），
+     * **一个字节都没有** ⇒ 「行缓冲是不是那几百 MiB」在真机上既证不实也证不伪。本条把字节
+     * 下界接进账面（`chars × 2` 覆盖 `String` 载荷，`Segment` 对象头另计），下一份真机报告即可直判。
+     */
+    @Test
+    fun `行缓冲字符总数等于段内字符之和且关闭 fullScan 时给哨兵`() {
+        val console = LineBufferConsoleSink(clientWidth = 200)
+        console.printLine("一二三")
+        console.printLine("四五")
+        val expected = console.lines().sumOf { line -> line.segments.sumOf { it.text.length.toLong() } }
+        assertTrue(expected >= 5L, "夹具自身应至少有 5 个字：$expected")
+
+        val full = LiveSetCensus.census(null, null, console, null, null, fullScan = true)
+        assertEquals(expected, full.displayTextChars, "字符总数必须逐字等于逐段 text.length 之和")
+        assertTrue(full.displaySegmentCount >= 2L, "两行至少两段：${full.displaySegmentCount}")
+        assertTrue(
+            " 字 $expected/约 " in full.render(),
+            "成文缺行缓冲字符读数：${full.render()}",
+        )
+
+        val light = LiveSetCensus.census(null, null, console, null, null, fullScan = false)
+        assertEquals(-1L, light.displayTextChars, "热路径不取，给 -1 而不是 0")
+        assertEquals(-1L, light.displaySegmentCount, "段数口径同源，也必须给 -1")
+    }
+
+    // ---- 运行期串池字节（2026-11-17 lane-k）：条数之外必须有「串本体有多大」的一枚读数 ----
+
+    /**
+     * [LiveSetCensus.Census.strTableChars] 必须**逐字等于**池内各条 `length` 之和（含下标 0 空串=0），
+     * 成文里带这枚读数，且**热路径（fullScan=false）照取**——它是 `StringTable` 自维护的 O(1)
+     * 标量，不像装载侧 [LiveSetCensus.Census.stringPoolChars] 那样要整册扫一遍。同一用例里
+     * 两个口径都钉住：串池字符恒取，装载侧那份关闭全扫时给哨兵 -1（后半句由夹具 store 为空
+     * 时的哨兵与本用例的 light 段一起证）。
+     *
+     * 为什么要这一枚：真机三份 OOM 报告（Xiaomi 24069RA21C）读到 **96,168 条**
+     * （`1794882327778-eratw-report-20261116-011748.txt`），而账面自己写着「串本体字节读不到」
+     * （`LiveSetCensus.kt:317-320` 的 KDoc）⇒ 若真机存的是整行长文本，量级会从桌面尺的
+     * ≈24 MiB 跳到数百 MiB，正是 512 MiB 里那 380 MiB 无名差额的唯一候选量级；没有这一枚，
+     * 那一问在真机上既证不实也证不伪。
+     *
+     * 断言的是基准哪几行：`1794882330035-eratw-report-20261116-114529.txt:181` 那行账面的
+     * `驻留串表 81959 条`（本条就在它后面追加 `串池字符 <n>/约 <m>MiB`），桌面尺见
+     * `StringTable.kt:18-27`（90,625 条 / 23.0 MiB ⇒ ≈266 B/条）与 `LiveSetCensus.kt` 字段 KDoc。
+     */
+    @Test
+    fun `串池字符总数等于池内各条长度之和且成文带读数`() {
+        val store = VariableStore()
+        // 夹具只入四条短串（不改语料、不造大夹具）：逐字断言和，比阈值断言更能咬住增量维护的漏项。
+        val seeded = listOf("一", "二十二", "三三三", "", "四十四四")
+        for (s in seeded) store.pool.intern(s)
+        val expected = store.pool.charsTotal
+        var walk = 0L
+        for (i in 0 until store.pool.distinctCount) walk += store.pool.lookup(i).length.toLong()
+        assertTrue(walk >= 11L, "夹具自身应至少 11 个字（下标 0 空串贡献 0）：$walk")
+        assertEquals(walk, expected, "增量维护的 charsTotal 必须逐字等于逐条 length 之和")
+
+        val full = LiveSetCensus.census(null, store, null, null, null, fullScan = true)
+        assertEquals(expected, full.strTableChars, "账面读数必须等于池的真实字符总数")
+        assertEquals(store.pool.distinctCount.toLong(), full.strTableEntries, "条数与字符数同源同快照")
+        assertTrue(
+            " 串池字符 $expected/约 " in full.render(),
+            "成文缺串池字符读数：${full.render()}",
+        )
+
+        // 热路径照取（O(1) 标量不分档）；装载侧那枚仍需 fullScan，关闭时给哨兵。
+        val light = LiveSetCensus.census(null, store, null, null, null, fullScan = false)
+        assertEquals(expected, light.strTableChars, "O(1) 标量热路径也应给读数，不是 -1")
+        assertEquals(-1L, light.stringPoolChars, "装载侧整册扫描的口径不变：关闭全扫给 -1")
+        assertTrue(" 串池字符 $expected/约 " in light.render(), "热路径成文同样要带这枚读数：${light.render()}")
+
+        // 无会话给哨兵（不是 0 条）。
+        val none = LiveSetCensus.census(null, null, null, null, null, fullScan = false)
+        assertEquals(-1L, none.strTableChars, "无 store ⇒ -1，不许给 0")
     }
 }

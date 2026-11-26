@@ -27,4 +27,8 @@ dependencies {
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     maxHeapSize = "1g"
+    // 作者面快照自刷新旋钮：命令行 -D 只进 Gradle 进程，fork 出去的 test worker 读不到，
+    // 必须显式转发（与 :tools:modgen 的 eratw.refreshPackFixture 同一形态）。
+    // 未置位时转发 "false"，测试行为与只读模式完全一致。
+    systemProperty("eratw.refreshApiSurface", System.getProperty("eratw.refreshApiSurface") ?: "false")
 }

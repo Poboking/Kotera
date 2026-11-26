@@ -289,7 +289,7 @@ interface ConsoleSink {
      *
      * 与原版的关系：原版 `EmueraConsole.Await`（EmueraConsole.cs:840-856）在脚本线程里
      * 强制重绘，长链中途没有等价的绘制点；本方法不是新增原版语句，也不进入
-     * `Process.cs:470-489` 的死循环判据。宿主调用频率与停顿由自己的检查点决定。
+     * `Process.cs:481-515`（skia；官方 `:493-512`）的死循环判据。宿主调用频率与停顿由自己的检查点决定。
      *
      * 缺省 no-op：headless 装置 / golden 管线 / 不追踪显示行的宿主零改动。
      * 委托型宿主（[ConsoleBridge]）必须转发，否则真机永远走缺省空实现。

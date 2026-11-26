@@ -91,6 +91,13 @@ class SaveTransaction(
     /** recover 的收口结果；NoJournal 明确表示根本没调用 plan。 */
     sealed interface RecoveryResult {
         data object NoJournal : RecoveryResult
+
+        /**
+         * journal 在盘上但解不开（写入中途被杀的撕裂字节 / 外力损坏）：三候选判定
+         * 无法成立，交宿主按隔离出口处理（[quarantineTornJournal]），不静默当无 journal。
+         */
+        data class TornJournal(val reason: String) : RecoveryResult
+
         data class Decided(val journal: Journal, val plan: RecoveryPlan) : RecoveryResult
     }
 
@@ -118,6 +125,12 @@ class SaveTransaction(
         private const val JOURNAL_MAGIC = 0x4a525432
         private const val JOURNAL_VERSION = 1
 
+        /**
+         * 隔离件重名探测的试探上限：防病态盘面（大量同名 `.torn-N`）把改名循环变成死循环。
+         * 触顶 = 隔离失败 = 调用方 fail-closed，不静默覆盖任何一件。
+         */
+        private const val MAX_TORN_COPIES = 64
+
         /** 把 Journal 确定性序列化为字节，RT2 自研、无 C# 锚、TODO(verify)。 */
         fun encodeJournal(journal: Journal): ByteArray {
             val buf = ByteArrayOutputStream()
@@ -140,7 +153,12 @@ class SaveTransaction(
             return buf.toByteArray()
         }
 
-        /** 反序列化；字节损坏或形态不符一律抛，恢复期 fail-closed，不静默当无 journal。 */
+        /**
+         * 反序列化；字节损坏或形态不符一律抛（不静默当无 journal）。
+         * 「抛」只表示「这不是一份可判定的 journal」；撕裂现场如何放行归
+         * [SaveTransaction.recover] 的 TornJournal 分支与 [quarantineTornJournal] 隔离出口，
+         * 本函数不做任何 I/O 决策。
+         */
         fun decodeJournal(bytes: ByteArray): Journal {
             val input = DataInputStream(ByteArrayInputStream(bytes))
             require(input.readInt() == JOURNAL_MAGIC) { "journal 魔数不符" }
@@ -185,8 +203,36 @@ class SaveTransaction(
         val members = memberJournals(request)
 
         // 1. 空间预算：写第一份 .part 之前的唯一放行门，不许先写再检查。
+        //    口径 = 只有「确知不足」才拒绝：探测抛已知异常（SecurityException / IOException）
+        //    或读数未知都放行并留痕
+        //    （端口契约见 SaveTransactionIo.availableBytes）。0.2.48 真机开局 SAVEGLOBAL
+        //    失败正是这条路上 Files.getFileStore 在 Android 恒抛 SecurityException、
+        //    直接穿透 execute 打死整笔事务；计量源读不到 ≠ 没空间，真写不下时第 3 步
+        //    落盘仍带着路径 fail-closed，漏判代价只是晚一步报。
         val required = requiredBytes(request)
-        val available = io.availableBytes()
+        val available = try {
+            io.availableBytes()
+        } catch (t: SecurityException) {
+            // Android libcore 的 Files.getFileStore 恒抛它；权限被削也是它的子类面。
+            SaveDiagnostics.note(
+                "SAVETX", journalPath,
+                "空间探测抛 ${t.javaClass.name}: ${t.message}；按未知放行，不以计量异常否决存档",
+            )
+            SaveTransactionIo.AVAILABLE_UNKNOWN
+        } catch (t: java.io.IOException) {
+            // 外部根 / document provider 取用量失败：同样只是「读不到」。
+            SaveDiagnostics.note(
+                "SAVETX", journalPath,
+                "空间探测抛 ${t.javaClass.name}: ${t.message}；按未知放行，不以计量异常否决存档",
+            )
+            SaveTransactionIo.AVAILABLE_UNKNOWN
+        }
+        if (available == SaveTransactionIo.AVAILABLE_UNKNOWN) {
+            SaveDiagnostics.note(
+                "SAVETX", journalPath,
+                "空间预算按未知放行 transactionId=${request.transactionId} 需要=${required}B",
+            )
+        }
         if (available < required) {
             return ExecuteResult.Rejected(
                 "存档事务空间预算不足: transactionId=${request.transactionId} " +
@@ -201,7 +247,19 @@ class SaveTransaction(
         // 2. 事务身份 / 前置闸：只对「同一事务的 COMMITTED」走幂等；其它残留 journal——
         //    已提交的视为清理残留（删 journal 后继续本次保存），未完成的必须先 recover，
         //    拒绝开始新事务（fail-closed，不覆盖可恢复的 journal）。
-        val existing = readJournal()
+        val existing = try {
+            readJournal()
+        } catch (ignore: Exception) {
+            // 撕裂 journal（见 [quarantineTornJournal]）：隔离后按无 journal 放行 —— 本次
+            // 保存本来就要整对重写并逐字节校验，等于顺手治愈撕裂窗口内的任何半配对。
+            if (quarantineTornJournal("SAVETX") == null) {
+                return ExecuteResult.Rejected(
+                    "journal 不可解码且隔离失败: ${ignore.javaClass.simpleName}: ${ignore.message}；" +
+                        "拒绝覆盖不可判定现场（先恢复/隔离 journal 再保存）",
+                )
+            }
+            null
+        }
         if (existing != null) {
             when {
                 existing.commitState == CommitState.COMMITTED &&
@@ -299,7 +357,22 @@ class SaveTransaction(
      */
     fun recover(): RecoveryResult {
         val bytes = io.read(journalPath) ?: return RecoveryResult.NoJournal
-        val journal = decodeJournal(bytes)
+        return recoverDecoded(bytes)
+    }
+
+    /**
+     * [recover] 的实体（拆出只为 detekt ReturnCount 闸内）：journal 是原地截断写
+     * （[SaveTransactionIo.write] 无临时文件），进程被杀在 PREPARED / BACKED_UP /
+     * COMMITTED 三次 journal 重写的写入中途就留下半截字节。解码失败 = 没有任何 plan
+     * 能从垃圾字节推出成员与状态 = 不可判定态；隔离出口（见 [quarantineTornJournal]）
+     * 负责「不覆盖」语义的兑现，这里只判定。
+     */
+    private fun recoverDecoded(bytes: ByteArray): RecoveryResult {
+        val journal = try {
+            decodeJournal(bytes)
+        } catch (ignore: Exception) {
+            return RecoveryResult.TornJournal("${ignore.javaClass.simpleName}: ${ignore.message}")
+        }
         val observations = journal.members.map { m ->
             MemberObservation(
                 m.target,
@@ -311,6 +384,37 @@ class SaveTransaction(
         events += EV_PLAN_INVOKED
         val plan = SaveRecovery.plan(journal, observations)
         return RecoveryResult.Decided(journal, plan)
+    }
+
+    /**
+     * 撕裂 journal 的隔离出口：改名成 `.torn`（重名依次 `.torn-1`、`.torn-2`…）保留在盘上
+     * 供取证，目标文件一个不动。返回隔离后的路径；隔离失败（rename 被拒）返回 null，
+     * 调用方按 Halt / Rejected 收口（拒绝覆盖不可判定现场），不静默当无 journal。
+     *
+     * 为什么「隔离放行」而不是永久拒绝：撕裂 journal 是不可判定态（没有 plan 能成立），
+     * 原样保留 = 此后每一次存/读档在同一处永久失败且无出口，一次写入中断升级成
+     * 「这个存档域再也存不进」。安全性按写序论证：journal 撕裂只可能发生在三次 journal
+     * 重写的写入中途 —— PREPARED 撕 ⇒ 目标一个没动；BACKED_UP 撕 ⇒ 目标一个没动
+     （定序替换在其后）；COMMITTED 撕 ⇒ 双替换已完成且逐字节校验通过（新配对就是完好现场）。
+     * 三种现场都允许「目标原样 + 残件留给下一次事务自然轮转」；下一次保存本来就要整对
+     * 重写并逐字节校验，等于顺手治愈撕裂窗口内可能留下的任何半配对。
+     */
+    internal fun quarantineTornJournal(op: String): String? {
+        var quarantine = "$journalPath.torn"
+        var n = 0
+        while (io.read(quarantine) != null && n < MAX_TORN_COPIES) {
+            n++
+            quarantine = "$journalPath.torn-$n"
+        }
+        if (io.read(quarantine) != null) return null
+        return try {
+            io.rename(journalPath, quarantine)
+            SaveDiagnostics.note(op, journalPath, "journal 不可解码，已隔离改名 → $quarantine")
+            quarantine
+        } catch (ignore: Exception) {
+            SaveDiagnostics.report(op, journalPath, "journal-quarantine", ignore)
+            null
+        }
     }
 
     private fun memberJournals(request: Request): List<MemberJournal> =

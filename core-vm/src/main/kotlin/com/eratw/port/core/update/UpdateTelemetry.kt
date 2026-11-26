@@ -394,6 +394,48 @@ class UpdateTelemetry(
         return null
     }
 
+    /**
+     * 单个十六进制字符的数值；非十六进制返回 null（供 [decodeUnicodeEscape] 判四位是否合法）。
+     * 数值常量与位移集中在 [companion object]，避免散落的魔数。
+     */
+    private fun hexDigit(c: Char): Int? = when (c) {
+        in '0'..'9' -> c.code - HEX_ZERO
+        in 'a'..'f' -> c.code - HEX_LOWER_A + HEX_RADIX
+        in 'A'..'F' -> c.code - HEX_UPPER_A + HEX_RADIX
+        else -> null
+    }
+
+    /**
+     * 解 [quote] 写出的 uXXXX 四位十六进制转义：[at] 是反斜杠的下标，其下一字符为 'u'。
+     * 合法（四位都在界内且均为十六进制）返回对应 Char；不足四位或含非法字符返回 null。
+     *
+     * 用 [HEX_NIBBITS] 逐位左移拼装：每四位一档，四档共十六位，正好一个 UTF-16 code unit。
+     */
+    private fun decodeUnicodeEscape(s: String, at: Int): Char? =
+        if (at + UNICODE_ESCAPE_LEN > s.length) {
+            null
+        } else {
+            val digits = (0 until UNICODE_HEX_DIGITS).map { hexDigit(s[at + 2 + it]) }
+            if (digits.any { it == null }) {
+                null
+            } else {
+                digits.fold(0) { acc, d -> (acc shl HEX_NIBBITS) or (d ?: 0) }.toChar()
+            }
+        }
+
+    /**
+     * [quote] 的严格逆：把转义序列还原成原字符（n/r/t、反斜杠自身与四十六进制位的 uXXXX）。
+     *
+     * [quote] 把 0x00 至 0x1F 中除 n/r/t 外的控制字符写成六字符的 uXXXX；这里对称地把四位
+     * 十六进制还原成对应 Char，使任意字段经 [quote] 写、经 [parseLine] 读后逐字一致。
+     *
+     * 保守口径：u 后若非合法四位十六进制（不足四位或含非十六进制字符），按既有 else 口径
+     * 处理 —— 只把 u 还原成字面 u 并消耗反斜杠与 u 两个字符，其余字符按普通字符逐个 append。
+     * 这样不吞后文、不越界，坏输入也不会借机改变语义；等价于本波之前的行为，不回退既有读数。
+     *
+     * TODO(verify)：本遥测上报链是移植自造，无 C# 原版锚；该缺陷严重度低、不影响统计聚合，
+     * 仅影响单行字符串维度的完整性。
+     */
     private fun unescape(s: String): String {
         if ('\\' !in s) return s
         val sb = StringBuilder(s.length)
@@ -409,6 +451,15 @@ class UpdateTelemetry(
                 'n' -> sb.append('\n')
                 'r' -> sb.append('\r')
                 't' -> sb.append('\t')
+                'u' -> {
+                    val decoded = decodeUnicodeEscape(s, i)
+                    if (decoded == null) {
+                        sb.append('u')
+                    } else {
+                        sb.append(decoded)
+                        i += UNICODE_TAIL_SKIP // 循环末尾还会 +2，合计吃掉反斜杠 u 与四位十六进制
+                    }
+                }
                 else -> sb.append(d)
             }
             i += 2
@@ -417,6 +468,16 @@ class UpdateTelemetry(
     }
 
     companion object {
+        // 十六进制解码常量（[hexDigit] / [decodeUnicodeEscape] 共用；避免散落魔数）。
+        private const val HEX_ZERO = '0'.code
+        private const val HEX_LOWER_A = 'a'.code
+        private const val HEX_UPPER_A = 'A'.code
+        private const val HEX_RADIX = 10          // a/A 比 0 多出的量：'a' - '0' = 10 + ('a' - 'a') 的基准
+        private const val HEX_NIBBITS = 4        // 一个十六进制位 = 4 bit
+        private const val UNICODE_HEX_DIGITS = 4 // uXXXX 的四位
+        private const val UNICODE_ESCAPE_LEN = 6 // 一个 uXXXX 转义共 6 字符（反斜杠 u + 四位）
+        private const val UNICODE_TAIL_SKIP = 4  // 成功解码后循环内额外跳过的四位数位（末尾还 +2）
+
         /** 缓冲上限（条）：一两次会话的量，整批 POST 一趟就走。 */
         const val MAX_BUFFER = 32
 

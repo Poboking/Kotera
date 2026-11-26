@@ -85,16 +85,51 @@ private val INTERACTION_PHASES: Map<String, InteractionPhase> =
     enumValues<InteractionPhase>().associateBy { it.name }
 private val JOB_CATCH_UPS: Map<String, JobCatchUp> = enumValues<JobCatchUp>().associateBy { it.name }
 
+/** settings 段的判别 enum 名表（精确匹配，不做大小写归一）。 */
+private val SETTING_TYPES: Map<String, SettingType> = enumValues<SettingType>().associateBy { it.name }
+
 /**
  * 声明事务的确定性 Manifest 载体（era-arch-v61u.md §5 / §12.1 / §20.4；RT2 自研文件形态，
  * C# 原版无对应物，权威 = 蓝图 §5 与 §20.4 加 DeclarationRegistry.kt 的 DeclarationDomain
  * 加 ExtensionDeclarations.kt 的构造期约束，见交付 TODO(verify) 卡点）。
  *
- * 格式版本 RT2MANIFEST/3：共 18 个必选段，覆盖 [ModuleDescriptor] 全部字段。
+ * 格式版本：基础形 RT2MANIFEST/3 共 18 个必选段，覆盖 [ModuleDescriptor] 的全部基础字段。
  * 原 13 个内容段（meta 至 relationship-schemas）加新增 3 段 hooks、interaction-hooks、
  * phase-jobs（承载 §20/§21.1 五类声明）加末尾 2 个元数据段 exported-macros、artifact-sha256。
+ *
+ * 增量版本（向后兼容的「可选段」策略，解码器同时接受旧版）：
+ * - `RT2MANIFEST/4`：meta 段 5 值（多出 displayName / author / description 三个展示元数据），
+ *   只在三字段任一非空时写；三字段全空仍写 `/3`，既有资产逐字节不变。
+ * - `RT2MANIFEST/5`：在 `/4` 的 18 段之后追加第 19 段 `settings`（作者声明的 per-mod 设置项，
+ *   RT2 per-mod 配置面）。**只有真的声明了 setting 的包才升 `/5`**；`settings` 为空时仍按
+ *   `/3` / `/4` 的既有规则落盘，保持既有资产零变化的最小面。`/5` 的 meta 段恒为 5 值
+ *   （展示元数据全空也写三个空串），保证段内字段数可判定、不靠猜。
+ * - `RT2MANIFEST/6`：在 `/5` 的 19 段之后追加第 20 段 `min-api`（单整数 = 作者声明的
+ *   运行期引擎 API 版本闸，ModDX-2 DX2-B，语义见 [ModuleDescriptor.minApi]）。
+ *   **只有真的声明了 min-api（非 0）的包才升 `/6`**；`minApi == 0` 时仍按 `/3` / `/4` / `/5`
+ *   的既有规则落盘，旧 manifest 逐字节零变化。`/6` 的 meta 段恒 5 值、`settings` 段恒在场
+ *   （未声明也写计数 0）——沿用 `/5`「段内字段数可判定、不靠猜」的同一口径；`min-api` 段
+ *   追加在末尾 ⇒ `/3` / `/4` / `/5` 的前缀字节不变。负值由 [ModuleDescriptor] 构造期
+ *   fail-closed 拒（decode 期经 `guarded` 归一成格式异常），非整数由读侧整数字面量闸拒。
+ * - `RT2MANIFEST/7`：在 `/6` 的 20 段之后追加第 21 段 `declaration-positions`（Map：
+ *   声明键到 `文件:行号`，ModDX-3 DX3-C，语义见 [ModuleDescriptor.declarationPositions]）。
+ *   **只有真的声明了位置的包才升 `/7`**；位置表空时仍按 `/3` / `/4` / `/5` / `/6` 的既有
+ *   规则落盘，旧 manifest 逐字节零变化。`/7` 的 meta 段恒 5 值、`settings` 段恒在场、
+ *   `min-api` 段恒在场（未声明也写计数 0 / 闸值 0）——沿用 `/5` / `/6`「段内字段数可判定、
+ *   不靠猜」的同一口径；`declaration-positions` 段追加在末尾 ⇒ `/3` / `/4` / `/5` / `/6`
+ *   的前缀字节不变。位置值原样承载，core 侧不解析、不猜、不从 Kotlin 反射造行号。
+ * - `RT2MANIFEST/8`：在 `/7` 的 21 段之后追加第 22 段 `write-grants`（作者声明的原版全局
+ *   变量受控写授权，ModDX4-B1，语义见 [ModuleDescriptor.writeGrants] 与
+ *   [WriteGrantDeclaration]）。**只有真的声明了授权的包才升 `/8`**；授权表空时仍按
+ *   `/3` / `/4` / `/5` / `/6` / `/7` 的既有规则落盘，旧 manifest 逐字节零变化。`/8` 的
+ *   meta 段恒 5 值、`settings` / `min-api` / `declaration-positions` 段恒在场（未声明也写
+ *   计数 0 / 闸值 0 / 空表）——沿用 `/5` / `/6` / `/7`「段内字段数可判定、不靠猜」的同一
+ *   口径；`write-grants` 段追加在末尾 ⇒ `/3` / `/4` / `/5` / `/6` / `/7` 的前缀字节不变。
+ *   键存在性与类型校验归装载相位（写授权注册表构造点），本编解码层只保证往返保真。
+ *
  * 旧档 RT2MANIFEST/1 与 RT2MANIFEST/2 在解码首行即明示拒载并给迁移提示，不静默兼容、
- * 不猜缺段、不双版本各写解析；编码只产 RT2MANIFEST/3。
+ * 不猜缺段、不双版本各写解析；/3 /4 /5 /6 /7 /8 走**同一份**段表驱动解码（版本只决定
+ * 「meta 段几值 + 有没有第 19/20/21/22 段」），不复制第二套解析。
  *
  * phase-jobs 段用判别 tag（B0 = Phase，B1 = Job，B2 = JobTemplate）同时承载
  * [PhaseDeclaration] / [JobDeclaration] / [JobTemplateDeclaration]；五类声明每条构造都包在
@@ -126,6 +161,54 @@ object ManifestCodec {
 
     private const val MAGIC = "RT2MANIFEST/3"
 
+    /**
+     * 元数据版（meta 段 5 值：packageId / version / displayName / author / description）。
+     *
+     * **只在有展示元数据时才写 /4**：三字段全空仍写 `/3`，既有资产逐字节不变。解码器两版
+     * 都收（/1、/2 继续拒载），所以玩家机器上已导入的 `/3` 包与随包 `/4` 资产可以共存。
+     */
+    private const val MAGIC_META = "RT2MANIFEST/4"
+
+    /**
+     * 设置项版（`/4` 的 18 段之后追加第 19 段 `settings`；meta 段恒 5 值）。
+     *
+     * **只有声明了 setting 的包才写 `/5`**：`settings` 空时按 `/3` / `/4` 的既有规则落盘，
+     * 既有资产逐字节不变。解码器接受 `/3` / `/4` / `/5` 三版；`/1` / `/2` 继续拒载。
+     */
+    private const val MAGIC_SETTINGS = "RT2MANIFEST/5"
+
+    /**
+     * 引擎 API 版本闸版（`/5` 的 19 段之后追加第 20 段 `min-api`；meta 段恒 5 值、
+     * `settings` 段恒在场）。语义见 [ModuleDescriptor.minApi] 与类 KDoc 增量版本节。
+     *
+     * **只有声明了 min-api（非 0）的包才写 `/6`**：`minApi == 0` 时按 `/3` / `/4` / `/5`
+     * 的既有规则落盘，旧 manifest 逐字节不变。解码器接受 `/3` / `/4` / `/5` / `/6` 四版；
+     * `/1` / `/2` 继续拒载。
+     */
+    private const val MAGIC_MINAPI = "RT2MANIFEST/6"
+
+    /**
+     * 逐条声明源位置版（`/6` 的 20 段之后追加第 21 段 `declaration-positions`；meta 段恒 5 值、
+     * `settings` 与 `min-api` 段恒在场）。语义见 [ModuleDescriptor.declarationPositions] 与类
+     * KDoc 增量版本节。
+     *
+     * **只有声明了位置（映射非空）的包才写 `/7`**：空表时按 `/3` / `/4` / `/5` / `/6` 的既有
+     * 规则落盘，旧 manifest 逐字节不变。解码器接受 `/3` / `/4` / `/5` / `/6` / `/7` 五版；
+     * `/1` / `/2` 继续拒载。
+     */
+    private const val MAGIC_POSITION = "RT2MANIFEST/7"
+
+    /**
+     * 受控写授权版（`/7` 的 21 段之后追加第 22 段 `write-grants`；meta 段恒 5 值、
+     * `settings` / `min-api` / `declaration-positions` 段恒在场）。语义见
+     * [ModuleDescriptor.writeGrants] 与类 KDoc 增量版本节。
+     *
+     * **只有声明了授权（清单非空）的包才写 `/8`**：空表时按 `/3` / `/4` / `/5` / `/6` / `/7`
+     * 的既有规则落盘，旧 manifest 逐字节不变。解码器接受 `/3` / `/4` / `/5` / `/6` / `/7`
+     * / `/8` 六版；`/1` / `/2` 继续拒载。
+     */
+    private const val MAGIC_GRANTS = "RT2MANIFEST/8"
+
     /** 顶层段顺序（固定；读侧逐项严格期望，乱序或缺段即拒）。 */
     private val SECTIONS = listOf(
         "meta",
@@ -148,14 +231,46 @@ object ManifestCodec {
         "artifact-sha256",
     )
 
+    /** `/5` 的段表 = `/3` / `/4` 的 18 段 + 末段 `settings`（前缀逐字节不变，只追加）。 */
+    private val SETTINGS_SECTIONS = SECTIONS + "settings"
+
+    /** `/6` 的段表 = `/5` 的 19 段 + 末段 `min-api`（前缀逐字节不变，只追加）。 */
+    private val MINAPI_SECTIONS = SETTINGS_SECTIONS + "min-api"
+
+    /** `/7` 的段表 = `/6` 的 20 段 + 末段 `declaration-positions`（前缀逐字节不变，只追加）。 */
+    private val POSITION_SECTIONS = MINAPI_SECTIONS + "declaration-positions"
+
+    /** `/8` 的段表 = `/7` 的 21 段 + 末段 `write-grants`（前缀逐字节不变，只追加）。 */
+    private val GRANT_SECTIONS = POSITION_SECTIONS + "write-grants"
+
     /** 把一个描述符编码成确定性 Manifest 字节流。 */
     fun encode(d: ModuleDescriptor): ByteArray {
         val w = Writer()
-        w.line(MAGIC)
+        val hasGrants = d.writeGrants.isNotEmpty()
+        val hasPositions = hasGrants || d.declarationPositions.isNotEmpty()
+        val hasMinApi = hasPositions || d.minApi != 0
+        val hasSettings = hasMinApi || d.settings.isNotEmpty()
+        val hasMetadata =
+            hasSettings || d.displayName.isNotEmpty() || d.author.isNotEmpty() || d.description.isNotEmpty()
+        w.line(
+            when {
+                hasGrants -> MAGIC_GRANTS
+                hasPositions -> MAGIC_POSITION
+                hasMinApi -> MAGIC_MINAPI
+                d.settings.isNotEmpty() -> MAGIC_SETTINGS
+                hasMetadata -> MAGIC_META
+                else -> MAGIC
+            },
+        )
 
         w.head("meta")
         w.str(d.packageId)
         w.str(d.version)
+        if (hasMetadata) {
+            w.str(d.displayName)
+            w.str(d.author)
+            w.str(d.description)
+        }
         w.tail()
 
         w.head("requires")
@@ -230,11 +345,104 @@ object ManifestCodec {
         w.str(d.artifactSha256)
         w.tail()
 
+        // 第 19 段（/5 恒写非空表；/6 也恒写——未声明也写计数 0，段数可判定、不靠猜）。
+        // 段追加在末尾 ⇒ /3 /4 的前缀字节不变。
+        if (hasSettings) {
+            w.head("settings")
+            w.settings(d.settings)
+            w.tail()
+        }
+
+        // 第 20 段（仅 /6）：作者声明的引擎 API 版本闸（单整数）。段追加在末尾 ⇒
+        // /3 /4 /5 的前缀字节不变。
+        if (hasMinApi) {
+            w.head("min-api")
+            w.long(d.minApi.toLong())
+            w.tail()
+        }
+
+        // 第 21 段（仅 /7 /8）：作者声明的逐条声明源位置（声明键 → 文件:行号）。段追加在末尾 ⇒
+        // /3 /4 /5 /6 的前缀字节不变；/8 沿用「段恒在场」口径（空表也写计数 0）。
+        if (hasPositions) {
+            w.head("declaration-positions")
+            w.strMap(d.declarationPositions)
+            w.tail()
+        }
+
+        // 第 22 段（仅 /8）：作者声明的原版全局变量受控写授权（键 + 类型位）。段追加在末尾 ⇒
+        // /3 /4 /5 /6 /7 的前缀字节不变；空表不写本段、不升版本。
+        if (hasGrants) {
+            w.head("write-grants")
+            w.writeGrants(d.writeGrants)
+            w.tail()
+        }
+
         return w.bytes()
     }
 
+    /**
+     * 解码探针（基准 / 定向单测专用；生产恒 `null`）：每次 [decode] 完成后回调一次。
+     *
+     * [DecodeProbe.parsed] 区分「真解析」与「命中复用」——装配链单测据此断言同一份字节
+     * 在一次装配内只解析一次。探针挂在解码**唯一入口**上，各调用点不重复埋点；
+     * 挂点只旁路读数，不改变解码路径与异常面。
+     */
+    @Volatile
+    var probe: ((DecodeProbe) -> Unit)? = null
+
+    /** 一次 [decode] 调用的探针读数：耗时（纳秒）+ 是否真解析（`false` = 复用缓存实例）。 */
+    class DecodeProbe(val elapsedNanos: Long, val parsed: Boolean)
+
+    /**
+     * 解码复用作用域（**每次装配一份、线程本地**）：作用域内同一份字节只真解析一次，
+     * 后续调用复用同一 [ModuleDescriptor] 实例（描述符只读，共享安全）。
+     *
+     * 生命周期由 app 装配面显式开/闭（[openDecodeScope] / [closeDecodeScope]）：开态
+     * `ModRuntimeAssembly.csvLoadContext` 开、`ModRuntimeAssembly.attach` 收尾闭。
+     * 作用域结束即丢弃 —— **不跨会话、不跨线程复用**，因此启停标记 / 热重编 / 磁盘换包
+     * 都会在下一趟装配重新扫盘、重新解码，不存在跨局陈旧描述符。
+     *
+     * 异常路径（开态装配中途整包拒绝）不保证及时关闭；缓存只持描述符引用、无外部资源，
+     * 下一趟装配的 [openDecodeScope] 会整份丢弃覆盖。
+     */
+    private val decodeScope = ThreadLocal<MutableMap<DecodeKey, ModuleDescriptor>?>()
+
+    /** 开一次解码复用作用域（丢弃上一份；配合 [closeDecodeScope] 成对使用）。 */
+    fun openDecodeScope() {
+        decodeScope.set(LinkedHashMap())
+    }
+
+    /** 幂等开：本线程已有作用域则保留（不重置），否则新开。 */
+    fun ensureDecodeScope() {
+        if (decodeScope.get() == null) openDecodeScope()
+    }
+
+    /** 收口本线程的解码复用作用域（多余调用无害；作用域外的 [decode] 行为逐位不变）。 */
+    fun closeDecodeScope() {
+        decodeScope.remove()
+    }
+
+    /** 本线程当前是否处于解码复用作用域内（装配面判据 / 定向单测用）。 */
+    fun isDecodeScopeOpen(): Boolean = decodeScope.get() != null
+
+    /** 缓存键：按**字节内容**相等（同一份字节的不同数组实例命中同一条）。 */
+    private class DecodeKey(private val bytes: ByteArray) {
+        override fun hashCode(): Int = bytes.contentHashCode()
+
+        override fun equals(other: Any?): Boolean = other is DecodeKey && bytes.contentEquals(other.bytes)
+    }
+
     /** 把 Manifest 字节流解码成描述符；任一坏档抛 [ManifestFormatException]，不返回半成品。 */
-    fun decode(bytes: ByteArray): ModuleDescriptor = Reader(bytes).decodeAll()
+    fun decode(bytes: ByteArray): ModuleDescriptor {
+        val scope = decodeScope.get()
+        val key = if (scope == null) null else DecodeKey(bytes)
+        val started = System.nanoTime()
+        val cached = if (scope == null || key == null) null else scope[key]
+        val descriptor = cached ?: Reader(bytes).decodeAll()
+        if (scope != null && key != null && cached == null) scope[key] = descriptor
+        probe?.invoke(DecodeProbe(System.nanoTime() - started, parsed = cached == null))
+        return descriptor
+    }
 
     // -----------------------------------------------------------------------
     // 写侧
@@ -438,9 +646,53 @@ object ManifestCodec {
             }
         }
 
+        /**
+         * settings 段（仅 `/5`）：按声明序保真（声明序 = 设置页渲染序，有语义、不排序）。
+         *
+         * 每条 = 判别 enum `E`（SettingType）+ 键 + 标题 + 说明 + 类型专属体：
+         * - INT：默认值 + 可选 min + 可选 max（可空走 `Z`）；
+         * - STR：默认值；
+         * - BOOL：默认值；
+         * - ENUM：默认值 + 候选清单（计数 + 原文）。
+         */
+        fun settings(items: List<SettingDeclaration>) {
+            long(items.size.toLong())
+            for (s in items) {
+                enum(s.type)
+                str(s.key)
+                str(s.title)
+                str(s.description)
+                when (s) {
+                    is IntSettingDeclaration -> {
+                        long(s.default)
+                        nlong(s.min)
+                        nlong(s.max)
+                    }
+                    is StrSettingDeclaration -> str(s.default)
+                    is BoolSettingDeclaration -> bool(s.default)
+                    is EnumSettingDeclaration -> {
+                        str(s.default)
+                        strList(s.candidates)
+                    }
+                }
+            }
+        }
+
+        /**
+         * write-grants 段（仅 `/8`）：按声明序保真（授权清单无执行语义，但声明序保真是
+         * 本编解码层的统一口径，与 settings 段同形）。每条 = 键原文 + 类型位（B0 = INT、
+         * B1 = STR；不引入新 token tag）。
+         */
+        fun writeGrants(items: List<WriteGrantDeclaration>) {
+            long(items.size.toLong())
+            for (g in items) {
+                str(g.name)
+                bool(g.isStr)
+            }
+        }
+
         fun bytes(): ByteArray = sb.toString().toByteArray(StandardCharsets.UTF_8)
     }
-
     // -----------------------------------------------------------------------
     // 读侧
     // -----------------------------------------------------------------------
@@ -600,6 +852,24 @@ object ManifestCodec {
             if (line.isEmpty() || line[0] != 'I') err("期望可空字符串表(I计数 或 Z)，实际「$line」")
             val n = countOf(parseDec(line.substring(1)))
             return List(n) { expectStr() }
+        }
+
+        /**
+         * write-grants 段（仅 `/8`，ModDX4-B1）：I计数 加 count 条（键 S + 类型位 B0/B1），
+         * 逐条在 [guarded] 里构造 [WriteGrantDeclaration] —— 键空 / 大写归一后重复等构造期
+         * 不变量失败归一成带行号的格式异常，不返回半成品。
+         */
+        private fun expectWriteGrants(): List<WriteGrantDeclaration> {
+            val count = expectCount()
+            val grants = ArrayList<WriteGrantDeclaration>(count)
+            for (i in 0 until count) {
+                val name = expectStr()
+                val isStr = expectBool()
+                grants += guarded("WriteGrantDeclaration") {
+                    WriteGrantDeclaration(name, isStr)
+                }
+            }
+            return grants
         }
 
         private fun expectStrList(): List<String> = List(expectCount()) { expectStr() }
@@ -870,19 +1140,93 @@ object ManifestCodec {
             return Triple(phases, jobs, templates)
         }
 
+        /**
+         * settings 段（仅 `/5`）：逐条按判别 enum 分流（INT / STR / BOOL / ENUM），
+         * 各自按声明序保真；非法判别值由 [expectEnum] 明示合法四值后拒绝。
+         *
+         * 每条类型体解析完立刻在 [guarded] 里构造对应声明类 —— 键唯一 / 枚举默认值在
+         * 候选里 / min ≤ max 等不变量失败时归一成带行号的格式异常，不返回半成品。
+         */
+        private fun expectSettings(): List<SettingDeclaration> {
+            val count = expectCount()
+            val settings = ArrayList<SettingDeclaration>(count)
+            for (i in 0 until count) {
+                val type = expectEnum(SETTING_TYPES, "SettingType")
+                val key = expectStr()
+                val title = expectStr()
+                val description = expectStr()
+                settings += when (type) {
+                    SettingType.INT -> {
+                        val default = expectLong()
+                        val min = expectNLong()
+                        val max = expectNLong()
+                        guarded("IntSettingDeclaration") {
+                            IntSettingDeclaration(key, default, min, max, title, description)
+                        }
+                    }
+                    SettingType.STR -> {
+                        val default = expectStr()
+                        guarded("StrSettingDeclaration") {
+                            StrSettingDeclaration(key, default, title, description)
+                        }
+                    }
+                    SettingType.BOOL -> {
+                        val default = expectBool()
+                        guarded("BoolSettingDeclaration") {
+                            BoolSettingDeclaration(key, default, title, description)
+                        }
+                    }
+                    SettingType.ENUM -> {
+                        val default = expectStr()
+                        val candidates = expectStrList()
+                        guarded("EnumSettingDeclaration") {
+                            EnumSettingDeclaration(key, default, candidates, title, description)
+                        }
+                    }
+                }
+            }
+            return settings
+        }
+
+        /**
+         * min-api 段的单整数（仅 `/6`，ModDX-2 DX2-B）：负值 fail-closed 明示拒绝
+         * （非整数 / 越出 Int 域由 [expectInt] 的字面量闸拒；[ModuleDescriptor.minApi]
+         * 缺省 0 = 不设闸）。
+         */
+        private fun expectMinApi(): Int {
+            val v = expectInt()
+            if (v < 0) err("min-api 不能为负：$v（0 = 不设闸）")
+            return v
+        }
+
         fun decodeAll(): ModuleDescriptor {
             val magic = next()
             if (magic == "RT2MANIFEST/1" || magic == "RT2MANIFEST/2") {
                 err(
-                    "$magic 已拒载：本解码器只接受 RT2MANIFEST/3。" +
-                        "请用 /3 编码器重出 Manifest，phase-jobs 段可含 B2 子类型（JobTemplate）；" +
+                    "$magic 已拒载：本解码器只接受 RT2MANIFEST/3、RT2MANIFEST/4、RT2MANIFEST/5、" +
+                        "RT2MANIFEST/6、RT2MANIFEST/7 与 RT2MANIFEST/8。请用 /3 至 /8 的编码器重出 Manifest，" +
+                        "phase-jobs 段可含 B2 子类型（JobTemplate），/5 可含 settings 段，/6 可含 min-api 段，" +
+                        "/7 可含 declaration-positions 段，/8 可含 write-grants 段；" +
                         "旧版不静默兼容、不猜缺段、不按旧段表补空声明",
                 )
             }
-            if (magic != MAGIC) err("首行必须为 $MAGIC，实际「$magic」")
+            val hasGrants = magic == MAGIC_GRANTS
+            val hasPositions = hasGrants || magic == MAGIC_POSITION
+            val hasMinApi = hasPositions || magic == MAGIC_MINAPI
+            val hasSettings = hasMinApi || magic == MAGIC_SETTINGS
+            val hasMetadata = hasSettings || magic == MAGIC_META
+            if (!hasMetadata && magic != MAGIC) {
+                err(
+                    "首行必须为 $MAGIC、$MAGIC_META、$MAGIC_SETTINGS、$MAGIC_MINAPI、" +
+                        "$MAGIC_POSITION 或 $MAGIC_GRANTS，实际「$magic」",
+                )
+            }
 
             var packageId = ""
             var version = ""
+            var displayName = ""
+            var author = ""
+            var description = ""
             var requires: List<String> = emptyList()
             var loadAfter: List<String> = emptyList()
             var externalCalls: List<String> = emptyList()
@@ -903,9 +1247,20 @@ object ManifestCodec {
             var jobTemplateDeclarations: List<JobTemplateDeclaration> = emptyList()
             var exportedMacros: Map<String, String> = emptyMap()
             var artifactSha256 = ""
+            var settings: List<SettingDeclaration> = emptyList()
+            var minApi = 0
+            var declarationPositions: Map<String, String> = emptyMap()
+            var writeGrants: List<WriteGrantDeclaration> = emptyList()
 
             val seen = HashSet<String>()
-            for (name in SECTIONS) {
+            val sectionTable = when {
+                hasGrants -> GRANT_SECTIONS
+                hasPositions -> POSITION_SECTIONS
+                hasMinApi -> MINAPI_SECTIONS
+                hasSettings -> SETTINGS_SECTIONS
+                else -> SECTIONS
+            }
+            for (name in sectionTable) {
                 val head = next()
                 val headName = if (head.startsWith("@")) head.substring(1) else null
                 if (headName != null && seen.contains(headName)) {
@@ -922,6 +1277,11 @@ object ManifestCodec {
                     "meta" -> {
                         packageId = expectStr()
                         version = expectStr()
+                        if (hasMetadata) {
+                            displayName = expectStr()
+                            author = expectStr()
+                            description = expectStr()
+                        }
                     }
                     "requires" -> requires = expectStrList()
                     "load-after" -> loadAfter = expectStrList()
@@ -950,6 +1310,10 @@ object ManifestCodec {
                     }
                     "exported-macros" -> exportedMacros = expectStrMap()
                     "artifact-sha256" -> artifactSha256 = expectStr()
+                    "settings" -> settings = expectSettings()
+                    "min-api" -> minApi = expectMinApi()
+                    "declaration-positions" -> declarationPositions = expectStrMap()
+                    "write-grants" -> writeGrants = expectWriteGrants()
                     else -> err("未知段「$name」（fail-closed，不跳过）")
                 }
                 val tail = next()
@@ -988,6 +1352,13 @@ object ManifestCodec {
                     exportedMacros = exportedMacros,
                     artifactSha256 = artifactSha256,
                     charaRoutes = charaRoutes,
+                    displayName = displayName,
+                    author = author,
+                    description = description,
+                    settings = settings,
+                    minApi = minApi,
+                    declarationPositions = declarationPositions,
+                    writeGrants = writeGrants,
                 )
             }
         }

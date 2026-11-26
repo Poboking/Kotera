@@ -13,6 +13,8 @@ import com.eratw.port.modapi.JobTemplateDecl
 import com.eratw.port.modapi.PhaseDecl
 import com.eratw.port.modapi.PrivateDimDecl
 import com.eratw.port.modapi.RelationshipDecl
+import com.eratw.port.modapi.SettingDecl
+import com.eratw.port.modapi.WriteGrantDecl
 
 /**
  * 生成器侧的 Manifest 声明源：与 [com.eratw.port.modapi.ModManifest] 逐节对应，
@@ -51,4 +53,29 @@ data class ManifestSource(
     val artifactSha256: String = "",
     /** 角色变量路由声明（M5-4 刀 1，chara-field-routes 域；缺省空 = 无路由，字节与旧档一致）。 */
     val charaRoutes: List<CharaRouteDecl> = emptyList(),
+    /** 玩家可见的显示名（`RT2MANIFEST/4` 元数据域；空串 = 不写，仍出 `/3`）。 */
+    val displayName: String = "",
+    /** 作者 / 维护者（纯展示；空串 = 不写）。 */
+    val author: String = "",
+    /** 一句话说明（纯展示；空串 = 不写）。 */
+    val description: String = "",
+    /** per-mod 设置项声明（`RT2MANIFEST/5` 的 settings 段；空表 = 不写，仍出 `/3` 或 `/4`）。 */
+    val settings: List<SettingDecl> = emptyList(),
+    /**
+     * 作者显式声明的逐条声明源位置（`RT2MANIFEST/7` 的 `declaration-positions` 可选段）。
+     * 键 = 冲突报告里那条声明的人类可读原文（如 `global-dim MOD_STATE`），值 = 作者填的
+     * `文件:行号`。**可选、不强制**：空表 = 旧编码字节逐字不变；不猜、不从 Kotlin 反射造行号。
+     *
+     * 本字段是写侧登记入口；要一路落到产物字节还需 `ModManifest` 与
+     * [com.eratw.port.core.mod.ModDeclarationAdapter] 同步透传（见交付消息「需组长接线」）。
+     * core 侧编解码与冲突诊断已就位，可先用 [com.eratw.port.core.patch.ModuleDescriptor.declarationPositions]
+     * 直测往返。
+     */
+    val declarationPositions: Map<String, String> = emptyMap(),
+    /**
+     * 写授权声明（`RT2MANIFEST/8` 的 `write-grants` 可选段，MODDX4-B1 组长接线）：
+     * 空表 = 不写段，产物字节与 /3–/7 逐字相同。语义与 fail-closed 口径见
+     * [com.eratw.port.modapi.ModManifest.writeGrants]。
+     */
+    val writeGrants: List<WriteGrantDecl> = emptyList(),
 )

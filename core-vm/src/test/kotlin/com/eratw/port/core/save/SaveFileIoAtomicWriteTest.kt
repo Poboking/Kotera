@@ -133,12 +133,12 @@ class SaveFileIoAtomicWriteTest {
         val io = RootedSaveFileIo(root)
         val target = root.resolve("save07.sav")
 
-        assertTrue(io.writeInPlace(target, byteArrayOf(5, 6, 7)), "退路必须能新建文件")
+        assertTrue(io.writeInPlace(target, "save07.sav", byteArrayOf(5, 6, 7)), "退路必须能新建文件")
         assertContentEquals(byteArrayOf(5, 6, 7), Files.readAllBytes(target), "新建后字节一致")
 
         val old = ByteArray(8192) { (it % 97).toByte() }
         Files.write(target, old)
-        assertTrue(io.writeInPlace(target, byteArrayOf(1)), "退路必须能覆盖已存在文件")
+        assertTrue(io.writeInPlace(target, "save07.sav", byteArrayOf(1)), "退路必须能覆盖已存在文件")
         assertContentEquals(byteArrayOf(1), Files.readAllBytes(target), "覆盖后长度必须收缩，旧档尾部不得残留")
     }
 

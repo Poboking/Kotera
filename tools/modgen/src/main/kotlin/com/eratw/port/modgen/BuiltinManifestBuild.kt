@@ -2,12 +2,8 @@ package com.eratw.port.modgen
 
 import com.eratw.port.core.mod.ModDeclarationAdapter
 import com.eratw.port.core.patch.ManifestCodec
+import com.eratw.port.modapi.registry.ModRegistry
 import com.eratw.port.modfamily.FamilyDeclarations
-import com.eratw.port.modlivingworld.CharacterDeclarations
-import com.eratw.port.modlivingworld.EventDeclarations
-import com.eratw.port.modlivingworld.MemoryDeclarations as LwMemoryDeclarations
-import com.eratw.port.modlivingworld.RelationshipDeclarations
-import com.eratw.port.modmemory.MemoryDeclarations
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.jvm.JvmStatic
@@ -15,11 +11,10 @@ import kotlin.jvm.JvmStatic
 /**
  * 内置 RT2 载体的 manifest 生产者（RT2-B③ 资产投递 / K4-min；RT2-M91 起扩为**双真源**）。
  *
- * 真源 = 各 Kotlin 载体模块里的声明 object（[FamilyDeclarations.manifest] +
- * [MemoryDeclarations.manifest]）：载体在自己模块里声明的全部组件、原型、关系与任务，经
- * [ModDeclarationAdapter.toDescriptor] 转 descriptor 后由 [ManifestCodec.encode] 编成
- * RT2MANIFEST/3 字节。本文件不重写第二份声明 —— 声明改了就重跑
- * `generateBuiltinRt2Manifest`，没重生的资产由资产对账用例钉成红。
+ * 真源 = 各 Kotlin 载体模块里的声明 object，经 [ModRegistry] 自动发现：载体在自己模块里
+ * 声明的全部组件、原型、关系与任务，经 [ModDeclarationAdapter.toDescriptor] 转 descriptor
+ * 后由 [ManifestCodec.encode] 编成 RT2MANIFEST/3 字节。本文件不重写第二份声明，也不点名
+ * 任何载体 —— 声明改了就重跑 `generateBuiltinRt2Manifest`，没重生的资产由资产对账用例钉成红。
  *
  * 产出形态 = 随包静态资产：app 模块 assets 目录下 mods 子树的 rt2 子目录里每个载体一个点
  * manifest 文件，文件名 = packageId 加扩展名。装配侧按文件名升序链接；设备侧由
@@ -35,24 +30,17 @@ object BuiltinManifestBuild {
     const val MANIFEST_EXTENSION: String = ".manifest"
 
     /**
-     * 内置载体真源清单（packageId → 声明 object）：新增 Kotlin 载体在此登记一行，
-     * 资产生成、入库静态件与对账用例都从这份清单展开——不搞第二份点名。
+     * 内置载体真源清单（packageId → 编码后的 manifest 字节），由 [ModRegistry] 展开。
+     *
+     * **这里不再点名任何载体**：名单来自各 `mod-*` 模块里打了 `@ModCarrier` 的声明 object
+     * （注解自动发现，见 `:mod-registry`）。原先是「本文件 carriers 一行 + 设备侧
+     * ModCarrierRegistry.providers() 一行」的双登记，漏一处就静默不生效；现在两处都只读
+     * `ModRegistry.carriers`，登记面只剩声明 object 自身。
      */
-    val carriers: List<Pair<String, ByteArray>> = listOf(
-        FamilyDeclarations.PACKAGE_ID to
-            ManifestCodec.encode(ModDeclarationAdapter.toDescriptor(FamilyDeclarations.manifest)),
-        MemoryDeclarations.PACKAGE_ID to
-            ManifestCodec.encode(ModDeclarationAdapter.toDescriptor(MemoryDeclarations.manifest)),
-        // M10-1：Living World Demo 四载体（eratw.lw.*；四个独立 packageId 同住 :mod-livingworld）。
-        CharacterDeclarations.PACKAGE_ID to
-            ManifestCodec.encode(ModDeclarationAdapter.toDescriptor(CharacterDeclarations.manifest)),
-        RelationshipDeclarations.PACKAGE_ID to
-            ManifestCodec.encode(ModDeclarationAdapter.toDescriptor(RelationshipDeclarations.manifest)),
-        LwMemoryDeclarations.PACKAGE_ID to
-            ManifestCodec.encode(ModDeclarationAdapter.toDescriptor(LwMemoryDeclarations.manifest)),
-        EventDeclarations.PACKAGE_ID to
-            ManifestCodec.encode(ModDeclarationAdapter.toDescriptor(EventDeclarations.manifest)),
-    )
+    val carriers: List<Pair<String, ByteArray>> = ModRegistry.carriers.map { carrier ->
+        carrier.packageId to
+            ManifestCodec.encode(ModDeclarationAdapter.toDescriptor(carrier.manifest))
+    }
 
     /** 全部资产文件名（点名可审计：包名即文件名）。 */
     val assetFileNames: List<String> get() = carriers.map { it.first + MANIFEST_EXTENSION }

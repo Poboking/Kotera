@@ -19,18 +19,21 @@ import java.nio.file.Paths
  * 3. 版本不在册 ⇒ [CorpusProfile.detect] 自己抛 AssertionError，不降级。
  *
  * 读数出处（本路两根实读，语料只读；4.980 = `eratw-画蛇添足版eratw4.980`、
- * 4.981 = `eraTW4.981-261017-EAGLOV3`）：
+ * 4.981 = `eraTW4.981-261111-EAGLOV3`）：4.981 的读数已在 2026-11-14 语料换代后
+ * 按 261111 重采；`eraTW4.981-261017-EAGLOV3` 已退役留档（`specs/engine-profiles.yaml`
+ * 的 `V4_981_261017.retired: true`），对退役根跑本审计族判红属预期。
  * - 语料 XML 规模：4.980 = 98 个文件 / 3,263,831 字节 / 48,518 元素 / 76,902 属性
  *   （93 个 `resources` 下精灵表 + `lang/emuera.zhs.xml` + `plugins` 下 4 个）；
- *   4.981 = 4 个文件 / 609,494 字节 / 35,271 元素 / 46 属性（`resources` 下 0 个）。
+ *   4.981 = 4 个文件 / 625,315 字节 / 36,294 元素 / 46 属性（`resources` 下 0 个）。
  *   属性口径同 .NET 8 DOM：xmlns 声明也是属性（4.980 的两个数大头来自
  *   `lang/emuera.zhs.xml` 的 1,065 个属性与精灵表的属性）。
  * - `plugins/tw_csv_chs.xml` 条目数 / `<k>` 数：4.980 = 4,400 / 4,400、
- *   4.981 = 7,804 / 7,804（原始文本里 `<p>`、`<k>` 逐字计数，两根同值于元素数）；
+ *   4.981 = 7,721 / 7,721（原始文本里 `<p>`、`<k>` 逐字计数，两根同值于元素数）；
  * - 纯空格 `<k>` 与空 `<k>` 的条目序号：4.980 = p[1] / p[2]、4.981 = p[23] / p[24]
  *   （两个根把「空白词典行」放在不同位置，这是本波恒红的主因之一）；
  * - 首个有正文的条目：4.980 = p[3]（`　安眠薬`，前导全角空格）、4.981 = p[1]（`营养`）；
- * - 末条 `<k>` 文本：4.980 = `ビール`、4.981 = `製菓用チョコ`；
+ * - 末条 `<k>` 文本：4.980 = `ビール`、4.981 = `结婚纪念日`（261017 时代是 `製菓用チョコ`，
+ *   261111 的词典尾部换了一批夜明け前追加条目）；
  * - `/map/p[k='…']` 唯一命中锚：4.980 = `ビール`（1 条）、4.981 = `营养`（1 条）；
  * - `plugins/bbas_dataset.xml`：记录数 / 首条子元素数 / 末条 id：
  *   4.980 = 160 / 7 / `160`、4.981 = 167 / 2 / `166`（4.981 首条只有 id + 髮色）；
@@ -137,16 +140,16 @@ internal class XmlCorpusFacts(
                 root = root,
                 profile = profile,
                 xmlFiles = 4,
-                xmlBytes = 609_494L,
-                xmlElements = 35_271,
+                xmlBytes = 625_315L,
+                xmlElements = 36_294,
                 xmlAttributes = 46,
-                mapEntries = 7_804,
+                mapEntries = 7_721,
                 blankKEntry = 23,
                 emptyKEntry = 24,
                 textEntry = 1,
                 textEntryK = "营养",
                 firstEntryK = "营养",
-                lastEntryK = "製菓用チョコ",
+                lastEntryK = "结婚纪念日",
                 uniqueEntryK = "营养",
                 bbasRecords = 167,
                 bbasFirstRecordChildren = 2,

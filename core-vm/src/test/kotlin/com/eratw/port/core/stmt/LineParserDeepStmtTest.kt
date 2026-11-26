@@ -96,9 +96,14 @@ class LineParserDeepStmtTest {
         assertEquals("-1", d0.raw, "不得是 Minus1（Token.Operator.text 是 C# 枚举名）")
         assertEquals(-1L, (d0.expr as IntLiteral).value, "一元负号按常量折叠注入")
 
+        // 原版装载期把默认值项 Restructure 成 SingleTerm（ErbLoader.cs:724-727），纯常量算术
+        // 与 #DIM CONST 名一样折得开；维系「只收字面量/一元折叠」的旧断言已随 273f81483
+        // （形参默认值常量名折叠）失效 —— 折不出才不注入（VARSIZE 这类装载期函数调用）。
         val d1 = label("@F(OUT = 1 + 2)").paramDefaults[0]!!
         assertEquals("1+2", d1.raw, "不得是 1Plus2")
-        assertNull(d1.expr, "二元表达式本遍不折叠（只收字面量 / 一元折叠）")
+        assertEquals(3L, (d1.expr as IntLiteral).value, "常量算术同字面量一样在装载期折叠")
+        val d1b = label("@F(OUT = VARSIZE(\"ITEM\"))").paramDefaults[0]!!
+        assertNull(d1b.expr, "装载期求值函数折不出 ⇒ 不注入（省略位保持不写）")
 
         val d2 = label("@F(OUT = \"s\")").paramDefaults[0]!!
         assertEquals("\"s\"", d2.raw)

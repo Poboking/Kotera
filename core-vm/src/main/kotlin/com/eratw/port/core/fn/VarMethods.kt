@@ -157,7 +157,17 @@ internal fun registerVarMethods(r: BuiltinRegistry) {
             if (!spCharaEnabled(c.host) && optInt(a, 2, 0) != 0L) throw CodeEE(SP_CHARACTER_FEATURE_DISABLED)
             val tmpl = c.store.template(no) ?: throw codeEE(fnName, "引用未定义的角色（NO $no）")
             val size = csvArraySize(c, varName)
-            if (idx < 0 || idx >= size) throw codeEE(fnName, "下标 $idx 越界（$varName 长度 $size）")
+            if (idx < 0) {
+                // 负下标几乎只来自 `GETNUM(变量, "名字")` 查不到名字（原版同样回 -1，随后在这里越界）。
+                // 把线索写进文案：玩家拿到的屏上原样、错误报告里也只有这一行，不写清「名字表对不上」
+                // 就只能靠猜（2026-11-20 真机 CSVCFLAG -1 @ UPDATE_MAIN_CHARA 行432 即此形态）。
+                throw codeEE(
+                    fnName,
+                    "下标 $idx 越界（$varName 长度 $size）：负下标通常意味着 GETNUM 在本机 $varName 名字表里" +
+                        "查不到该名字，盘上 CSV 与随包 erbc 不属同一代",
+                )
+            }
+            if (idx >= size) throw codeEE(fnName, "下标 $idx 越界（$varName 长度 $size）")
             (when (mapField) {
                 "maxbase" -> tmpl.maxbase[idx.toInt()]
                 "abl" -> tmpl.abl[idx.toInt()]

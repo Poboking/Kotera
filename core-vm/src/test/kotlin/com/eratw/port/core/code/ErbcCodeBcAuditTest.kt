@@ -66,8 +66,9 @@ class ErbcCodeBcAuditTest {
                 "报错要点名操作码与真值，实际: ${e.message}",
             )
         }
-        // 合法上界 = Opcode.MAX_OPCODE（当前 248 `_GT_JZ`，末条；`_LT_JZ`(247)、
-        // `_EVAL_INT_JZ`(246)、`_CALL_STR`(245)、`_RETF`(244) 紧随其前）；各段首末条都要合法。
+        // 合法上界 = Opcode.MAX_OPCODE（当前 249 `_EVAL_FLOAT`，末条；`_GT_JZ`(248)、
+        // `_LT_JZ`(247)、`_EVAL_INT_JZ`(246)、`_CALL_STR`(245)、`_RETF`(244) 紧随其前）；
+        // 各段首末条都要合法。
         assertEquals(Opcode.MAX_OPCODE, ErbcFormat.OPCODE_MAX, "上界 = 操作码表末条")
         assertTrue(ErbcFormat.isValidOpcode(0))
         assertTrue(ErbcFormat.isValidOpcode(Opcode.MAX_STATEMENT_OPCODE))
@@ -79,6 +80,7 @@ class ErbcCodeBcAuditTest {
         assertTrue(ErbcFormat.isValidOpcode(Opcode._EVAL_INT_JZ), "条件位融合追加段 246 必须合法")
         assertTrue(ErbcFormat.isValidOpcode(Opcode._LT_JZ), "循环条件融合 247 必须合法")
         assertTrue(ErbcFormat.isValidOpcode(Opcode._GT_JZ), "循环条件融合 248 必须合法")
+        assertTrue(ErbcFormat.isValidOpcode(Opcode._EVAL_FLOAT), "浮点实参追加段 249 必须合法")
         assertTrue(!ErbcFormat.isValidOpcode(Opcode.MAX_OPCODE + 1))
         assertTrue(!ErbcFormat.isValidOpcode(-1))
     }

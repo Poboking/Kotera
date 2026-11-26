@@ -3,6 +3,7 @@
 // 模块：
 //   :core-vm        ERA 语义虚拟机（ERB 字节码执行、变量/存档/内建函数）
 //   :render         纯 JVM 渲染层（字形缓存 / 网格 / 命中区 / 显示列表）
+//   :mod-*          RT2 Kotlin Mod SDK（契约层 / 参考实现 / 载体注册表 / 作者工具链）
 //   :tools:erbcc    ERB → erbc 字节码容器编译器
 //   :tools:vmdbg    面向 agent 的无交互 VM 调试 CLI
 //   :tools:uipreview 桌面渲染预览（浏览器贴帧）
@@ -39,6 +40,15 @@ include(":mod-api")
 include(":mod-family")
 include(":mod-memory")
 include(":mod-livingworld")
+// 内置载体注册表：扫各 mod-* 模块上打了 @ModCarrier 的声明 object，生成唯一 ModRegistry。
+// 取代原来「构建期 assets 生产者 + 运行时装配各抄一行」的双登记（漏一处即静默不生效）。
+include(":mod-registry")
+// mod 作者工具链：最小载体模板。**不进生产 ModRegistry** —— 它是给人抄的
+// 骨架，不是要装进产物的 mod；`:mod-registry` 的载体目录扫描显式排除本模块。
+include(":mod-template")
+// mod 作者工具链：`:mod-api` 能力面的内存实现 + `runMod` 装配，
+// 让作者不开引擎就能验 mod 业务逻辑。main 只依赖 :mod-api（与业务 mod 同一条依赖方向铁律）。
+include(":mod-testing")
 include(":render")
 include(":tools:erbcc")
 include(":tools:modgen")

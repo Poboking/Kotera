@@ -15,9 +15,20 @@ kotlin {
     jvmToolchain(libs.versions.jvmTarget.get().toInt())
 }
 
+// `MemoryKeys` / `MemoryView` / `MemoryFacade` 由 `:tools:modgen-accessors` 从
+// `tools/modgen-accessors/schemas/memory.schema.tsv` 生成后入库（照 mod-family 先例）。
+// 生成物**入库**而不是构建期现生：这样 `api(project(":mod-api"))` 之外零插件依赖，
+// 且 CI 上「盘上产物是否过期」由 `checkMemoryAccessors` 的 `--check` 闸单独判。
+kotlin.sourceSets.named("main") {
+    kotlin.srcDir("src/generated/kotlin")
+}
+
 dependencies {
     api(project(":mod-api"))
     testImplementation(project(":core-vm"))
+    // 同 testImplementation(:core-vm) 的例外口径：定向设置消费用例走 :mod-testing 的
+    // TestWorld/TestContext（不启真引擎），只开在测试面。
+    testImplementation(project(":mod-testing"))
     testImplementation(kotlin("test"))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)

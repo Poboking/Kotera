@@ -5,6 +5,7 @@ import com.eratw.port.core.host.MemoryTier
 import com.eratw.port.core.loader.RUNTIME_INTERN_FORM_BUDGET
 import com.eratw.port.core.loader.RUNTIME_INTERN_STRING_BUDGET
 import com.eratw.port.core.loader.RUNTIME_NODE_ENTRY_BUDGET
+import com.eratw.port.core.loader.RUNTIME_STMT_ENTRY_BUDGET
 import com.eratw.port.core.sem.FlatStmtSource
 import com.eratw.port.core.stmt.ArgInterner
 import com.eratw.port.core.stmt.ExpressionArrayArgument
@@ -35,6 +36,13 @@ import java.util.concurrent.atomic.AtomicReferenceArray
  * @property isStr 表达式类型（true = 字符串通道）
  * @property name 实参是裸 [com.eratw.port.core.expr.VarRef] 时的变量名（REF 绑定用），否则 null
  * @property present 该位有实参（false = 省略位：原版 `Arguments[i] == null` 跳过不写，:437）
+ * @property isFloat 该实参是浮点表达式（4.981 `#DIMF` 形参的实参通道）。
+ *
+ *   **值不进浮点帧槽**（帧槽只有整型列/字符串列，见 `Vm.floatResult` 的 KDoc），而是按
+ *   `Double.doubleToRawLongBits` 的**位型**写进 int 桶；绑定点见本字段即知该桶位要按浮点
+ *   重解释（`ProcessRuntime.floatArgValue`）。这样既不新增帧数组、也不改 ERBC v2 的
+ *   段布局，只在段 7 的 flags 里多一位（[com.eratw.port.core.code.ErbcFormat.CallArgFlags.IS_FLOAT]）。
+ *   原版按形参项类型分派（`CalledFunction.cs:174-198` 的 `TransporterFloat`）。
  */
 data class CallArg(
     val position: Int,
@@ -42,6 +50,7 @@ data class CallArg(
     val isStr: Boolean,
     val name: String?,
     val present: Boolean,
+    val isFloat: Boolean = false,
 )
 
 /**
@@ -162,6 +171,58 @@ class FunctionInfo(
 }
 
 /**
+ * 语句条目缓存的**上界与身份契约**接缝（M10-MEM 第二段：给 [LazyStatementPool] 的运行期
+ * 条目缓存加上界）。
+ *
+ * ## 为什么单独一个接口
+ *
+ * 前一段（[LazyStatementPool] 本体）治的是「装载期把整池语句解进堆」，本条治的是它的另一半：
+ * 条目缓存**只进不出**时，「玩到过多少代码」直接等于常驻内存 —— 全量语料 1,712,420 条 × 277 B
+ * ≈ 474 MB，在 512 MiB 挡位上是一颗迟早要炸的雷。加上界之后，条目缓存变成块级 LRU，于是
+ * 又多出三件事要跟宿主对齐：逐出通知、钉住声明、以及两者的读数。这三件事的消费者与
+ * [LazyStatementPool] 本体不同（只有 `ConstantPool` / `VirtualMachine` / `GameSession` 关心），
+ * 分成独立接口是为了**不让条目池的基本接缝跟着膨胀**（12 个成员挤在一个接口里，读的人分不清
+ * 哪些是装载面、哪些是上界面）。
+ *
+ * 缺省实现全部是「本池没有运行期缓存」：非惰性池（`CodeBuilder` 产物、`loadMappedEager` 档）
+ * 天然满足，实现方零改动。
+ */
+internal interface StatementCacheHooks {
+    /**
+     * 钉住一批语句下标：声明「这些下标跨块逐出必须**恒解出同一实例**」（身份契约的例外面）。
+     *
+     * 谁需要：CALLSHARP 候选（`ConstantPool.sharpStatementIndices`，装载期一次）与数据节语句
+     * （`SidecarTables.dataSectionStatementIndex`，会话建立期一次）—— 它们以实例身份做键或
+     * 被反复按实例比对，逐出后重新物化出第二个实例就等于悄悄破契约。
+     *
+     * 缺省 no-op = 非惰性池（实例恒同一）。实现方保证：钉住表只增不减、不计入条目缓存预算
+     * （否则 3,874 条数据节下标会把 418 个块全钉死、上界当场失效），上界与 fail-closed
+     * 口径见 `RUNTIME_STMT_PIN_BUDGET`。
+     */
+    fun pinStatementIdentities(indices: IntArray) {
+    }
+
+    /** 钉住表当前条数（census / 单读取数；非惰性池恒 0）。 */
+    val pinnedStatements: Int get() = 0
+
+    /** 语句条目缓存运行期块逐出累计（诊断读数；非惰性池恒 0）。 */
+    val statementCacheEvictions: Int get() = 0
+
+    /** 钉住表超预算条数（fail-closed 可见面；非惰性池恒 0）。 */
+    val statementPinOverflow: Int get() = 0
+
+    /**
+     * 接上「条目缓存逐出一块」的通知（装载收尾由 `ConstantPool.attachLazyStatementPool` 接线）。
+     *
+     * 存在的理由只有一个：`VirtualMachine` 的 64 槽语句备忘（`Vm.kt` 的 `stmtMemoKey/Val`）
+     * 缓存的是**实例**，池一旦逐出块就必须让备忘失效，否则会拿陈旧实例去执行/比较。回调
+     * **在物化锁内**触发，与块清空同一次发布，见 `ConstantPool.statementCacheEpoch`。
+     */
+    fun setStatementEvictionSink(sink: (() -> Unit)?) {
+    }
+}
+
+/**
  * 语句池的**惰性供给**接缝（M10-MEM）。
  *
  * ## 为什么存在
@@ -188,7 +249,7 @@ class FunctionInfo(
  *
  * 实现只在 `core/loader`（装载侧）；编译期产物（`CodeBuilder`）永远不走这条接缝。
  */
-internal interface LazyStatementPool {
+internal interface LazyStatementPool : StatementCacheHooks {
     /** 段声明的语句条数（不物化任何条目）。 */
     val totalCount: Int
 
@@ -247,12 +308,16 @@ internal interface LazyStatementPool {
     fun sharpStatementIndices(): IntArray = IntArray(0)
 
     /**
-     * 装载收尾武装：给本池的三件运行期缓存（节点表 / 规范化代表表 / 内建串池）接上界。
+     * 装载收尾武装：给本池的运行期缓存（语句条目表 / 节点表 / 规范化代表表 / 内建串池）接上界。
      * 缺省 no-op = 非惰性池（缓存随 Program 存亡，无需界）；惰性档由实现覆写。
-     * 预算取值与语义见 `RUNTIME_NODE_ENTRY_BUDGET` / `RUNTIME_INTERN_FORM_BUDGET` /
-     * `RUNTIME_INTERN_STRING_BUDGET`（ErbcStream.kt）。
+     * 预算取值与语义见 `RUNTIME_STMT_ENTRY_BUDGET` / `RUNTIME_NODE_ENTRY_BUDGET` /
+     * `RUNTIME_INTERN_FORM_BUDGET` / `RUNTIME_INTERN_STRING_BUDGET`（ErbcStream.kt）。
+     *
+     * [stmtEntries] 是**条目数**（实现折块，块宽 4,096）；放在第一位是因为它是本池运行期
+     * 内存的最大单簇，误接线一眼可见。
      */
     fun armRuntimeBudgets(
+        stmtEntries: Int = RUNTIME_STMT_ENTRY_BUDGET,
         nodeEntries: Int = RUNTIME_NODE_ENTRY_BUDGET,
         internForms: Int = RUNTIME_INTERN_FORM_BUDGET,
         internStrings: Int = RUNTIME_INTERN_STRING_BUDGET,
@@ -260,10 +325,36 @@ internal interface LazyStatementPool {
     }
 
     /**
+     * 堆压回收（[RuntimeCodeRelease]）：把条目缓存与节点缓存**整块**还回去，只留钉住表
+     * 与稠密前缀保护区。缺省 no-op = 非惰性池（缓存随 Program 存亡，还了也省不下）。
+     *
+     * 语义边界：还的是**缓存槽**，不是实例 —— 语句实例仍在执行栈/VM 备忘里活着的照旧有效，
+     * 之后同一下标重新物化会解出逐字段相同的新实例（跨代身份依赖在 core 层不存在，见
+     * [LazyExprSource.node] 的实例稳定口径）。钉住表（CALLSHARP 候选 ∪ 数据节）所在块跳过，
+     * 身份契约不变。
+     *
+     * 线程口径：只许 VM 线程在**指令/语句边界**调（宿主挂在页中检查点与回合边界）；实现内部
+     * 取物化锁，并触发逐出回调让 VM 的语句备忘失效。
+     *
+     * 这里是**模板方法**，实现落在 [runtimeCacheRelease]：惰性语句池的类内函数数已经顶到
+     * detekt 的 TooManyFunctions 阈值（11，见 config/detekt），再加一个 `override fun`
+     * 就破闸 —— 而这条回收的参数与返回值都是空的，只剩「取一次读数」这一个动作，
+     * 用属性实现位承接不改任何阈值、也不加 @Suppress。
+     */
+    fun releaseRuntimeCache(): RuntimeCodeRelease = runtimeCacheRelease
+
+    /**
+     * [releaseRuntimeCache] 的实现位：取一次「把运行期缓存整块还回堆」的读数。
+     *
+     * 缺省 = 空读数（非惰性池的缓存随 Program 存亡，还了也省不下）。
+     */
+    val runtimeCacheRelease: RuntimeCodeRelease get() = RuntimeCodeRelease.NONE
+
+    /**
      * 运行期代码缓存读数（census 取数面）：本池的三件缓存水位一次取齐。
      * 缺省 null = 非惰性池（缓存随 Program 存亡，无独立上界读数）。
      */
-    fun codeCacheCensus(): CodeCacheCensus? = null
+    val codeCacheCensus: CodeCacheCensus? get() = null
 
     /**
      * 命令面审计扫描（ENGC-3 B4）：逐条读语句**身份**（`Statement.code.name`）与源行号，
@@ -369,7 +460,8 @@ internal interface LazyExprSource {
      * 运行期上界重置（`armRuntimeBudgets` 接的节点缓存界）之后，同一下标重放解出的是
      * **逐字段相同的新实例**（同一批记录字节）。跨代身份依赖在 core 层不存在 ——
      * 运行期消费全部按值/按结构（求值、再编码按 data class 相等），身份键只在编译期与
-     * 每-build 的 encode 表里；语句侧实例稳定不受影响（语句缓存不重置，数据节契约 C2 照旧）。
+     * 每-build 的 encode 表里；语句侧钉住表（数据节契约 C2）不受影响 —— 堆压回收同样跳过
+     * 钉住表所在块，非钉住语句才会重解。
      */
     fun node(index: Int): Expr
 
@@ -390,10 +482,21 @@ internal interface LazyExprSource {
     }
 
     /**
+     * 堆压回收本池的节点缓存（语义同 [LazyStatementPool.releaseRuntimeCache]，只盖本池那张节点表）。
+     * 缺省 no-op = 非惰性档（节点随 Program 存亡）。只许 VM 线程在指令边界调。
+     *
+     * 同 [LazyStatementPool.releaseRuntimeCache]：模板方法 + [runtimeCacheRelease] 实现位。
+     */
+    fun releaseRuntimeCache(): RuntimeCodeRelease = runtimeCacheRelease
+
+    /** [releaseRuntimeCache] 的实现位；缺省空读数（非惰性档没有运行期节点缓存）。 */
+    val runtimeCacheRelease: RuntimeCodeRelease get() = RuntimeCodeRelease.NONE
+
+    /**
      * 运行期代码缓存读数（census 取数面）；缺省 null = 非惰性池（缓存随 Program 存亡，
      * 无独立上界读数）。只读标量与 O(块位表) 计数，不解码、不物化（LiveSetCensus 禁物化铁律）。
      */
-    fun codeCacheCensus(): CodeCacheCensus? = null
+    val codeCacheCensus: CodeCacheCensus? get() = null
 }
 
 /**
@@ -410,13 +513,58 @@ internal interface LazyExprSource {
  * @property internForms 规范化代表表当前形态数（语句池那张；重置后从 0 重新累计）；
  *   -1 = 无读数。
  * @property internStrings 内建串池当前不同内容数（同上口径）；-1 = 无读数。
+ * @property stmtBlocks 语句**条目缓存**已分配块数（4,096 条/块；上界 = 条目预算折块）。
+ *   这是 2026-11-17「无界语句缓存」那笔根修的取证面：块数恒 ≤ 预算块数 + 1。
+ *   -1 = 无读数。
+ * @property stmtEvictions 语句条目缓存运行期块逐出累计；> 0 说明游玩面已越过预算
+ *   （预算够不够、要不要调 [com.eratw.port.core.loader.RUNTIME_STMT_ENTRY_BUDGET 的口径]）。
+ *   -1 = 无读数。
+ * @property stmtPins 钉住条目数（跨逐出必须恒同一实例的下标：CALLSHARP 候选 ∪ 数据节）；
+ *   -1 = 无读数。
+ * @property stmtPinOverflow 钉住表超预算条数（fail-closed：超限不丢、只计数）；
+ *   -1 = 无读数。
  */
 data class CodeCacheCensus(
     val nodeBlocks: Int,
     val nodeEvictions: Int,
     val internForms: Int,
     val internStrings: Int,
+    val stmtBlocks: Int = -1,
+    val stmtEvictions: Int = -1,
+    val stmtPins: Int = -1,
+    val stmtPinOverflow: Int = -1,
 )
+
+/**
+ * 一次「堆压回收运行期代码缓存」的读数（[ConstantPool.releaseRuntimeCodeCaches] 的返回）。
+ *
+ * 存在的理由：缓存**有上界 ≠ 上界够小**。上界按预算封顶（[RUNTIME_NODE_ENTRY_BUDGET]
+ * 与 [RUNTIME_STMT_ENTRY_BUDGET]），但实测单块的真实常驻远大于估算（结点簇带
+ * 字面串与容器），512 MiB 档下上界满载就吃掉 100 MiB 以上。真正的止血不是再压预算
+ * （压到工作集以下 = 每两次取指重解码一次），而是**在堆吃紧的那一刻**把这些
+ * 「丢了重解即可」的缓存整块还回去 —— 稳态零成本，压力下换出空间。
+ *
+ * @property statementBlocks 整块归还的语句条目缓存块数（块宽 4,096 条；块内**没有**钉住实例才整块还）
+ * @property statementEntries 按槽归还的语句条目数（块内有钉住实例时只清非钉住槽：
+ *   钉住表的身份契约要求那些实例留在原下标上，整块弃会连它们一起丢）
+ * @property nodeBlocks 归还的节点缓存块数（段 2 表达式表 + 段 3 语句表合计；
+ *   稠密前缀保护区与升序构建窗口内不还）
+ */
+data class RuntimeCodeRelease(
+    val statementBlocks: Int,
+    val nodeBlocks: Int,
+    val statementEntries: Int = 0,
+) {
+    /** 这一发什么都没还（未武装 / 没有可还的块 / 构建窗口内跳过）。 */
+    val isEmpty: Boolean get() = statementBlocks == 0 && nodeBlocks == 0 && statementEntries == 0
+
+    /** 报告/日志行（app 侧直接打这一行）。 */
+    val line: String get() = "语句块 $statementBlocks / 条目 $statementEntries / 节点块 $nodeBlocks"
+
+    companion object {
+        val NONE: RuntimeCodeRelease = RuntimeCodeRelease(0, 0)
+    }
+}
 
 class ConstantPool(
     /**
@@ -590,30 +738,53 @@ class ConstantPool(
      * 运行期缓存接上界。非惰性池（两字段皆 null）是无操作。
      */
     internal fun armRuntimeCodeCacheBudgets(
+        stmtEntries: Int,
         nodeEntries: Int,
         internForms: Int,
         internStrings: Int,
     ) {
-        lazyStatements?.armRuntimeBudgets(nodeEntries, internForms, internStrings)
+        lazyStatements?.armRuntimeBudgets(stmtEntries, nodeEntries, internForms, internStrings)
         lazyExprs?.armRuntimeBudgets(nodeEntries)
     }
 
     /**
-     * 运行期代码缓存读数（[Program.codeCacheCensus] 委托）：两池读数合并——
-     * 节点块/逐出取**合计**，规范表/串池只有语句池有（读不到给 -1）。
+     * 堆压回收两张惰性池的运行期代码缓存（读数见 [RuntimeCodeRelease]）。
+     *
+     * 两池的节点表**不共享** [RecordSource]（段 2 表达式一张、段 3 语句一张），所以两边都要还：
+     * 语句池那一发在物化锁里连条目缓存一起还，表达式池那一发只还段 2 的节点块。
+     * 非惰性池上是无操作（两次缺省实现）⇒ 与改造前逐字同行为。
+     */
+    internal fun releaseRuntimeCodeCaches(): RuntimeCodeRelease {
+        val stmt = lazyStatements?.releaseRuntimeCache() ?: RuntimeCodeRelease.NONE
+        val expr = lazyExprs?.releaseRuntimeCache() ?: RuntimeCodeRelease.NONE
+        return RuntimeCodeRelease(
+            statementBlocks = stmt.statementBlocks,
+            nodeBlocks = stmt.nodeBlocks + expr.nodeBlocks,
+            statementEntries = stmt.statementEntries,
+        )
+    }
+
+    /**
+     * 运行期代码缓存读数（[Program.codeCacheCensus] 委托）：两池读数合并 ——
+     * 节点块/逐出取**合计**，语句条目缓存与规范表/串池只有语句池有（读不到给 -1）。
      * 两池皆非惰性（eager 编译器/测试档）⇒ null。
      */
-    internal fun codeCacheCensus(): CodeCacheCensus? {
-        val stmt = lazyStatements?.codeCacheCensus()
-        val expr = lazyExprs?.codeCacheCensus()
+    internal val codeCacheCensus: CodeCacheCensus?
+        get() {
+        val stmt = lazyStatements?.codeCacheCensus
+        val expr = lazyExprs?.codeCacheCensus
         if (stmt == null && expr == null) return null
         return CodeCacheCensus(
             nodeBlocks = (stmt?.nodeBlocks ?: 0) + (expr?.nodeBlocks ?: 0),
             nodeEvictions = (stmt?.nodeEvictions ?: 0) + (expr?.nodeEvictions ?: 0),
             internForms = stmt?.internForms ?: -1,
             internStrings = stmt?.internStrings ?: -1,
+            stmtBlocks = stmt?.stmtBlocks ?: -1,
+            stmtEvictions = stmt?.stmtEvictions ?: -1,
+            stmtPins = stmt?.stmtPins ?: -1,
+            stmtPinOverflow = stmt?.stmtPinOverflow ?: -1,
         )
-    }
+        }
 
     /**
      * 接上一份惰性表达式供给（只由 `core/loader` 的装载链调用）。
@@ -660,6 +831,62 @@ class ConstantPool(
     internal fun attachLazyStatementPool(pool: LazyStatementPool) {
         check(statements.isEmpty()) { "语句池已有条目，不能改接惰性供给" }
         lazyStatements = pool
+        // 语句条目缓存逐出一块 ⇒ 纪元 ++（回调在池的物化锁内触发，故「块已清」与
+        // 「纪元已变」对读方是同一次发布）。虚拟机的 64 槽语句备忘据此整张作废，
+        // 见 [statementCacheEpoch] 与 `Vm.statementOf`。
+        pool.setStatementEvictionSink { statementCacheEpoch++ }
+    }
+
+    /**
+     * 语句条目缓存**逐出纪元**（0 起，每逐出一块 +1；非惰性池恒 0）。
+     *
+     * 消费者只有一个：`VirtualMachine` 的 64 槽直接映射语句备忘（`Vm.kt` 的
+     * `stmtMemoKey/stmtMemoVal`）缓存的是**实例**，而条目缓存上界化之后「同一下标恒同一实例」
+     * 只在未被逐出的块内成立 ⇒ 纪元一变，备忘必须整张作废。
+     *
+     * 为什么用纪元计数而不是让 VM 注册监听器：`deriveNestedVm` 每次 GETMETHS 都派生一个新
+     * 的 [VirtualMachine]（`Vm.kt` 的 `deriveNestedVm`），监听器列表会无界增长、并把
+     * Program 与一堆早已结束的 VM 互相钉死。纪元读一次是一个 int 字段比较。
+     *
+     * 发布口径：自增发生在池的物化锁内（[setStatementEvictionSink] 的接线），字段本身
+     * `@Volatile` ⇒ 读方要么看到旧纪元且块未清（旧实例仍有效），要么看到新纪元（走
+     * [statement] 重新取），不存在「纪元变了但拿到已清块的实例」的中间态。生产单线程
+     * （ADR-003）下这只是 volatile 读的成本。
+     */
+    @Volatile
+    internal var statementCacheEpoch: Int = 0
+        private set
+
+    /**
+     * 钉住一批语句下标（身份契约例外面；语义见 [LazyStatementPool.pinStatementIdentities]）。
+     *
+     * **入参是绝对下标，下发前必须按段折基线**：调用方（[sharpStatementIndices]、数据节侧车）
+     * 给的都是 [statementCount] 口径的绝对下标，而本池续段的惰性供给只认窗口下标
+     * 「0..续段条数」（与 [statementAt] 的 index - statementBase 同一口径）。不折的后果
+     * **不是崩**，而是静默失效：绝对下标要么被池的 limit 整片过滤，要么在窗口内钉到错位的槽
+     * —— 之后条目缓存逐出 / 堆压回收把真正该留的槽清掉，同一下标再解出第二个实例，
+     * 数据节（以实例为键的 IdentityHashMap）与对象树 CALLSHARP 行键一起 miss
+     * （表现为 PRINTDATA/STRDATA 静默不打印、CALLSHARP 重复首执）。
+     * 单池（statementBase == 0）不走折减，路径与既有一致。
+     */
+    internal fun pinStatementIdentities(indices: IntArray) {
+        if (indices.isEmpty()) return
+        val lazy = lazyStatements
+        val shift = statementBase
+        if (lazy != null) lazy.pinStatementIdentities(if (shift == 0) indices else windowOf(indices, shift))
+        // base 池是它自己的绝对空间（构造期 require 钉住 statementBase == basePool.statementCount）。
+        basePool?.pinStatementIdentities(indices)
+    }
+
+    /** 绝对下标 → 续段窗口下标：只留本段（≥ [shift]）并减基线；一段都不剩时返回空表（下游视为无操作）。 */
+    private fun windowOf(indices: IntArray, shift: Int): IntArray {
+        var n = 0
+        for (i in indices) if (i >= shift) n++
+        if (n == 0) return IntArray(0)
+        val out = IntArray(n)
+        var k = 0
+        for (i in indices) if (i >= shift) out[k++] = i - shift
+        return out
     }
 
     /** 语句池是否走惰性供给（装载侧据此决定要不要留住宿主文件）。 */
@@ -774,7 +1001,13 @@ class ConstantPool(
                 if (statements[i].args is SpCallSharpArgument) out.add(statementBase + i)
             }
         }
-        return out.toIntArray()
+        val indices = out.toIntArray()
+        // 钉住候选（2026-11-17）：取用方（`core/fn` 的 prefillSharpLinks）对候选逐条
+        // `program.statement(index)` 物化后只留实例/名字，条目缓存逐出一块就可能让同一下标
+        // 再解出第二个实例 —— 候选集是装载期一次算出的静态小集，按条钉住即可（语义见
+        // [LazyStatementPool.pinStatementIdentities]）。
+        if (indices.isNotEmpty()) pinStatementIdentities(indices)
+        return indices
     }
 
     /**
@@ -1304,6 +1537,21 @@ class Program private constructor(
     internal fun sharpStatementIndices(): IntArray = pool.sharpStatementIndices()
 
     /**
+     * 语句条目缓存逐出纪元（池转发）：见 [ConstantPool.statementCacheEpoch]。`Vm.statementOf`
+     * 的唯一失效信号源；非惰性池恒 0（实例恒同一，备忘永不失效）。
+     */
+    internal val statementCacheEpoch: Int get() = pool.statementCacheEpoch
+
+    /**
+     * 钉住一批语句下标（身份契约例外面）：池转发到 [ConstantPool.pinStatementIdentities]。
+     * 取用方 = `SidecarTables.dataSectionStatementIndex`（会话建立期一次）；
+     * CALLSHARP 候选由 [ConstantPool.sharpStatementIndices] 在装载期自己钉。
+     */
+    internal fun pinStatementIdentities(indices: IntArray) {
+        pool.pinStatementIdentities(indices)
+    }
+
+    /**
      * 命令面审计扫描（ENGC-3 B4）：池转发，语义与成本见
      * [ConstantPool.scanStatementHeaders]。取用方 = `core/proc` 的 `CompatCommandAudit`。
      */
@@ -1702,19 +1950,20 @@ class Program private constructor(
     }
 
     /**
-     * 装载收尾武装：给惰性语句池 / 惰性表达式池的三件运行期缓存（节点表 / 规范化代表表 /
-     * 内建串池）接上界 —— 见 [LazyStatementPool.armRuntimeBudgets] 与
+     * 装载收尾武装：给惰性语句池 / 惰性表达式池的运行期缓存（语句条目表 / 节点表 /
+     * 规范化代表表 / 内建串池）接上界 —— 见 [LazyStatementPool.armRuntimeBudgets] 与
      * [LazyExprSource.armRuntimeBudgets]。预算取常量缺省；测试用注入形参压小触发线。
      *
      * 只许装载趟结束后调（`ProgramLoader` 的两处装载收尾）；幂等（重复武装同值无害）。
      * 非惰性 Program 上是无操作（两个接口缺省 no-op），与改造前逐字同行为。
      */
     internal fun armRuntimeCodeCacheBudgets(
+        stmtEntries: Int = RUNTIME_STMT_ENTRY_BUDGET,
         nodeEntries: Int = RUNTIME_NODE_ENTRY_BUDGET,
         internForms: Int = RUNTIME_INTERN_FORM_BUDGET,
         internStrings: Int = RUNTIME_INTERN_STRING_BUDGET,
     ) {
-        pool.armRuntimeCodeCacheBudgets(nodeEntries, internForms, internStrings)
+        pool.armRuntimeCodeCacheBudgets(stmtEntries, nodeEntries, internForms, internStrings)
     }
 
     /**
@@ -1722,7 +1971,20 @@ class Program private constructor(
      * 三件运行期缓存（节点表 / 规范化代表表 / 内建串池）的水位一次取齐。
      * 非惰性 Program（编译器/内存装置档）⇒ null，账面按无读数成文。
      */
-    internal fun codeCacheCensus(): CodeCacheCensus? = pool.codeCacheCensus()
+    internal val codeCacheCensus: CodeCacheCensus? get() = pool.codeCacheCensus
+
+    /**
+     * 堆压回收运行期代码缓存（语句条目表 + 两张节点表），把「丢了重解即可」的那一坨还回去。
+     *
+     * 为什么需要它：上界只保证**有界**，不保证**够小**。2026-11-26 真机报告（512 MiB 堆、
+     * 崩溃时 used 461 MiB）里账面点名只 149 MiB，桌面 512m 浸泡的类直方图把差额指到
+     * 解码结点簇（结点对象 + 字面串 + 容器 ≈ 120~150 MiB/LiveSet）—— 那正是本调用的回收面。
+     *
+     * 调用纪律：只许 VM 线程在**指令/语句边界**（宿主的两处：页中检查点、回合边界）调，
+     * 且仅在堆水位吃紧时才调 —— 稳态调用等于把热代码整段驱逐，下一轮逐条重解码。
+     * 幂等：没有可还的块时返回 [RuntimeCodeRelease.NONE]。
+     */
+    fun releaseRuntimeCodeCaches(): RuntimeCodeRelease = pool.releaseRuntimeCodeCaches()
 
     /** 种子行：参数整段 = 表达式池（[ConstantPool.exprRootsView]），装载期临时对象。 */
     private fun expressionPoolSeed(): Statement = InstructionStmt(

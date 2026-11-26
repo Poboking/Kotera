@@ -33,7 +33,7 @@ import kotlin.test.assertTrue
 class ProgressFrameKeepAliveTest {
 
     private companion object {
-        /** 原版死循环闸的采样行数（`Process.cs:990` 的 `state.lineCount % 10000 == 0`）。 */
+        /** 原版死循环闸的采样行数（`Process.ScriptProc.cs:35`（官方 `Process.cs:1012`）的 `state.lineCount % 10000 == 0`）。 */
         const val CHECK_LINES = 10_000
 
         /** 墙钟阈值 1 ms；宿主在每个采样段第一条语句睡 5 ms，保证判据必被触发。 */

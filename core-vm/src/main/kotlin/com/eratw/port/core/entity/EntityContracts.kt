@@ -302,6 +302,35 @@ interface ICharaSlotProjector {
      */
     fun onCharacterRowsPermuted(oldToNewIndexMap: IntArray)
 
-    /** 行删除钩子：接 VariableStore.deleteCharacter；本实体已投射则同步解映射。 */
+    /**
+     * 行删除钩子：接 VariableStore.deleteCharacter/deleteCharacters；本实体已投射则同步
+     * 解映射，并回收其虚拟 NO（行生命周期终点 = 虚拟 NO 绑定终点）。
+     */
     fun onCharacterRowDeleted(deletedIndex: Int)
+
+    /**
+     * 世界重置钩子：整张角色表被**世界级重置**丢弃时调用 —— DELALLCHARA / RESETDATA /
+     * 回标题的整表清空（接 `VariableStore.deleteAllCharacters` 的缺省路径）。
+     *
+     * 语义：把投射身份面**整体作废** —— 双向行映射、关系投影基线、虚拟 NO 身份表登记
+     * 全部清空，[rosterGeneration] 递增（行全没了，旧行号一律失效）。清表本身不发行删除
+     * 钩子（[onCharacterRowDeleted] 只覆盖逐行删除），所以整表清空必须由本钩子补齐；
+     * 否则映射/号表会留下指向已不存在行的残影，下次投射按旧号解析会命中原实体
+     * （§16「永不复用」不变量被破坏）。
+     *
+     * **只用于世界重置，不得用于读档前的整表替换**：读档是「同一世界的存档替换」，
+     * 角色表被 .sav 重建，但虚拟 NO / 关系身份归 .rt2 侧车
+     * （[com.eratw.port.core.save.SaveService.restoreBundle] 并入），在这里回收会把
+     * 刚并入（或待并入）的身份表清掉。读档路径的清空经
+     * [com.eratw.port.core.vars.VariableStore.withCharacterReplacement] 作用域，
+     * 本钩子**不被调用**。
+     *
+     * 实现约束：
+     * - 可重复调用（RESETDATA 里紧跟着 DELALLCHARA 是合法的；世代再递增一次是许可的）；
+     * - 不得删除实体本身 —— 实体生命周期归 `EntityKernel` / Begin 流程，本钩子只作废
+     *   「行投射」这一层；
+     * - **不经活动期闸**：DELALLCHARA/RESETDATA 都在脚本执行期发生，整表清空本身就是
+     *   原版即时语义（ADR-005），闸在这里只会把合法指令打成异常。
+     */
+    fun onWorldReset()
 }

@@ -79,23 +79,40 @@ object NamePolicy {
         shadow == target || (shadow == DeclarationScope.PACKAGE_GLOBAL && target == DeclarationScope.BUILT_IN)
 }
 
-/** 冲突一侧的定位：Package + 产物/来源 + 声明原文。 */
+/** 冲突一侧的定位：Package + 产物/来源 + 声明原文 + 可选源位置。 */
 data class DeclarationSite(
     val packageId: String,
     /** 来源（Manifest 文件名 / 容器标识；测试里可用任意可读串）。 */
     val source: String,
     /** 声明的人类可读形（如 `global-dim MOD_STATE`）。 */
     val declaration: String,
+    /**
+     * 作者显式声明的源位置（`文件:行号`，原样回显）；缺省 null = 没有位置信息。
+     *
+     * 来源 = [ModuleDescriptor.declarationPositions]，键就是 [declaration] 这条声明原文。
+     * 无位置时 [toString] 维持既有 `Package @ 来源` 文案逐字不变；有位置才附加 文件:行号。
+     */
+    val position: String? = null,
 ) {
-    override fun toString(): String = "$declaration（$packageId @ $source）"
+    override fun toString(): String =
+        if (position == null) {
+            "$declaration（$packageId @ $source）"
+        } else {
+            "$declaration（$packageId @ $source，位置 $position）"
+        }
 }
 
 /**
  * 一项声明冲突（恒带**双边**定位：谁先、谁又声明了一次、冲突键与原因）。
  *
- * TODO(verify)：蓝图要求冲突报告带「文件:行号」。Manifest 目前不承载逐条声明的源位置
- * （ModuleDescriptor 只有值，没有 ScriptPosition），当前给出 Package + 来源 + 声明原文；
- * 行号要等 Manifest 编解码（M2）带上位置信息后补，不在这里猜。
+ * 历史说明（当初为何搁置）：蓝图要求冲突报告带「文件:行号」，但早期 Manifest 不承载逐条
+ * 声明的源位置（ModuleDescriptor 只有值，没有 ScriptPosition），故只给 Package + 来源 +
+ * 声明原文；行号要等 Manifest 编解码带上位置信息后补，不在声明层猜。
+ *
+ * 现状：已由 `RT2MANIFEST/7` 的 `declaration-positions` 可选段覆盖 —— 作者显式声明的
+ * 「声明键 → 文件:行号」映射经 [ModuleDescriptor.declarationPositions] 进
+ * [DeclarationSite.position]，冲突消息有位置则回显 文件:行号，无位置维持既有文案。位置
+ * 缺省不猜、不从 Kotlin 反射造行号；本类只做原样回显，不解析位置字符串。
  */
 data class DeclarationConflict(
     val domain: DeclarationDomain,
@@ -116,6 +133,16 @@ class DeclarationConflictException(
 ) : RuntimeException(buildMessage(conflicts)) {
 
     val conflicts: List<DeclarationConflict> = conflicts.toList()
+
+    /**
+     * 本次冲突**全部涉及方**的包名（构造期从双边 [DeclarationSite] 派生，去重保序、只读）。
+     *
+     * 冲突恒带双边定位 ⇒ 归因唯一确定：两个包都因整链声明事务拒绝而装不上，调用方据此
+     * 逐包写 canonical 留痕行。只供留痕归因，不参与声明裁决。
+     */
+    val packageIds: List<String> = this.conflicts
+        .flatMap { listOf(it.first.packageId, it.second.packageId) }
+        .distinct()
 
     init {
         require(this.conflicts.isNotEmpty()) { "DeclarationConflictException 至少要有一项冲突" }
@@ -475,8 +502,9 @@ class DeclarationRegistry(
         val conflicts = ArrayList<DeclarationConflict>()
 
         val sources = staged.associate { it.descriptor.packageId to it.source }
+        val positions = staged.associate { it.descriptor.packageId to it.descriptor.declarationPositions }
         fun site(pkg: String, declaration: String): DeclarationSite =
-            DeclarationSite(pkg, sources.getValue(pkg), declaration)
+            DeclarationSite(pkg, sources.getValue(pkg), declaration, positions[pkg]?.get(declaration))
 
         fun conflict(
             domain: DeclarationDomain,
@@ -654,7 +682,12 @@ class DeclarationRegistry(
                     DeclarationDomain.RELATIONSHIP_SCHEMA,
                     key,
                     relationshipSite.getValue(key),
-                    DeclarationSite(declared.packageId, sources.getValue(declared.packageId), "inverseName ${rel.inverseName}"),
+                    DeclarationSite(
+                        declared.packageId,
+                        sources.getValue(declared.packageId),
+                        "inverseName ${rel.inverseName}",
+                        positions[declared.packageId]?.get("inverseName ${rel.inverseName}"),
+                    ),
                     "自动反向边指向未声明的关系类型（反向边类型必须也在五域里声明）",
                 )
             }
@@ -726,7 +759,12 @@ class DeclarationRegistry(
             val inBase = baseKeywords[t]?.containsKey(keyword) == true
             if (inBase) return DeclarationSite("__base__", "csv", "关键字 $keyword")
             return declaredKeywords[t]?.get(keyword)?.let {
-                DeclarationSite(it.packageId, sources.getValue(it.packageId), "关键字 ${it.keyword}")
+                DeclarationSite(
+                    it.packageId,
+                    sources.getValue(it.packageId),
+                    "关键字 ${it.keyword}",
+                    positions[it.packageId]?.get("关键字 ${it.keyword}"),
+                )
             }
         }
 
@@ -789,6 +827,7 @@ class DeclarationRegistry(
                             sameSlot.packageId,
                             sources.getValue(sameSlot.packageId),
                             "关键字 ${sameSlot.keyword}",
+                            positions[sameSlot.packageId]?.get("关键字 ${sameSlot.keyword}"),
                         ),
                         here,
                         "同表同一下标已被另一个声明占用（显式下标不允许两包争抢）",
@@ -1147,6 +1186,7 @@ class DeclarationRegistry(
                             userMirror.packageId,
                             sources.getValue(userMirror.packageId),
                             "component-schema ${userMirror.schema.name}",
+                            positions[userMirror.packageId]?.get("component-schema ${userMirror.schema.name}"),
                         ),
                         "保留名 $MIRROR_SCHEMA_NAME 与派生镜像 schema 撞名（v1 口径 = 拒载 fail-closed）",
                     )

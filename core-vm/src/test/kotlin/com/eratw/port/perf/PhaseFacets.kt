@@ -49,8 +49,27 @@ import java.util.concurrent.atomic.AtomicReferenceArray
 //    「公式(不入账) + 0」加一句口径声明，跨装置的差额交给 jcmd 行交叉，绝不假装量到了它。
 // ===========================================================================
 
-/** 上一路 `HeapRootAttributionProbe` 的等距抽样实测：每条物化语句 7,933 B 的 live 增量（边际尺）。 */
+/**
+ * 上一路 `HeapRootAttributionProbe` 的等距抽样实测值：**抽样边际尺**，不是单条常驻。
+ *
+ * 2026-11-17 复测把它定性了：同一台桌面、同一份 322 MB 真产物、同一个探针，只改等距抽样的
+ * 物化条数 N，边际值单调衰减 —— N=1,000 ⇒ 12,361 B/条、N=3,000 ⇒ 5,588、N=12,000 ⇒ 1,680、
+ * N=20,000 ⇒ 1,138。衰减本身就是判据：它测的是解码时**顺带填的 arena 节点块**随 N 摊薄的
+ * 结果，不是每条语句自己的常驻。所以本常量只用于「同一 N 下的横向差分」，**任何容量预算 /
+ * 上限折算一律改用 [SINGLE_STMT_RESIDENT_BYTES]**（差 28 倍，混用会把账算成天量）。
+ */
 internal const val MARGINAL_STMT_BYTES = 7_933L
+
+/**
+ * 单条物化语句的**常驻**成本（从语句出发的可达图，不含可被 LRU 逐出的共享节点块）：
+ * 壳 26 B + 实参/表达式/串 251 B = 277 B。
+ *
+ * 上游自己也是这个量级：`LabelDictionary.cs:76-79` 注「语句行对象（含 Argument 表达式树）
+ * 平均约 250 字节」。用法：任何「N 条语句 ⇒ 多少 MiB」的折算都必须是
+ * `N × SINGLE_STMT_RESIDENT_BYTES`，再另加节点块硬顶（`RUNTIME_NODE_ENTRY_BUDGET`
+ * 折算 ≈ 32 MiB，`ErbcStream.kt:240`）与 intern/串池上界。
+ */
+internal const val SINGLE_STMT_RESIDENT_BYTES = 277L
 
 /** 逐类账单取前 N 条（只为在本进程里找渲染/栅格类，不参与总账）。 */
 private const val WALK_CLASS_TOP = 3_000
@@ -180,7 +199,7 @@ internal class PhaseFacets(
 
     private fun slotNonNull(v: Any?): Int = when (v) {
         null -> 0
-        is BlockRefs<*> -> v.nonNullEntries()
+        is BlockRefs<*> -> v.countActiveEntries()
         else -> nonNullCount(v)
     }
 
@@ -779,4 +798,16 @@ internal class PhaseFacets(
         }
         return out
     }
+}
+
+/**
+ * 已物化条目数（`BlockRefs.forEachActive` 的计数版）。
+ *
+ * 放在探针侧而不是 `BlockRefs` 上：主源那个类已经顶到 detekt 的类内函数上限
+ * （count > 11 即报 TooManyFunctions），而这条只有 perf 装置在用。
+ */
+internal fun BlockRefs<*>.countActiveEntries(): Int {
+    var n = 0
+    forEachActive { n++ }
+    return n
 }

@@ -27,10 +27,17 @@ import java.util.Locale
  *   三种身份严格分开：逻辑身份 = 规范键（LSC bindings）、实现身份 = 物理下标、
  *   执行入口 = dispatch 值。构建末尾自检该不变量，违反即抛。
  * - `superChain[physicalIdx]` = 前一同名实现物理下标（无则 -1），链序 = 链接序。
- * - **覆盖签名闸（v6.4-c，ABI-7 Gate）**：MODERN 显式覆盖要求覆盖方与被覆盖方的
+ * - **覆盖签名闸（v6.4-c，ABI-7 Gate；2026-11-23 KI 改判）**：MODERN 显式覆盖要求覆盖方与被覆盖方的
  *   [SymbolCandidate.signatureHash] 都非空且相等；空指纹（erbcc 未导出完整签名）或
- *   指纹不符一律抛 [OverrideSignatureException]。形参个数相同不代表 ABI 兼容，
- *   不允许把 arity 当签名用。
+ *   指纹不符**原判一律抛 [OverrideSignatureException]**——2026-11-23 主人裁定「原版 PC 能正常
+ *   运行的口上必须能导入运行」后改为**告警放行（last-wins）**：撞名覆盖的三态（未声明覆盖 /
+ *   空指纹 / 指纹不符）全走 [build] 的 diagnostics 通道上报、不再拒绝链接，SUPER 链照建。
+ *   原版锚：原版从不因撞名拒绝装载（LabelDictionary.cs:107-113 直接赋值后装载者胜出、
+ *   ErbLoader.cs:466-475 只告警），签名闸是 RT2 自研 ABI 面（无 C# 锚）；mods/rt2 生产来源
+ *   全部 = ERB 转码包（导入链/市场），不存在「mod 作者笔误要 fail-closed 拦截」的场景。
+ *   形参个数相同不代表 ABI 兼容，仍不允许把 arity 当签名用——告警里明确「ABI 未校验」。
+ *   未声明覆盖 / 空指纹 / 指纹不符在严格档（未来可能的 fail-closed 复用）下恢复抛
+ *   [OverrideSignatureException] / [SymbolConflictException]，类本体保留。
  * - 无覆盖时 dispatch 为恒等表——baseline 逐指令恒等，golden 零变化是 Gate。
  * - **性能闸（v6.2-c）**：无覆盖/无切面的链接产物不启用 dispatch 查表
  *   （VM 走原始物理下标直调）；恒等表只是语义基准，不是每调用的运行时成本。
@@ -83,19 +90,19 @@ data class FunctionBinding(
     val signatureHash: String = "",
 )
 
-/** Modern profile 下的未声明重名冲突——链接期拒绝，报告列所有提供者。 */
+/** Modern profile 下的未声明重名冲突（2026-11-23 KI 改判后生产 build 不再抛，类保留 = 存量测试与未来严格档复用）。 */
 class SymbolConflictException(
     val key: String,
     val providers: List<String>,
 ) : RuntimeException("符号 @$key 重名且未声明覆盖；提供者: ${providers.joinToString(", ")}")
 
 /**
- * Modern profile 下显式覆盖的**签名不可验证**（ABI-7 v6.4-c Gate：信息不完整即拒）。
+ * Modern profile 下显式覆盖的**签名不可验证**（ABI-7 v6.4-c Gate；2026-11-23 KI 改判后
+ * 生产 build 不再抛，类保留 = 存量测试与未来严格档复用）。
  *
- * 触发面：覆盖方或被覆盖方 [SymbolCandidate.signatureHash] 为空（erbcc 未导出完整签名），
- * 或两侧指纹不相等（形参类型/REF/维度/返回通道不兼容）。两种情况都**拒绝链接**——
- * 放行会让覆盖后的调用点按错误通道取值，且错误出现在运行期某次调用，不在装载期，
- * 定位成本远高于现在拒。
+ * 原触发面：覆盖方或被覆盖方 [SymbolCandidate.signatureHash] 为空（erbcc 未导出完整签名），
+ * 或两侧指纹不相等。2026-11-23 主人裁定（BOARD KI-2）后改为 diagnostics 告警放行——
+ * 原版对撞名覆盖只告警不拒（ErbLoader.cs:466-475），导入宽容优先于 ABI 预防。
  */
 class OverrideSignatureException(
     val key: String,
@@ -172,15 +179,14 @@ class SymbolCatalog private constructor(
             candidates: List<SymbolCandidate>,
             policy: ResolverPolicy,
             aspectHeads: Map<String, Int> = emptyMap(),
+            /**
+             * 覆盖裁决告警收集口（2026-11-23 KI 改判）：撞名三态（未声明覆盖 / 空指纹 /
+             * 指纹不符）改告警放行后，由此逐条上报（last-wins 照常胜出、SUPER 链照建）。
+             * 缺省空实现 = 现有调用点与测试零变化；生产装配层把告警汇进导入结果告警面。
+             */
+            diagnostics: (String) -> Unit = {},
         ): SymbolCatalog {
-            var size = 0
-            val seen = HashSet<Int>()
-            for (c in candidates) {
-                val idx = c.meta.index
-                require(idx >= 0) { "物理下标为负: ${c.meta.key} -> $idx" }
-                require(seen.add(idx)) { "物理下标重复: $idx" }
-                if (idx + 1 > size) size = idx + 1
-            }
+            val size = requireDistinctIndices(candidates)
 
             val dispatch = IntArray(size) { it }
             val superChain = IntArray(size) { -1 }
@@ -210,29 +216,10 @@ class SymbolCatalog private constructor(
                     }
                     list.add(owner)
                     if (policy == ResolverPolicy.MODERN) {
-                        if (!c.declaredOverride) throw SymbolConflictException(key, list.toList())
-                        // ABI-7 v6.4-c：显式覆盖必须两侧签名完整且相等。
-                        // 空指纹 = erbcc 没有导出完整签名，拒绝而不是拿 arity 猜。
                         val prevCandidate = candidates.first { it.meta.index == prev }
-                        val prevSig = prevCandidate.signatureHash
-                        val newSig = c.signatureHash
-                        val prevOwner = prevCandidate.ownerPackageId.ifEmpty { "?" }
-                        if (prevSig.isEmpty() || newSig.isEmpty()) {
-                            throw OverrideSignatureException(
-                                key,
-                                prevOwner,
-                                owner,
-                                "签名信息不完整（declaredOverride 需要完整签名指纹；空指纹不参与覆盖）",
-                            )
-                        }
-                        if (prevSig != newSig) {
-                            throw OverrideSignatureException(
-                                key,
-                                prevOwner,
-                                owner,
-                                "签名不一致（前 $prevSig / 后 $newSig）",
-                            )
-                        }
+                        reportOverrideVerdict(
+                            key, prevCandidate, c, diagnostics,
+                        )
                     }
                     superChain[phys] = prev
                 } else {
@@ -242,30 +229,8 @@ class SymbolCatalog private constructor(
                 bindings[key] = FunctionBinding(key, phys, kind, owner, c.signatureHash)
             }
 
-            val normalizedAspects = HashMap<String, Int>()
-            for ((key, head) in aspectHeads) {
-                val norm = key.uppercase(Locale.ROOT)
-                require(head in 0 until size) { "切面链头下标越界: $key -> $head" }
-                val headCandidate = candidates.firstOrNull { it.meta.index == head }
-                require(headCandidate != null && !headCandidate.meta.isEvent) {
-                    "切面链头必须是已注册的非事件函数: $key -> $head"
-                }
-                normalizedAspects[norm] = head
-            }
-
-            for (c in candidates) {
-                val meta = c.meta
-                if (meta.isEvent) continue
-                dispatch[meta.index] = normalizedAspects[meta.key] ?: winners[meta.key] ?: meta.index
-            }
-
-            // 分派幂等自检：dispatch 值必须是不动点，名字通道返回执行入口后二次查表不漂移。
-            for (i in dispatch.indices) {
-                val target = dispatch[i]
-                check(dispatch[target] == target) {
-                    "分派幂等不变量被破坏: dispatch[$i]=$target 但 dispatch[$target]=${dispatch[target]}"
-                }
-            }
+            val normalizedAspects = normalizedAspectHeads(aspectHeads, candidates, size)
+            finalizeDispatch(dispatch, candidates, normalizedAspects, winners)
 
             return SymbolCatalog(
                 candidates.toList(),
@@ -274,6 +239,99 @@ class SymbolCatalog private constructor(
                 dispatch,
                 superChain,
             )
+        }
+
+        /** 候选物理下标闸：非负、互异；返回 dispatch/superChain 的表长（最大下标 + 1）。 */
+        private fun requireDistinctIndices(candidates: List<SymbolCandidate>): Int {
+            var size = 0
+            val seen = HashSet<Int>()
+            for (c in candidates) {
+                val idx = c.meta.index
+                require(idx >= 0) { "物理下标为负: ${c.meta.key} -> $idx" }
+                require(seen.add(idx)) { "物理下标重复: $idx" }
+                if (idx + 1 > size) size = idx + 1
+            }
+            return size
+        }
+
+        /** 切面链头归一 + 越界/身份闸（v6.2-c：v1 链接器恒传空映射，ABI-v2 预留接缝）。 */
+        private fun normalizedAspectHeads(
+            aspectHeads: Map<String, Int>,
+            candidates: List<SymbolCandidate>,
+            size: Int,
+        ): Map<String, Int> {
+            val normalized = HashMap<String, Int>()
+            for ((key, head) in aspectHeads) {
+                val norm = key.uppercase(Locale.ROOT)
+                require(head in 0 until size) { "切面链头下标越界: $key -> $head" }
+                val headCandidate = candidates.firstOrNull { it.meta.index == head }
+                require(headCandidate != null && !headCandidate.meta.isEvent) {
+                    "切面链头必须是已注册的非事件函数: $key -> $head"
+                }
+                normalized[norm] = head
+            }
+            return normalized
+        }
+
+        /** dispatch 填充（切面链头 ?: 胜者 ?: 自身；事件恒等）+ 分派幂等自检。 */
+        private fun finalizeDispatch(
+            dispatch: IntArray,
+            candidates: List<SymbolCandidate>,
+            normalizedAspects: Map<String, Int>,
+            winners: Map<String, Int>,
+        ) {
+            for (c in candidates) {
+                val meta = c.meta
+                if (meta.isEvent) continue
+                dispatch[meta.index] = normalizedAspects[meta.key] ?: winners[meta.key] ?: meta.index
+            }
+            // 分派幂等自检：dispatch 值必须是不动点，名字通道返回执行入口后二次查表不漂移。
+            for (i in dispatch.indices) {
+                val target = dispatch[i]
+                check(dispatch[target] == target) {
+                    "分派幂等不变量被破坏: dispatch[$i]=$target 但 dispatch[$target]=${dispatch[target]}"
+                }
+            }
+        }
+
+        /**
+         * MODERN 档撞名覆盖裁决（2026-11-23 KI 改判，BOARD KI-2）：三态（未声明覆盖 /
+         * 空指纹 / 指纹不符）全改 [diagnostics] 告警放行——last-wins 照常胜出、SUPER 链照建。
+         * 原判三态全抛（SymbolConflictException / OverrideSignatureException）；其存在意义
+         * 是防空指纹覆盖炸成启动砖化，改判后砖化不再发生。原版锚 =
+         * LabelDictionary.cs:107-113（直接赋值后装载者胜出）+ ErbLoader.cs:466-475
+         * （只告警不拒）；签名闸是 RT2 自研面，mods/rt2 生产来源全为 ERB 转码包。
+         */
+        private fun reportOverrideVerdict(
+            key: String,
+            prevCandidate: SymbolCandidate,
+            overriding: SymbolCandidate,
+            diagnostics: (String) -> Unit,
+        ) {
+            val prevSig = prevCandidate.signatureHash
+            val newSig = overriding.signatureHash
+            val prevOwner = prevCandidate.ownerPackageId.ifEmpty { "?" }
+            val owner = overriding.ownerPackageId.ifEmpty { "?" }
+            if (!overriding.declaredOverride) {
+                diagnostics(
+                    "符号 @$key 重名且未声明覆盖，按 last-wins 放行" +
+                        "（提供者: $prevOwner → $owner；原版语义 = 后装载者胜出，" +
+                        "spec: LabelDictionary.cs:107-113）",
+                )
+            } else if (prevSig.isEmpty() || newSig.isEmpty()) {
+                diagnostics(
+                    "覆盖 @$key 的签名指纹缺失（$prevOwner: ${prevSig.isEmpty()} / " +
+                        "$owner: ${newSig.isEmpty()}），按 last-wins 放行但 ABI 未校验" +
+                        "——覆盖后的调用点若形参/返回通道不兼容，报错在运行期，" +
+                        "请向口上作者反馈",
+                )
+            } else if (prevSig != newSig) {
+                diagnostics(
+                    "覆盖 @$key 的签名不一致（前 $prevSig / 后 $newSig），按 last-wins " +
+                        "放行但 ABI 未校验——覆盖后的调用点若形参/返回通道不兼容，" +
+                        "报错在运行期，请向口上作者反馈",
+                )
+            }
         }
     }
 }

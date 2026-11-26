@@ -676,17 +676,19 @@ class SaveRoundTripAuditTest {
     // ------------------------------------------------------------------
 
     /**
-     * 语料 `CSV/VarExtGameData.csv` 的读数**按根取列**（两根逐行实读，2026-11-06）：
+     * 语料 `CSV/VarExtGameData.csv` 的读数**按根取列**：
      * - **4.980**：38 段（37 个 LF、末尾无换行）/ 34 非空 / 4 空 / 32 注释，生效行 2 条
      *   （`:37 SAVE_DTS, DT_UFUFU_LOG`、`:38 SAVE_DTS, DT_UFUFU_M_LOG`）；
-     * - **4.981**：39 段（38 个 CRLF、末尾无换行）/ 35 非空 / 4 空 / 32 注释，生效行 3 条
-     *   （多 `:39 SAVE_DTS, QOL_FISH_INSTANCE`——生活系统大修 DLC 的钓鱼实例表，
-     *   `ERB/DLC/生活系统大修/0_生活系统_变量.ERH:139` 注明「随存档，见 VarExtGameData.csv」）。
+     * - **4.981（261111 出货根，2026-11-17 逐行重采）**：42 段 / 38 非空 / 4 空 / 32 注释，生效行 6 条
+     *   （`:37/:38` 两条 UFUFU 日志 + `:39 SAVE_DTS, QOL_FISH_INSTANCE`——生活系统大修 DLC 的钓鱼
+     *   实例表，`ERB/DLC/生活系统大修/0_生活系统_变量.ERH:139` 注明「随存档，见 VarExtGameData.csv」；
+     *   `:40-42 QOL_CARD_OWN / QOL_CARD_EQUIP / QOL_CARD_CHARA` 三张卡片表）。
+     *   该列此前钉的是已退役的 261017 读数（39 段 / 3 条），261017→261111 换代后过期，本次按出货根重采。
      * 两根的注释行布局逐字相同：`SAVE_XMLS`（`:12`）、`SAVE_MAPS`（`:13`）、`GLOBAL_DTS`（`:28`）、
      * `STATIC_DTS`（`:35`）全是 `;` 注释行 ⇒ `GLOBAL_*`/`STATIC_*` 六张名单在两根下都是**空集**。
      *
      * ⇒ 闸门安全证据：本路新增的 `staticSets` 与大小写口径**不会**改变真语料上的任何读数
-     * （扩展段仍是那两张 DT，`loadAccept` 不变，回环与 RESETGLOBAL 读数不变）。
+     * （扩展段仍是那几张 DT，`loadAccept` 不变，回环与 RESETGLOBAL 读数不变）。
      *
      * 语料根不在位 / 判不出 ⇒ `corpusRoot`/`corpusCsvDir` 直接判红（旧版两枚 `assumeTrue` 跳过）。
      */
@@ -698,24 +700,28 @@ class SaveRoundTripAuditTest {
         val profile = profile()
         // 落一行到 build/save-round-trip-audit.txt：本轮实际取的是哪一列（闸复盘时对着看，免得「两根都绿」分不清）
         report("VarExt 语料根：$dir（NOW_VERSION=${profile.nowVersion}）⇒ 取 $profile 列")
-        // 两列读数（上表；4.980 列为本路实读，4.981 列为合流头实测的原钉值）
+        // 两列读数（上表；4.980 列为 2026-11-06 实读，4.981 列为 2026-11-17 在 261111 出货根上重采）
         val segments = when (profile) {
             CorpusProfile.V4_980 -> 38
-            CorpusProfile.V4_981 -> 39
+            CorpusProfile.V4_981 -> 42
         }
         val nonEmpty = when (profile) {
             CorpusProfile.V4_980 -> 34
-            CorpusProfile.V4_981 -> 35
+            CorpusProfile.V4_981 -> 38
         }
         val enabledLines = when (profile) {
             CorpusProfile.V4_980 -> listOf("SAVE_DTS, DT_UFUFU_LOG", "SAVE_DTS, DT_UFUFU_M_LOG")
             CorpusProfile.V4_981 -> listOf(
                 "SAVE_DTS, DT_UFUFU_LOG", "SAVE_DTS, DT_UFUFU_M_LOG", "SAVE_DTS, QOL_FISH_INSTANCE",
+                "SAVE_DTS, QOL_CARD_OWN", "SAVE_DTS, QOL_CARD_EQUIP", "SAVE_DTS, QOL_CARD_CHARA",
             )
         }
         val dts = when (profile) {
             CorpusProfile.V4_980 -> listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG")
-            CorpusProfile.V4_981 -> listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG", "QOL_FISH_INSTANCE")
+            CorpusProfile.V4_981 -> listOf(
+                "DT_UFUFU_LOG", "DT_UFUFU_M_LOG", "QOL_FISH_INSTANCE",
+                "QOL_CARD_OWN", "QOL_CARD_EQUIP", "QOL_CARD_CHARA",
+            )
         }
 
         // 该文件是 UTF-8 BOM、末尾无换行（4.980 用 LF、4.981 用 CRLF，故按 LF 切段后削 CR）

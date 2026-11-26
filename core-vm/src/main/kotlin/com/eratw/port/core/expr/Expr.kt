@@ -1,9 +1,11 @@
 package com.eratw.port.core.expr
 
 import com.eratw.port.core.compat.StringCompareDialect
+import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.err.DIVIDE_BY_ZERO_TEXT
 import com.eratw.port.core.err.MULTIPLY_10K_TO_STR_TEMPLATE
 import com.eratw.port.core.err.MULTIPLY_NEGATIVE_TO_STR_TEMPLATE
+import com.eratw.port.core.err.SafeArithmetic
 import com.eratw.port.core.err.renderMultiplyToStrLimit
 import com.eratw.port.core.err.zeroDivideWarning
 import com.eratw.port.core.lexer.longFromScaledDouble
@@ -177,8 +179,16 @@ data class VarRef(
         try {
             for (i in 0 until n) idx[i] = indexArray[i].getIntValue(ctx)
             val h = bindHandle(reader, wantStr = false)
-            if (h != VariableHandles.NONE) return (reader as VariableHandles).readIntH(h, idx)
-            return reader.readInt(name, idx)
+            return try {
+                if (h != VariableHandles.NONE) (reader as VariableHandles).readIntH(h, idx)
+                else reader.readInt(name, idx)
+            } catch (e: CodeEE) {
+                // 4.981 内置 1 维数组是 SparseArray 背板：**运行期**下标越界读返默认值、不抛
+                // （PC 实测判词见 specs/variables.yaml 的 sparse_1d_backplane）。严格通道先
+                // 抛出、再拿这次抛错当判据，比每次访问都先查一遍维度长度便宜：热路径零额外
+                // 开销，只有真越界那一发多走一趟存储层。
+                if (lastIndexIsDynamic(indexArray)) reader.readSparseIntOor(name, idx) else throw e
+            }
         } finally {
             reader.returnIndices()
         }
@@ -197,8 +207,13 @@ data class VarRef(
         try {
             for (i in 0 until n) idx[i] = indexArray[i].getIntValue(ctx)
             val h = bindHandle(reader, wantStr = true)
-            if (h != VariableHandles.NONE) return (reader as VariableHandles).readStrH(h, idx)
-            return reader.readStr(name, idx)
+            return try {
+                if (h != VariableHandles.NONE) (reader as VariableHandles).readStrH(h, idx)
+                else reader.readStr(name, idx)
+            } catch (e: CodeEE) {
+                // 同 [getIntValue]：运行期下标的稀疏越界读返空串、不抛。
+                if (lastIndexIsDynamic(indexArray)) reader.readSparseStrOor(name, idx) else throw e
+            }
         } finally {
             reader.returnIndices()
         }
@@ -313,8 +328,14 @@ data class VarRef(
         try {
             for (i in 0 until n) idx[i] = indexArray[i].getIntValue(ctx)
             val h = bindHandle(reader, wantStr = false)
-            if (h != VariableHandles.NONE) (reader as VariableHandles).writeIntH(h, name, idx, value)
-            else writerOf(reader).writeInt(name, idx, value)
+            try {
+                if (h != VariableHandles.NONE) (reader as VariableHandles).writeIntH(h, name, idx, value)
+                else writerOf(reader).writeInt(name, idx, value)
+            } catch (e: CodeEE) {
+                // 同 [getIntValue]：运行期下标的稀疏越界写落溢出层（PC 侧就是写进
+                // SparseArray 字典，随后读得回来）；常量下标与稠密数组照旧抛。
+                if (lastIndexIsDynamic(indexArray)) writerOf(reader).writeSparseIntOor(name, idx, value) else throw e
+            }
         } finally {
             reader.returnIndices()
         }
@@ -338,8 +359,14 @@ data class VarRef(
         try {
             for (i in 0 until n) idx[i] = indexArray[i].getIntValue(ctx)
             val h = bindHandle(reader, wantStr = false)
-            if (h != VariableHandles.NONE) return (reader as VariableHandles).plusIntH(h, idx, delta)
-            return reader.plusInt(name, idx, delta)
+            return try {
+                if (h != VariableHandles.NONE) (reader as VariableHandles).plusIntH(h, idx, delta)
+                else reader.plusInt(name, idx, delta)
+            } catch (e: CodeEE) {
+                // `+=` 在稀疏背板上等价于「读默认值 0 再加」⇒ 返回值就是 delta（PC 实测
+                // `ITEM:-1 += 5` 之后读回 5）。
+                if (lastIndexIsDynamic(indexArray)) reader.plusSparseIntOor(name, idx, delta) else throw e
+            }
         } finally {
             reader.returnIndices()
         }
@@ -362,8 +389,13 @@ data class VarRef(
         try {
             for (i in 0 until n) idx[i] = indexArray[i].getIntValue(ctx)
             val h = bindHandle(reader, wantStr = true)
-            if (h != VariableHandles.NONE) (reader as VariableHandles).writeStrH(h, name, idx, value)
-            else writerOf(reader).writeStr(name, idx, value)
+            try {
+                if (h != VariableHandles.NONE) (reader as VariableHandles).writeStrH(h, name, idx, value)
+                else writerOf(reader).writeStr(name, idx, value)
+            } catch (e: CodeEE) {
+                // 同 [setIntValue] 的字符串侧（PC 实测 `STR:-1 = "ab"` 读回 "ab"）。
+                if (lastIndexIsDynamic(indexArray)) writerOf(reader).writeSparseStrOor(name, idx, value) else throw e
+            }
         } finally {
             reader.returnIndices()
         }
@@ -472,11 +504,29 @@ data class VarRef(
      */
     private val indexArray: Array<Expr> = indices.toTypedArray()
 
+    // ------------------------------------------------------------------
+    // 4.981 稀疏 1 维背板：动态下标越界不是错误（见 Eval.kt 的 readSparseIntOor 一族）
+    // ------------------------------------------------------------------
+
     private companion object {
         /** 0 下标共享空数组（只读；存储层只读不写）。 */
         private val NO_INDICES = LongArray(0)
     }
 }
+
+/**
+ * [VarRef] 的最后一个下标是不是**运行期才定**的值（PC 侧 `VariableTerm.Restructure` 对
+ * `SingleTerm` 折得动的常量实参走解析期 `CheckElement`，折不动的才留到运行期）。
+ *
+ * 稀疏背板的容忍语义只对运行期下标开放：解析期常量下标在 4.981 仍然硬抛 OoRVarArg
+ * （PC 实测矩阵见 specs/variables.yaml 的 sparse_1d_backplane），照旧走存储层严格通道、
+ * 文案逐字不变。判据只依赖 AST、且只在**严格通道抛错后的补径**上求值 ⇒ 热路径零成本。
+ *
+ * 为什么是文件级函数而不是 [VarRef] 的成员：给 `VarRef` 加函数会顶破 detekt 的类函数条数
+ * 阈值，加字段则会改掉 `ProgramDiagnostics` 的 shape 探针快照（真机 logcat 判读面，
+ * `ProgramDiagnosticsTest` 钉着逐行格式）。
+ */
+private fun lastIndexIsDynamic(indices: Array<Expr>): Boolean = !indices[indices.size - 1].isCompileTimeConst()
 
 /**
  * 字符串关键字下标包装（`ITEM:药` 之类）。spec: VariableParser.cs:182-188（VariableStrArgTerm 包装）。
@@ -614,12 +664,16 @@ data class Unary(
         }
         return when (op) {
             OperatorCode.MINUS -> {
-                // spec: OperatorMethodManager.cs:559-566 —— MinusInt 先取一次操作数判 Long.MIN_VALUE
-                // 打系统行，再第二次求值并取负；副作用（RAND 抽号等）随双倍，原样复刻。
-                // （wave/audit-vm 曾按单求值登记「已知偏离·待复刻」，此处收口；语料 13 处
-                // -RAND 的 RNG 序列随原版口径移动，golden E2E 不含 CASINO 无回归。）
-                if (operand.getIntValue(ctx) == Long.MIN_VALUE) ctx.printSystemLine("警告：对 -9223372036854775808 取负不生效")
-                -operand.getIntValue(ctx)
+                // 4.981 MinusInt（OperatorMethod.cs:753-765）只取**一次**操作数交给
+                // SafeArithmetic.SafeNegate（SafeArithmetic.cs:52-65）：`-Long.MIN_VALUE`
+                // 溢出时 PrintWarning 并返回 **MAX**（不是回绕成 MIN）。
+                //
+                // 1.824 的 MinusInt（OperatorMethodManager.cs:559-566）是「先取一次判
+                // MIN_VALUE 打系统行、再取第二次求值取负」，移植侧此前照抄成双求值 + 回绕
+                // （EX-3）；4.981 把这条双求值收成单次调用 ⇒ 操作数里的副作用（RAND 抽号、
+                // `++`）只发动一次，返回值也不再回绕。语料侧 13 处 `-RAND` 的 RNG 序列
+                // 随原版口径前移（golden E2E 不含 CASINO 无回归）。
+                SafeArithmetic.negate(operand.getIntValue(ctx)) { ctx.reportArithmeticOverflow(it) }
             }
             OperatorCode.NOT -> if (operand.getIntValue(ctx) == 0L) 1L else 0L
             OperatorCode.BIT_NOT -> operand.getIntValue(ctx).inv()
@@ -630,19 +684,17 @@ data class Unary(
     }
 
     private fun changeValue(ctx: EvalContext, delta: Long): Long {
-        // spec: OperatorMethodManager.cs:609-627 → VariableTerm.ChangeValue（VariableTerm.cs:202-223）
+        // spec: OperatorMethodManager.cs:609-627 → VariableTerm.ChangeValue（VariableTerm.cs:218-235）
         // —— 下标只求值一遍，PlusValue 返回加完的新值；旧值不单独读。
-        // 下标缓冲走借还（VariableReader.borrowIndices），不逐次 new LongArray。
-        val vr = operand as VarRef
-        val n = vr.indices.size
-        val reader = ctx.variables
-        val idx = reader.borrowIndices(n)
-        try {
-            for (i in 0 until n) idx[i] = vr.indices[i].getIntValue(ctx)
-            return reader.plusInt(vr.name, idx, delta)
-        } finally {
-            reader.returnIndices()
-        }
+        //
+        // 2026-11-17（wave/rpt-sparse）：落点改走 [VarRef.addIntValue]，与语句层
+        // `SET X += n` 共用「严格通道 → 只有动态下标才转稀疏背板」这一套口径
+        // （c45357a86）。此前这里自己 `borrowIndices` + `reader.plusInt`，**绕开了稀疏补径**，
+        // 于是 `X = ++ITEM:IDX`（IDX 运行期为 -1）照抛「数组变量"ITEM"的第1参数(-1)超出数组范围」；
+        // 而原版 `ChangeValue`（VariableTerm.cs:218-235）转交 `Identifier.PlusValue`，1 维数组
+        // 走 SparseArray 下标器（Runtime/Script/SparseArray.cs:25-40）⇒ 缺省 0 加增量写回字典，
+        // 应得 1。顺带恢复访问点句柄快径，不再逐次按名查表。
+        return (operand as VarRef).addIntValue(ctx, delta)
     }
 
     /**
@@ -704,15 +756,19 @@ data class UnaryAfter(
 
     override fun getIntValue(ctx: EvalContext): Long {
         val vr = operand as VarRef
-        val n = vr.indices.size
-        val reader = ctx.variables
-        val idx = reader.borrowIndices(n)
-        val newVal = try {
-            for (i in 0 until n) idx[i] = vr.indices[i].getIntValue(ctx)
-            reader.plusInt(vr.name, idx, if (op == OperatorCode.INCREMENT) 1L else -1L)
-        } finally {
-            reader.returnIndices()
-        }
+        // spec: OperatorMethodManager.cs:629-655（IncrementAfterInt / DecrementAfterInt）——
+        // 先读改写一次、返回**改写前**的旧值。
+        //
+        // 2026-11-17（wave/rpt-sparse）：同 [Unary.changeValue] 改走 [VarRef.addIntValue]，
+        // 否则 `X = ITEM:IDX++`（IDX 运行期为 -1）同样绕开稀疏补径照抛 OoRVarArg
+        // （原版 VariableTerm.cs:218-235 → SparseArray.cs:25-40）。旧值 = 新值 ∓ 1 的口径不变：
+        // 稀疏背板上 `ITEM:-1++` 的旧值 0、新值 1（读默认 0 后加 1 写回字典）。
+        //
+        // 溢出（4.981，OperatorMethod.cs:853-863 / :877-887）：`X = MAX; X++` 的新值被
+        // VariableToken.cs:752 的 SafeAdd 钳成 MAX，旧值 = MAX-1；`--` 对 MIN 对称得
+        // MIN+1。这里 `newVal ∓ 1` 恒不溢出（MAX-1 / MIN+1 都在域内），与 4.981 catch
+        // 分支的返回值同值；告警由 plusIntEntry 的 SafeAdd 打一次（catch 那条不可达）。
+        val newVal = vr.addIntValue(ctx, if (op == OperatorCode.INCREMENT) 1L else -1L)
         return if (op == OperatorCode.INCREMENT) newVal - 1 else newVal + 1
     }
 
@@ -787,10 +843,14 @@ data class Binary(
             else -> {
                 val l = left.getIntValue(ctx)
                 val r = right.getIntValue(ctx)
+                // 4.981 的整型 + / - / * 已从「unchecked 回绕」改成 SafeArithmetic 钳制
+                // （`OperatorMethod.cs:278` / :307 / :321 → `SafeArithmetic.cs:7-50`）：
+                // 溢出时 PrintWarning（「整数溢出: a op b」）并饱和到 MAX/MIN，不中断脚本。
+                // 求值序不变（左先右后，C# 实参左到右），副作用次数也不变。
                 when (op) {
-                    OperatorCode.PLUS -> l + r
-                    OperatorCode.MINUS -> l - r
-                    OperatorCode.MULT -> l * r
+                    OperatorCode.PLUS -> SafeArithmetic.add(l, r) { ctx.reportArithmeticOverflow(it) }
+                    OperatorCode.MINUS -> SafeArithmetic.subtract(l, r) { ctx.reportArithmeticOverflow(it) }
+                    OperatorCode.MULT -> SafeArithmetic.multiply(l, r) { ctx.reportArithmeticOverflow(it) }
                     OperatorCode.EQUAL -> if (l == r) 1L else 0L
                     OperatorCode.NOT_EQUAL -> if (l != r) 1L else 0L
                     OperatorCode.GREATER -> if (l > r) 1L else 0L
@@ -1095,6 +1155,34 @@ internal fun Expr.isSideEffectFree(): Boolean = when (this) {
     is FormStringTerm -> parts.all { p ->
         p is FormPart.Text || (p as FormPart.Embedded).ast.isSideEffectFree()
     }
+}
+
+/**
+ * 该子树能否在**解析期**折成常量 —— 判「下标是常量还是运行期表达式」用的判据。
+ *
+ * 语义对应原版两条：`Restructure` 把能折的结点换成 `SingleTerm`
+ * （spec: FunctionMethodTerm.cs:35-59 —— `CanRestructure` 且全部实参已折成 SingleTerm），
+ * 而 `VariableTerm.Restructure` 只对折出来的 `SingleTerm` 实参做 `CheckElement`
+ * （spec: VariableTerm.cs:316-347）。⇒ 4.981 的稀疏 1 维数组上：「常量下标越界」装载/执行前
+ * 就抛 OoRVarArg，「动态下标越界」根本不检查、落到 SparseArray 返回默认值。
+ * 我们这条链**不做算术常量折叠**（`Parser.buildVariableTerm` 保留 `Binary(+, 1, 1)`，
+ * 见下述实现），所以这里按「字面量 + 常量运算」递归判，与「折得动」等价而不是与
+ * 「已折过」等价 —— 两种口径对同一个下标给出同一个结论，且不依赖折叠时机。
+ *
+ * 保守方向与 [isSideEffectFree] 相反但同样安全：判 **false**（当成运行期表达式）只是让
+ * 越界走容忍分支（PC 也不检查该支），判 true 才会让越界硬抛 —— 只有「能证明是常量」的
+ * 才判 true。
+ */
+internal fun Expr.isCompileTimeConst(): Boolean = when (this) {
+    is IntLiteral, is FloatLiteral -> true
+    // 字符串字面量只出现在关键字下标位：解析期会被 constantKeywordLookup 折成 IntLiteral，
+    // 折不动时包成 KeywordIndexArg（运行期查表，可能查到越界值）⇒ 不算常量。
+    is StrLiteral -> false
+    // 前缀 ++/-- 写变量，其「值」依赖运行期；其余一元运算符对常量仍是常量。
+    is Unary -> op != OperatorCode.INCREMENT && op != OperatorCode.DECREMENT && operand.isCompileTimeConst()
+    is Binary -> left.isCompileTimeConst() && right.isCompileTimeConst()
+    is Ternary -> cond.isCompileTimeConst() && ifTrue.isCompileTimeConst() && ifFalse.isCompileTimeConst()
+    else -> false
 }
 
 /**

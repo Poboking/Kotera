@@ -87,6 +87,26 @@ class VirtualCharaNoRegistry(
     /** 持久化快照（.rt2 注册表段的载荷；二进制形态见 [encode]/[decode]）。 */
     fun snapshot(): Snapshot = Snapshot(virtualNoToEntity.toMap(), nextCandidate)
 
+    /**
+     * 世界重置：丢弃全部身份登记（整张角色表被世界级重置丢弃时用）。
+     *
+     * **续发游标不回退** —— 号一旦发出去就永久作废，理由与 [retire] 的不变量同一口径：
+     * 被 vanilla 变量捕获的虚拟 NO 会随 `.sav` 长期存在，若重置把池子回退到
+     * [VIRTUAL_NO_BASE]，新世界里的另一个实体就可能拿到旧号，读回老档按号解析会
+     * **冒名**命中原实体。另两条否决「回退」的理由：
+     * - [restore] 的判据是「续发游标 > 已用最大值」（会复用已退休号即拒绝），回退后
+     *   再并入老 `.rt2` 快照会直接撞上这条 fail-closed 闸，读档变成硬失败；
+     * - 号域是 Int 上界（约 2^31，[allocate] 已对耗尽 fail-closed），单局投射量级远用不完，
+     *   回退没有任何容量收益。
+     *
+     * 只清登记、不动游标：与 [retire] 的差别是「一次性全退」而不是「一个实体退」。
+     * 幂等（重复调用仍是空表、游标不动）。
+     */
+    fun resetIdentities() {
+        entityToVirtualNo.clear()
+        virtualNoToEntity.clear()
+    }
+
     /** 注册表持久化形状：虚拟 NO → EntityId，外加续发游标。 */
     data class Snapshot(
         val entries: Map<Int, Long>,

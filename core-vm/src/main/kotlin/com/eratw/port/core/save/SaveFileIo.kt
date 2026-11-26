@@ -143,7 +143,7 @@ class RootedSaveFileIo(
         if (isReadOnly(path)) return false
         val parent = f.parent ?: return false
         // 快路：同目录临时文件 → 原子换名（见上一条 KDoc 的崩溃安全理由）。
-        if (writeByAtomicReplace(parent, f, bytes)) return true
+        if (writeByAtomicReplace(parent, f, path, bytes)) return true
         // 退路：原地截断覆盖，与原版 `FileMode.Create` 逐字同语义。
         //
         // 为什么必须有这条退路（2026-11-01 玩家「不能覆盖旧存档」）：快路的峰值占用是
@@ -153,7 +153,7 @@ class RootedSaveFileIo(
         // （空槽只有临时文件一份占用）—— 恰好就是玩家报的两条现象。
         // 退路只在快路已经失败时走，因此对正常设备的行为零改动；代价是这一次覆盖失去
         // 「被杀不截断」的保证，退化成原版语义 —— 比「存不上」好。
-        val ok = writeInPlace(f, bytes)
+        val ok = writeInPlace(f, path, bytes)
         if (ok) {
             SaveDiagnostics.note("WRITE", path, "原子换名失败，已退原地截断覆盖（本次无崩溃安全保证）")
         }
@@ -176,11 +176,11 @@ class RootedSaveFileIo(
         // 同 [write]：只读档显式拒绝，不依赖 POSIX rename 的权限差异。
         if (isReadOnly(path)) return false
         val parent = f.parent ?: return false
-        return when (writeByAtomicReplace(parent, f, producer)) {
+        return when (writeByAtomicReplace(parent, f, path, producer)) {
             StreamWriteOutcome.OK -> true
             StreamWriteOutcome.PRODUCER_FAILED -> false
             StreamWriteOutcome.IO_FAILED -> {
-                val ok = writeInPlace(f, producer)
+                val ok = writeInPlace(f, path, producer)
                 if (ok) {
                     SaveDiagnostics.note("WRITE", path, "原子换名失败，已退原地截断覆盖（本次无崩溃安全保证）")
                 }
@@ -199,6 +199,7 @@ class RootedSaveFileIo(
     private fun writeByAtomicReplace(
         parent: Path,
         target: Path,
+        relPath: String,
         producer: (OutputStream) -> Unit,
     ): StreamWriteOutcome {
         var tmp: Path? = null
@@ -227,6 +228,13 @@ class RootedSaveFileIo(
             if (e is Error) throw e
             // 通道本身写失败（磁盘满 / 通道被拒）即使是从 producer 的 write 调用里冒出来，
             // 也归 IO 失败：退原地截断重写正是为它准备的（玩家「不能覆盖旧存档」那一类）。
+            // 失败本体必须在这里留痕（2026-11-19 SAVEGLOBAL 玩家报障根修）：三态 outcome
+            // 把异常整个吞掉，调用方只拿得到 false，报告推不出根因。
+            reportWriteFailure(
+                relPath,
+                if (producerFailed && guarded?.ioFailed != true) "producer" else "atomic-replace",
+                e,
+            )
             if (producerFailed && guarded?.ioFailed != true) StreamWriteOutcome.PRODUCER_FAILED
             else StreamWriteOutcome.IO_FAILED
         } finally {
@@ -247,7 +255,7 @@ class RootedSaveFileIo(
      *   OOM；在这里折成 false，那条链对写入阶段永远不触发，等于白建。
      *   见 `SaveOomReclaimTest` —— 假体本来就按「write 抛 OOM」建模，生产实现此前与假体口径不一致。
      */
-    private fun writeByAtomicReplace(parent: Path, target: Path, bytes: ByteArray): Boolean {
+    private fun writeByAtomicReplace(parent: Path, target: Path, relPath: String, bytes: ByteArray): Boolean {
         var tmp: Path? = null
         var moved = false
         return try {
@@ -263,7 +271,8 @@ class RootedSaveFileIo(
             replaceByMove(tmp, target)
             moved = true
             true
-        } catch (_: Exception) {
+        } catch (ignore: Exception) {
+            reportWriteFailure(relPath, "atomic-replace", ignore)
             false
         } finally {
             // 只有失败路径要清场：move 成功后 tmp 已不存在，且 moved 标记拦住重复删除。
@@ -277,7 +286,7 @@ class RootedSaveFileIo(
      * 同 [writeByAtomicReplace]：Exception 收敛成 false，[OutOfMemoryError] 一类 `Error` 上抛
      * （截断已经发生，让调用方的重试链去接管比静默失败多一条活路）。
      */
-    internal fun writeInPlace(target: Path, bytes: ByteArray): Boolean = try {
+    internal fun writeInPlace(target: Path, relPath: String, bytes: ByteArray): Boolean = try {
         FileChannel.open(
             target,
             StandardOpenOption.CREATE,
@@ -289,7 +298,8 @@ class RootedSaveFileIo(
             ch.force(true)
         }
         true
-    } catch (_: Exception) {
+    } catch (ignore: Exception) {
+        reportWriteFailure(relPath, "in-place", ignore)
         false
     }
 
@@ -299,7 +309,7 @@ class RootedSaveFileIo(
      * 与字节版 [writeInPlace] 同口径：Exception 收敛成 false，`Error`（OOM）上抛 ——
      * 截断已经发生时，让调用方的求援重试链接管比静默失败多一条活路。
      */
-    internal fun writeInPlace(target: Path, producer: (OutputStream) -> Unit): Boolean = try {
+    internal fun writeInPlace(target: Path, relPath: String, producer: (OutputStream) -> Unit): Boolean = try {
         FileChannel.open(
             target,
             StandardOpenOption.CREATE,
@@ -314,6 +324,7 @@ class RootedSaveFileIo(
         true
     } catch (e: Throwable) {
         if (e is Error) throw e
+        reportWriteFailure(relPath, "in-place(producer)", e)
         false
     }
 
@@ -362,6 +373,16 @@ class RootedSaveFileIo(
         } catch (_: FileAlreadyExistsException) {
             Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING)
         }
+    }
+
+    /**
+     * 写失败留痕（2026-11-19 SAVEGLOBAL 玩家报障根修）：此前的三态 outcome / false 返回
+     * 把底层异常整个吞掉，玩家报告只剩一句「保存全局数据时发生错误」推不出根因。
+     * 本函数与 [SaveDiagnostics.report] 直连（环形缓冲会随下一份错误报告出网），
+     * 跑在失败的 catch 块里 —— 永远不抛，做不到就静默。
+     */
+    private fun reportWriteFailure(relPath: String, stage: String, error: Throwable) {
+        runCatching { SaveDiagnostics.report("WRITE", relPath, stage, error) }
     }
 
     override fun delete(path: String): Boolean = runCatching {

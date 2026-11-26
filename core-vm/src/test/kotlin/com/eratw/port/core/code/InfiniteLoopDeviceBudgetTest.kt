@@ -40,7 +40,7 @@ class InfiniteLoopDeviceBudgetTest {
         /** 墙钟闸的采样频率（Process.cs:1012 的 state.lineCount % 10000 == 0）。 */
         const val CHECK_LINES = 10_000
 
-        /** 墙钟阈值 1 ms（> 0 即开关打开，口径同 Process.cs:989）。 */
+        /** 墙钟阈值 1 ms（> 0 即开关打开，口径同 skia Process.ScriptProc.cs:35、官方 Process.cs:1012）。 */
         const val ALERT_MS = 1L
     }
 

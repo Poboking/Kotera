@@ -1,11 +1,12 @@
 package com.eratw.port.modlivingworld
 
-import com.eratw.port.modapi.ArchetypeDecl
-import com.eratw.port.modapi.ComponentDecl
-import com.eratw.port.modapi.FieldDecl
-import com.eratw.port.modapi.FieldType
+import com.eratw.port.modapi.EraMod
+import com.eratw.port.modapi.ModCarrier
+import com.eratw.port.modapi.ModCarrierDeclaration
 import com.eratw.port.modapi.ModManifest
-import com.eratw.port.modapi.RelationshipDecl
+import com.eratw.port.modapi.RelationKey
+import com.eratw.port.modapi.modDeclarations
+import com.eratw.port.modlivingworld.generated.BondKeys
 
 /**
  * 关系 Mod（eratw.lw.relationship）的**全部声明，只此一份真源**（§21.9 判据 4「双向独立
@@ -17,6 +18,11 @@ import com.eratw.port.modapi.RelationshipDecl
  * 边值（关系度）各自独立 —— 「双向独立关系数据」由 directed = true 的单一边型承担，A→B
  * 写 5 不动 B→A 的 3。边值语义由本 Mod 给（引擎只保证 Long 边值随边持久化，§7 关系投影协议）。
  *
+ * ## 字段名不在这里
+ *
+ * 组件、原型与备忘字段的名字由 [BondKeys] 提供（`:tools:modgen-accessors` 生成），声明与
+ * [com.eratw.port.modlivingworld.generated.BondView] 的读写列指着同一批键。
+ *
  * ## 与事件 Mod 的共存（判据 4 正向半边）
  *
  * 事件 Mod（[EventDeclarations]）在同一对实体上声明**自己的**边型 `lw.rel.tension` 与
@@ -25,40 +31,36 @@ import com.eratw.port.modapi.RelationshipDecl
  * **重名 fail-closed**：谁想声明同名边型/同名字段，`DeclarationRegistry.freeze` 当场
  * 抛 DeclarationConflictException 整包拒绝（负向半边由 LivingWorldDeclarationTest 钉住）。
  */
-object RelationshipDeclarations {
+@ModCarrier
+object RelationshipDeclarations : ModCarrierDeclaration {
 
     const val PACKAGE_ID: String = "eratw.lw.relationship"
 
-    /** 关系数据组件（判据 4「各自字段」半边）： bondData 挂在原型上承载自由文本备忘。 */
-    const val COMPONENT_BOND_DATA: String = "lw.rel.bondData"
+    /** [ModCarrierDeclaration] 的实现面；与 [PACKAGE_ID] 同值，保留常量给既有调用面。 */
+    override val packageId: String get() = PACKAGE_ID
 
-    /** 关系备忘原型（最小形状；字段写不检原型挂载，挂载只为查询圈定）。 */
-    const val ARCHETYPE_PAIR: String = "lw.rel.pair"
-
-    /** 备忘字段（全局命名空间，lw 前缀防撞）。 */
-    const val FIELD_BOND_NOTES: String = "lwBondNotes"
+    /** 载体工厂：装配期逐会话新建实例（`onLoad` 会往里塞状态，不许复用）。 */
+    override fun newMod(): EraMod = RelationshipMod()
 
     /** 好感边型：有向、去重、destroy 级联清边（缺省组），边值 = 好感度（Mod 语义）。 */
-    const val RELATION_AFFINITY: String = "lw.rel.affinity"
+    val AFFINITY: RelationKey = RelationKey("lw.rel.affinity")
 
-    val manifest: ModManifest = ModManifest(
-        packageId = PACKAGE_ID,
-        version = "0.1",
-        components = listOf(
-            ComponentDecl(
-                name = COMPONENT_BOND_DATA,
-                fields = listOf(
-                    FieldDecl(FIELD_BOND_NOTES, FieldType.STR),
-                ),
-            ),
-        ),
-        archetypes = listOf(
-            ArchetypeDecl(ARCHETYPE_PAIR, listOf(COMPONENT_BOND_DATA)),
-        ),
-        relationships = listOf(
-            // 双向独立 = 两条方向相反的有向边各自持值；不设 autoInverse（反向是独立数据，
-            // 不是同一份数据的镜像 —— 这正是「双向独立」的声明面表达）。
-            RelationshipDecl(name = RELATION_AFFINITY, directed = true),
-        ),
-    )
+    /**
+     * 本载体的全部声明。`override` 是 [ModCarrierDeclaration] 的实现面 —— 构建期注册表
+     * 从各声明 object 直接取这份 manifest 编资产，不再由 `BuiltinManifestBuild` 逐个点名。
+     */
+    override val manifest: ModManifest = modDeclarations(PACKAGE_ID, version = "0.1") {
+        displayName("生活世界 · 关系")
+        author("eratw-port")
+        description("双向好感度与关系备注")
+        component(BondKeys.component) {
+            str(BondKeys.bondNotes)
+        }
+        archetype(BondKeys.archetype) {
+            uses(BondKeys.component)
+        }
+        // 双向独立 = 两条方向相反的有向边各自持值；不设 inverse（反向是独立数据，
+        // 不是同一份数据的镜像 —— 这正是「双向独立」的声明面表达）。
+        relation(AFFINITY)
+    }
 }

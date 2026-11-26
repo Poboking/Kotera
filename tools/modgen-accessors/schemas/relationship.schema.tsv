@@ -1,0 +1,4 @@
+schema	com.eratw.port.modlivingworld.generated	Bond
+component	lw.rel.bondData	component
+field	lwBondNotes	STR	false	bondNotes
+archetype	lw.rel.pair

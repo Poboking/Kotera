@@ -4,13 +4,15 @@ import com.eratw.port.modapi.Registration
 import java.util.Collections
 
 /**
- * 运行期诊断的**域**：一条记录「说的是哪一类事」（era-arch-v61u.md §21.6 冻结的七域）。
+ * 运行期诊断的**域**：一条记录「说的是哪一类事」。
  *
- * 七域与 §21.6 的 `domain{PHASE, JOB, HOOK, INTERACTION, DECISION, ACTION, SAVE}` 逐项同序：
+ * 前七域与 era-arch-v61u.md §21.6 的 `domain{PHASE, JOB, HOOK, INTERACTION, DECISION, ACTION, SAVE}`
+ * 逐项同序；`EVENT`（事件处理器派发）是 §21.6 之后**末尾追加**的第八域，**不许插在旧域中间**：
  * 顺序本身是对外可观测面（[RuntimeDiagnosticsTest] 把 `entries.map { it.name }` 钉死），
- * 改序 = 改导出与工具侧判读，必须回 §21.6 重新裁定。本车只落**域枚举**，不落业务语义。
+ * 改序 = 改导出与工具侧判读；追加只动新域，旧七域的名字与相对次序都不变。
+ * 本类只落**域枚举**，不落业务语义。
  */
-enum class DiagnosticDomain { PHASE, JOB, HOOK, INTERACTION, DECISION, ACTION, SAVE }
+enum class DiagnosticDomain { PHASE, JOB, HOOK, INTERACTION, DECISION, ACTION, SAVE, EVENT }
 
 /**
  * 运行期诊断的**结果**：这条记录描述的那一步最后成了没有（§21.6 冻结四态）。
@@ -53,6 +55,52 @@ data class DiagnosticRecord(
     val reasonCode: String,
     val detail: String?,
 )
+
+/**
+ * 失败归因摘要条目：按 (domain, packageId, outcome) 三元组聚合出的计数（契约 §2 Lane DX3-B）。
+ *
+ * 只由 [diagnosticSummariesOf] 产出，`count >= 1`。`packageId` 为 null 表示引擎自身
+ * （与 [DiagnosticRecord.packageId] 同义），摘要里保留 null 而不归一化 —— 否则「引擎自身」
+ * 与某个恰好叫占位串的包会混成一组。
+ */
+data class DiagnosticSummary(
+    val domain: DiagnosticDomain,
+    val packageId: String?,
+    val outcome: DiagnosticOutcome,
+    val count: Int,
+)
+
+/**
+ * 失败归因摘要聚合（纯函数，契约 §2 Lane DX3-B）。
+ *
+ * 口径（组长裁定，禁止自创）：
+ * - 只收 FAILED / REJECTED；OK / SKIPPED 一律不进摘要（反向证明的摘除点就在下面那行过滤）；
+ * - 分组键 = (domain, packageId, outcome)，三元组全等才算同组；
+ * - 排序 = count 降序，同数按 key 字典序（key 串形如 DOMAIN|package|OUTCOME，null 包 id
+ *   用 `<engine>` 占位，字典序即 [String.compareTo] 的自然序）。
+ *
+ * 本函数只读入参、不碰任何账本内部表，是可被 vmdbg 复用的**单一真源**：vmdbg 把 JSONL
+ * 还原成 [DiagnosticRecord] 后调同一个 [diagnosticSummariesOf]，保证工具面与引擎面的摘要口径不会漂移。
+ *
+ * 顶层函数而非 object：core 层铁律禁静态可变全局，`RuntimeDiagnosticsTest` 的
+ * 「源码不读墙钟且无静态可变全局」逐文件扫顶层 object 并判红。
+ */
+fun diagnosticSummariesOf(records: Iterable<DiagnosticRecord>): List<DiagnosticSummary> {
+    val counts = HashMap<Triple<DiagnosticDomain, String?, DiagnosticOutcome>, Int>()
+    for (r in records) {
+        // 摘掉本行过滤 ⇒ OK/SKIPPED 进摘要 ⇒ 对应用例红（反向证明锚点）。
+        if (r.outcome != DiagnosticOutcome.FAILED && r.outcome != DiagnosticOutcome.REJECTED) continue
+        val key = Triple(r.domain, r.packageId, r.outcome)
+        counts[key] = (counts[key] ?: 0) + 1
+    }
+    return counts.entries
+        .map { (k, n) -> DiagnosticSummary(k.first, k.second, k.third, n) }
+        .sortedWith(compareByDescending<DiagnosticSummary> { it.count }.thenBy { diagnosticSummaryKeyOf(it) })
+}
+
+/** 摘要行的三元组键串（排序用；null 包 id 的占位串不与非空包名碰撞）。 */
+private fun diagnosticSummaryKeyOf(s: DiagnosticSummary): String =
+    "${s.domain.name}|${s.packageId ?: "<engine>"}|${s.outcome.name}"
 
 /**
  * 运行期诊断总线（M8-1，era-arch-v61u.md §21.6；落地边界按 §12.1 口径）。
@@ -312,6 +360,16 @@ class RuntimeDiagnostics(
         }
         return sb.toString()
     }
+
+    /**
+     * 失败归因摘要查询（契约 §2 Lane DX3-B）：按 (domain, packageId, outcome) 聚合，
+     * 只出 FAILED / REJECTED，count 降序、同数按 key 字典序（口径见 [diagnosticSummariesOf]）。
+     *
+     * 纯查询：锁内取 [snapshotLocked] 副本后交给纯函数聚合，**不改环、不改 seq、不改开关**，
+     * 对 [snapshot] / [exportJsonLines] 零改写；空环返回空列表。
+     */
+    fun failureSummary(): List<DiagnosticSummary> =
+        diagnosticSummariesOf(synchronized(lock) { snapshotLocked() })
 
     /** 锁内取快照：按物理环序还原成最旧 → 最新。 */
     private fun snapshotLocked(): List<DiagnosticRecord> {

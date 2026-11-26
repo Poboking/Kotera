@@ -152,6 +152,33 @@ interface BeginHost {
     /** `systemResult == 0` 的新游戏初始化：ResetData + AddCharacterFromCsvNo(0) + PrintBar（Process.cs:2169-2179）。 */
     fun onNewGameSelected() {}
 
+    /**
+     * 「一局真正开起来了」的**收尾**通知（`Process.cs:2169-2179` 那段之后、首帧进 SHOP 之前）。
+     *
+     * 与 [onNewGameSelected] 的区别是本钩子的**触发条件与序无关**：eraTW 在脚本里
+     * `BEGIN FIRST`（`TITLE.ERB:115`），走 [stepTitle] → [beginAtScriptReturn] 的
+     * REENTERED 分支，[onNewGameSelected] 那条路**永不执行**；故 mod 侧的新局通知挂在这里。
+     *
+     * 相位：`RESETDATA` 已跑（`TITLE.ERB:113`）、角色已建档（`TITLE.ERB:114` +
+     * `SYSTEM.ERB:12`）、`@EVENTFIRST` 全 body 已跑完、pending `BEGIN` 已被
+     * [BeginScriptCalls.takePendingBegin] 消费，`SHOP` 脚本体与 `SHOW_SHOP` 尚未跑。
+     *
+     * 缺省 no-op = 宿主没有该能力（所有测试假体与 [BeginHost] 的其它实现行为不变）。
+     * 会随「回标题再开新局」重复触发；实现必须自复位。
+     */
+    fun onNewGameStarted() {}
+
+    /**
+     * 读档走到末尾的通知（`Process.cs:2680-2683` 的 `endEventLoad` 之前）。
+     *
+     * 相位：存档变量池已恢复（[com.eratw.port.core.save.FileSystemOps.loadData]）、
+     * mod 侧车与 CSV 注入值已就位、`EVENTLOAD` 已跑完（[stepSystemLoad]），
+     * `SHOW_SHOP` 尚未跑。**不携带成败标志**：侧车缺失/损坏走既有 `warn` 后继续。
+     *
+     * 缺省 no-op = 宿主没有该能力。
+     */
+    fun onSaveLoaded() {}
+
     /** `TITLE_LOADGAME` 缺失时的读档界面（Process.cs:2189）。true = 宿主已接管。 */
     fun beginLoadGameOpening(): Boolean = false
 
@@ -206,16 +233,17 @@ interface BeginHost {
     fun readAnyKey() {}
 
     /**
-     * 指令链收尾那次按键等待（[readAnyKey]）的**适用范围**。
+     * 指令链收尾那次按键等待（[readAnyKey]）的**总闸**。
      *
      * 原版口径 = 「凡是走 `SOURCE_CHECK` 的指令都等一次」（`Process.cs:2417` 置位 →
      * `:2450-2453` 的 `setWait()`），缺省 `true` 即原样，没表态的宿主（含 [BeginFlow.NONE]
      * 与各测试假体）行为零变化。
      *
-     * 生产宿主收窄的理由与取值见
-     * [com.eratw.port.core.proc.ConsoleBeginHost.commandEndWaitComCodes]：手机上一次等待
-     * = 一次额外点击，而语料里 移動 是「每走一步就 `RETURN 1` 回训练链」的高频指令
-     * （`魔改内容/qol/qol_MAP.ERB:59-66`），那一步等待会吃掉玩家下一次点目的地。
+     * 生产宿主把这一档交给玩家：「指令后等一次按键」设置项缺省开 = 原版；关掉 = 整条链都不等
+     * （取值链见 [GameSession.waitAfterCommand] →
+     * [com.eratw.port.core.proc.ConsoleBeginHost.waitAfterCommand]）。引擎侧不再按指令码二次
+     * 收窄 —— 2026-11-02 那次收窄（只清掃被拒）是产品取舍，2026-11-22 玩家反馈「口上根本看不见、
+     * 还得往上翻阅」后按原版恢复，收窄只保留为设置项的一档。
      *
      * @param comCode 本次指令的训练码（`SELECTCOM`，原版 `Process.cs:2380` 写入；
      *   注意取的是 **`SOURCE_CHECK` 之前**的值 —— 那之后 `RESULT` 已被脚本函数的返回值覆盖）
@@ -619,9 +647,9 @@ class BeginFlow(
      * 置真条件是 `RESULT != 0`（`endCallComXX`，`:2404-2407` 的 0 直接跳 `endCallEventComEnd`，
      * 不经 `endCallSourceCheck` ⇒ 不等待）—— 语料正是用负数 RESULT 表达「选了但不该做」。
      *
-     * **值从「恒真」改成策略判定**（2026-11-02）：置位时机与消费点都不动，但置进去的值来自
-     * [pendingComEndWait]（在 `endCallComXX` 那一刻算好的 [BeginHost.shouldWaitAfterCommand]），
-     * 好让生产宿主把这条等待收窄到「只打一行提示就返回」的指令上。
+     * **值从「恒真」改成主机判定**（2026-11-02）：置位时机与消费点都不动，但置进去的值来自
+     * [pendingComEndWait]（在 `endCallComXX` 那一刻算好的 [BeginHost.shouldWaitAfterCommand]）。
+     * 2026-11-22 起生产宿主按原版缺省全量等待，只由设置项整体开关（见接口 KDoc）。
      */
     private var needWaitToEventComEnd = false
 
@@ -1139,14 +1167,22 @@ class BeginFlow(
             )
         }
         val called = callScript("EVENTFIRST", true, true)
-        if (called) {
+        val next = if (called) {
             // ProcessState.cs:352-362 —— EVENTFIRST 以 `BEGIN SHOP` 收尾（语料 SYSTEM.ERB:30）
             // 时事件栈在这一刻清空，原版当场 Begin()；不补这一步宿主会停在 Normal 直接退出。
             beginAtScriptReturn(
                 SystemStateCode.First_Begin, "beginFirst", "EVENTFIRST",
                 "Process.cs:2201-2209 / ProcessState.cs:352-362",
-            )?.let { return it }
+            )
+        } else {
+            null
         }
+        // 新局通知必须在 pending BEGIN 消费之后、首帧进 SHOP 之前发：此刻变量已复位、
+        // 角色已建档、@EVENTFIRST 已跑完，mod 侧看到的是「干净的、要开局的那一局」。
+        // 触发条件与 TITLE 走哪条分支无关 —— eraTW 在脚本里 `BEGIN FIRST`（TITLE.ERB:115），
+        // 走 beginAtScriptReturn 的 REENTERED 支，onNewGameSelected 那条路永不执行。
+        host.onNewGameStarted()
+        if (next != null) return next
         return done(
             SystemStateCode.First_Begin, "beginFirst",
             if (called) StepOutcome.CALLED else StepOutcome.NOT_CALLED,
@@ -2107,12 +2143,20 @@ class BeginFlow(
         )
     }
 
-    /** `endEventLoad`（Process.cs:2680-2683）：只有一句 `endAutoSave()`。 */
-    private fun stepEventLoad(): StateStep =
-        endAutoSave(
+    /**
+     * `endEventLoad`（Process.cs:2680-2683）：只有一句 `endAutoSave()`。
+     *
+     * 先发 [BeginHost.onSaveLoaded]（mod 侧读档完成通知）：相位取在 `EVENTLOAD` 已跑完
+     * （[stepSystemLoad]）、`SHOW_SHOP` 尚未跑的这一刻，与 `Process.cs:2680-2683` 原版
+     * 只有一句 `endAutoSave()` 的顺序相容 —— 通知是纯旁路，不改变状态机走向、不新增脚本调用。
+     */
+    private fun stepEventLoad(): StateStep {
+        host.onSaveLoaded()
+        return endAutoSave(
             SystemStateCode.LoadData_CallEventLoad, "endEventLoad",
             "Process.cs:2680-2683 / :2592-2601",
         )
+    }
 
     // ------------------------------------------------------------------
     // 存档/读档界面入口（SAVEGAME / LOADGAME 语句交接之后）：
@@ -2231,16 +2275,6 @@ class BeginFlow(
          * 因为 id 按函数键分配，见 `proc/LineIdentityIds.kt`）。
          */
         internal const val PAGE_IDENTITY_PC = 0
-
-        /**
-         * 清掃的训练码（`CSV/Train.csv:199` 的 `410,掃除`）。
-         *
-         * 它是「玩家选了、但语料自己判定不该做」这一类指令的代表：`COMF410 掃除.ERB:18-26`
-         * 在 `YOGORE < OSOUJI_LIMIT` 时只 `DRAWLINE` + 打一行「也没有那么乱七八糟、就算不扫除可以吧」
-         * 就 `RETURN -1`，零状态变化 —— 没有收尾那一次等待，那行提示在手机上会被下个回合的
-         * 输出整帧刷掉（BOARD 2026-11-01「点清扫看着没反应」）。
-         */
-        internal const val COM_CLEANING = 410
 
         /**
          * `endCallAblupXX` 空行半句的提示串（`Process.cs:2519`）。**官方行为：该半句不经

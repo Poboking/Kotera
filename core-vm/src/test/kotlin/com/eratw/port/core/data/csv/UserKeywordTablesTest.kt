@@ -258,6 +258,7 @@ class UserKeywordTablesTest {
      * - `COLUMNDIV@2` 从快照消失：4.981 把 `ERB/カラム機能/COLUMNDIV@2.ERD` 的 11 行数据
      *   全部注释掉了（每行行首 `;`）⇒ 空表不进快照（空表登记语义只属 [UserKeywordTables.install]）。
      * 语料的 ERD 表变了要同步改 CorpusProfile 对应列；未登记的根直接判红。
+     * 表内首键同样随根取列（`EI_FLAG`：4.980=`栄養` / 4.981(261111)=`营养`）。
      */
     @Test
     fun `全语料 ERD 表快照读数`() {
@@ -277,10 +278,16 @@ class UserKeywordTablesTest {
             snap.keys.sorted(),
             "${profile.name} 语料实测 ${profile.erdSnapshotKeys.size} 张；变多/变少都要写出处",
         )
+        // 首键也随根取列（本类其它读数同口径）：4.980 语料 `0,栄養`；261111 简体化 `0,营养`
+        // （旧名 栄養 转进 261111 新增的 EI_FLAG.als 别名，不进 erd 快照）。
+        val firstKey = when (profile) {
+            com.eratw.port.boot.CorpusProfile.V4_980 -> "栄養"
+            com.eratw.port.boot.CorpusProfile.V4_981 -> "营养"
+        }
         assertEquals(
             0,
-            snap["EI_FLAG"]?.get("营养"),
-            "EI_FLAG 下标 0 = 营养（261111 CSV 简体化，261017=栄養；繁体旧名进 261111 新增的 EI_FLAG.als 别名）",
+            snap["EI_FLAG"]?.get(firstKey),
+            "EI_FLAG 下标 0 = $firstKey（4.980=栄養；261111 简体化=营养，繁体旧名进 EI_FLAG.als 别名）",
         )
     }
 }

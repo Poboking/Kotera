@@ -27,8 +27,9 @@ import java.nio.file.StandardCopyOption
  * 路径与沙箱策略不在本类重复实现：[SqlitePathLayout] 决定连接串落到 `:memory:` 还是
  * 写根目录下的稳定 target；本类只负责把随包 seed 变成可写副本：
  * - target 不存在：复制 seed（有 seed 时）；
- * - [SqliteOpenTarget.File.mutable]（`plugins/qol_data.db`）：target 已存在就保留玩家写入，
- *   即使随包 seed 更新也不回滚；
+ * - [SqliteOpenTarget.File.mutable]（[mutableDataSources] 命中，默认空集 —— 见
+ *   [DEFAULT_MUTABLE_DATA_SOURCES] 的取证记录）：target 已存在就保留写入，
+ *   即使随包 seed 更新也不刷新；
  * - 其余 seed 库：seed 比 target 新时原子刷新，否则保留 target 里的 ERB 写入。
  *
  * 刷新先写同目录临时文件再 atomic move，复制/替换失败只留旧库，不会出现半截 target。
@@ -44,9 +45,10 @@ class AndroidXSqliteDriver(
     private val driver: SQLiteDriver,
     seedRoot: Path,
     writeRoot: Path,
+    mutableDataSources: Set<String> = DEFAULT_MUTABLE_DATA_SOURCES,
 ) : SqlDriver {
 
-    private val layout = SqlitePathLayout(seedRoot, writeRoot)
+    private val layout = SqlitePathLayout(seedRoot, writeRoot, mutableDataSources)
 
     override fun open(connectionString: String): SqlConnection {
         return when (val target = layout.resolve(connectionString)) {

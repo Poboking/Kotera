@@ -104,7 +104,7 @@ private fun startsWithUtf8Bom(f: File): Boolean =
  * 多一件、少一件、带 BOM 的件少一处、map 根件换了名，任一条都判红。
  *
  * 读数出处（语料只读；4.980 = `eratw-画蛇添足版eratw4.980`、
- * 4.981 = `eraTW4.981-261017-EAGLOV3`）：
+ * 4.981 = `eraTW4.981-261111-EAGLOV3`；261017 已退役，上述清单读数在两根上同值）：
  * - `plugins` 下 .xml 文件：两根同值 4 件（`bbas_dataset.xml` / `schema.xml` /
  *   `tw_csv_chs.xml` / `tw_taste_chs.xml`；4.981 另有 `tw_csv_chs.xml.bak`、
  *   `tw_taste_chs.xml.bak` 两件备份，扩展名不是 .xml ⇒ 不进清单）；

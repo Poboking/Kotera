@@ -305,7 +305,9 @@ class MouseMethodsTest {
         h.mouse.warnRecorder = { warns += it }
         val e = assertFailsWith<CodeEE> { h.call("MOUSESKIP", Value.IntV(1L)) }
         assertTrue(e.message!!.contains("MOUSESKIP"), "实际：${e.message}")
-        assertTrue(e.message!!.contains("参数个数"), "实际：${e.message}")
+        // 移植侧零参函数的个数检查由 checkArity 走 error-texts.yaml 的 ArgsNotNeeded
+        // 文案（「不需要参数」，LangKey.ArgsNotNeeded）；needle 逐字对齐现网，判据（抛 CodeEE）不变。
+        assertTrue(e.message!!.contains("不需要参数"), "实际：${e.message}")
         assertEquals(emptyList<String>(), warns)
     }
 

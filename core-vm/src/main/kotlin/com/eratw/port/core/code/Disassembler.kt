@@ -92,10 +92,7 @@ object Disassembler {
             Opcode._JUMP_IF_FALSE, Opcode._JUMP_IF_TRUE ->
                 "${ins.name} ${SlotAddr.format(a)}, L${pc + 1 + b}"
 
-            Opcode._CALL -> {
-                val fname = program.functions.getOrNull(a)?.name ?: "#$a"
-                "${ins.name} $fname, $b, ${SlotAddr.format(c)}"
-            }
+            Opcode._CALL -> formatCall(program, ins, a, b, c)
 
             Opcode._RET -> if (SlotAddr.isNone(a)) "_RET" else "_RET ${SlotAddr.format(a)}"
 
@@ -105,7 +102,7 @@ object Disassembler {
             Opcode._PRINT_LITERAL ->
                 "${ins.name} ${quote(program.string(a))}" + if (b != 0) ", $b" else ""
 
-            Opcode._EVAL_INT, Opcode._EVAL_STR -> "${ins.name} \$$a, ${SlotAddr.format(b)}"
+            Opcode._EVAL_INT, Opcode._EVAL_STR, Opcode._EVAL_FLOAT -> "${ins.name} \$$a, ${SlotAddr.format(b)}"
 
             // 条件位融合超指令（246，MODERN-T1）：表达式 + 目标槽 + 跳转标签，
             // 与 `Assembler.emitExtension` 的形态逐字对应。
@@ -165,6 +162,24 @@ object Disassembler {
             // ERB 语句：操作数语义未定（M2 第二批），原样打印三个字保证往返一致
             else -> "${ins.name} $a, $b, $c"
         }
+    }
+
+    /**
+     * `_CALL` 回印（自 [format] 的 `when` 分支拆出，detekt LongMethod）。
+     *
+     * b = 实参数 | 旗标位（strret/jump/try，见 [Opcode] 契约）：实参拆出来印，旗标按
+     * Assembler 的同名关键字后缀回印（2026-11-26 B1 起，往返一致）。旧行为印原始 b：
+     * 带旗标的产物回编会整段失败（旗标位被当实参数解析），故拆。
+     */
+    private fun formatCall(program: Program, ins: Instruction, a: Int, b: Int, c: Int): String {
+        val fname = program.functions.getOrNull(a)?.name ?: "#$a"
+        val argc = b and Opcode.ARG_COUNT_MASK
+        val flagSuffix = buildString {
+            if ((b and Opcode.STR_RET_FLAG) != 0) append(", strret")
+            if ((b and Opcode.JUMP_FLAG) != 0) append(", jump")
+            if ((b and Opcode.TRY_FLAG) != 0) append(", try")
+        }
+        return "${ins.name} $fname, $argc, ${SlotAddr.format(c)}$flagSuffix"
     }
 
     private fun quote(s: String): String {

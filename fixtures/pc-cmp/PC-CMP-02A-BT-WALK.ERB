@@ -1,0 +1,51 @@
+; PC-CMP-02A-BEFORETHROW.ERB -- 主人判词 m00130 第21条 对拍装置夹具 A2（无 #ONLY 遮蔽版）
+; Purpose: the buckets case cannot show a clean nested 1-2-3 walk because PC-CMP-01's
+;          #PRI + #LATER member is registered twice, and the #ONLY carrier case ends the whole
+;          event before bucket 2. BEFORE_THROW is the one event name the engine lets you raise
+;          from INSIDE an event, so the nested dispatch is observable without any key input:
+;            reference/emuera-skia-4.981/Emuera/Runtime/Script/Process.State.cs:598-614
+;              isBeforeEvent = FunctionName == "BEFORE_THROW" || "BEFORE_ERROR"
+;              if (!isBeforeEvent) foreach (called in functionList) if (called.IsEvent) throw CodeEE
+;            reference/emuera-skia-4.981/Emuera/Runtime/Script/Process.ScriptProc.cs:784-832
+;              THROW -> CallEventFunction("BEFORE_THROW") unless Config.DisableBeforeErrorThrow
+;            Process.State.cs:528-540 the pending CodeEE re-throws when BEFORE_THROW finishes,
+;              so this fixture kills exactly ONE boot per process -- run.py relaunches per case.
+; BEFORE_THROW exists only on the 4.981 fork (reference/emuera-cs has no BEFORE_THROW:
+;   IdentifierDictionary.cs:72-89 whitelist is the 9 plain EVENT names). On a 1.824-lineage host
+;   the label below parses as an ordinary function (LabelDictionary is never populated), so the
+;   PCMARK-BT-* lines must be entirely absent there -- which is itself a useful cross-check.
+; The driver is #LATER on purpose: the 261111 corpus @EVENTLOAD members in bucket 1 (SYSTEM.ERB)
+; finish their bodies first, and the fork's own load-time handlers are #LATER too, so a late
+; driver runs after the store/game subsystems exist and THROW cannot be swallowed mid-boot.
+; emuera.config in the copy root must have DISABLE BEFORE_ERROR/THROW EVENTS:NO (run.py sets it).
+;
+; Expected on PC 4.981, this file's members only (bucket list per LabelDictionary.cs:134-141):
+;   DRIVER -> nested BEFORE_THROW: PRI, PRI2, PL (bucket 1) -> N (bucket 2) -> PL (bucket 3)
+;   PCMARK-BT-THROWN must be ABSENT (THROW leaves the driver).
+; Expected on the port (FuncMeta.kt:227-233 exclusive): DRIVER, PRI, PRI2, PL, N -- no repeat.
+; NOTE for the judgement: on the port "PRI, PRI2, PL" here is only an ORDER diff, not a
+;   double-dispatch diff, because the exclusive bucket of PL is 1 as well. The double-dispatch
+;   witness is PC-CMP-01-PL. That is why both cases exist.
+
+@EVENTLOAD
+#LATER
+	PRINTFORML PCMARK-BT-DRIVER
+	; deliberately no LOCAL: THROW aborts this body, so anything after it must not be needed
+	THROW PC-CMP-02A
+	PRINTFORML PCMARK-BT-THROWN
+
+@BEFORE_THROW
+#PRI
+	PRINTFORML PCMARK-BT-PRI
+
+@BEFORE_THROW
+#PRI
+	PRINTFORML PCMARK-BT-PRI2
+
+@BEFORE_THROW
+#PRI
+#LATER
+	PRINTFORML PCMARK-BT-PL
+
+@BEFORE_THROW
+	PRINTFORML PCMARK-BT-N

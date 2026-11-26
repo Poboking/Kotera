@@ -3,6 +3,7 @@ package com.eratw.port.vmdbg
 import com.eratw.port.core.code.CallStackOverflow
 import com.eratw.port.core.code.StepLimitExceeded
 import com.eratw.port.core.err.CodeEE
+import com.eratw.port.core.host.InputSink
 import com.eratw.port.core.proc.FuncMeta
 import java.io.PrintStream
 import java.nio.file.Files
@@ -29,7 +30,7 @@ object CmdCall {
      */
     fun run(a: Args, out: PrintStream, err: PrintStream): Int {
         val name = a.positional.getOrNull(1) ?: throw CliError("用法: call <函数名> [--args 0,1,...] [--steps N]")
-        val assembled = Assembler.assemble(a, out = out)
+        val assembled = Assembler.assemble(a, sinkOverride = sinkOverride(a), out = out)
         applyPreState(assembled, a, out)?.let { return it }
         val (intArgs, strArgs) = parseArgs(a.value("--args"))
         return invokeAndReport(assembled, name, intArgs, strArgs, a, out = out)
@@ -52,6 +53,17 @@ object CmdCall {
         if (failure == null) failure = applyAddChara(assembled, a, out)
         if (failure == null) failure = applySets(assembled, a, out)
         return failure
+    }
+
+    /**
+     * --inputs 脚本：按序投给取值面的脚本（见 [ScriptedInputSink]）。未给 = null ⇒
+     * 装配期仍用缺省 [ImmediateInputSink]，既有调用面参数序列逐字不变。
+     */
+    fun sinkOverride(a: Args): InputSink? {
+        val raw = a.value("--inputs") ?: return null
+        val items = raw.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        if (items.isEmpty()) throw CliError("--inputs 不能为空")
+        return ScriptedInputSink(items)
     }
 
     /** `--addchara`：逐号走真实 `ADDCHARA` 的同一实现；任一失败即停。 */

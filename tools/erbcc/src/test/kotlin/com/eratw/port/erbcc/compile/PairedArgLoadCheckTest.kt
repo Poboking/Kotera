@@ -92,8 +92,8 @@ class PairedArgLoadCheckTest {
         val w = assertNotNull(warn("DT_ROW_ADD", 2))
         assertEquals("PAIR.ERB", w.file)
         assertEquals(8, w.line, "Statement.line 是 0 基，LoadWarning 口径 1 基")
-        assertTrue(w.message.contains("DT_ROW_ADD"))
-        assertTrue(w.message.contains("实参 2 个"))
+        assertTrue(w.message.contains("DT_ROW_ADD函数: 参数数量(2)不满足1+2n"), "官方 arity 键基串：${w.message}")
+        assertTrue(w.message.contains("数组形态另可给 4 个"), "第二份签名是移植侧读数，留取证后缀：${w.message}")
     }
 
     // ------------------------------------------------------------------
@@ -140,10 +140,10 @@ class PairedArgLoadCheckTest {
             DT_ROW_SET "T", 1, "c", 1, "d", 2, "e"
             """.trimIndent(),
         )
-        val paired = messages.filter { it.contains("参数个数不成对") }
+        val paired = messages.filter { it.contains("函数: 参数数量(") }
         assertEquals(2, paired.size, "两族各一条：实际 $messages")
-        assertTrue(paired.any { it.contains("DT_ROW_ADD") })
-        assertTrue(paired.any { it.contains("DT_ROW_SET") })
+        assertTrue(paired.any { it.contains("DT_ROW_ADD函数: 参数数量(2)不满足1+2n") })
+        assertTrue(paired.any { it.contains("DT_ROW_SET函数: 参数数量(7)不满足2+2n") })
     }
 
     @Test
@@ -158,7 +158,7 @@ class PairedArgLoadCheckTest {
             """.trimIndent(),
         )
         assertTrue(
-            messages.none { it.contains("参数个数不成对") },
+            messages.none { it.contains("函数: 参数数量(") },
             "合法形态不应误报：实际 $messages",
         )
     }

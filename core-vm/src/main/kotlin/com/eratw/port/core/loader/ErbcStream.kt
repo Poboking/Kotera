@@ -2,6 +2,7 @@ package com.eratw.port.core.loader
 
 import com.eratw.port.core.code.CallArg
 import com.eratw.port.core.code.CodeCacheCensus
+import com.eratw.port.core.code.StatementCacheHooks
 import com.eratw.port.core.code.CallArgIndex
 import com.eratw.port.core.code.CallArgSource
 import com.eratw.port.core.code.ConstantPool
@@ -26,7 +27,9 @@ import com.eratw.port.core.code.LineTable
 import com.eratw.port.core.code.Opcode
 import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.ProgramBase
+import com.eratw.port.core.code.RuntimeCodeRelease
 import com.eratw.port.core.diag.LockWatch
+import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.expr.Binary
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.FloatLiteral
@@ -244,6 +247,57 @@ internal const val RUNTIME_INTERN_FORM_BUDGET: Int = 1 shl 18
 
 /** 运行期内建串池去重表上界（StringPool.armRuntimeDistinctBudget）。取值口径同上节。 */
 internal const val RUNTIME_INTERN_STRING_BUDGET: Int = 1 shl 18
+
+/**
+ * 运行期语句条目缓存上界（**每张惰性语句池一张表**；entries 折块）。
+ *
+ * 为什么要有这一条：`LazyStatementRecords.cached` 把物化过的语句实例按池下标钉住、只进不出，
+ * 而运行期物化面 = 「玩到过的全部代码」。全量语料语句池 1,712,420 条，单条常驻实测 277 B
+ * （Statement 壳 26 B + 实参/表达式/串 251 B）⇒ 无界时最坏 1,712,420 × 277 B ≈ 474 MB，
+ * 512 MiB 挡位上是一颗迟早要炸的雷，且**炸在哪里（玩家玩到多远）不可控**。
+ *
+ * 取值口径（算式）：单条常驻按 277 B 计（壳 26 B + 实参/表达式/串 251 B；同一口径的常量
+ * `SINGLE_STMT_RESIDENT_BYTES` 在测试源集 `com.eratw.port.perf.PhaseFacets`，主代码不引用它，
+ * 只在此复述数值），则 131,072 条 × 277 B = 36,318,944 B ≈ 34.6 MiB。
+ *
+ * - 为什么取 1 shl 17：真机（512 MiB 挡）实测一局死亡时只物化 41,887 条 ≈ 11.9 MiB
+ *   （11.9 MiB / 41,887 ≈ 298 B/条，与上面的单条口径同量级，差在容器与块背衬开销），
+ *   预算给到实测工作集的 3.1 倍 ⇒ 正常游玩（长挂机、主线 + 支线铺开）不触发逐出；
+ *   逐出只在「玩过的代码」真超 13 万条时才发生，且是块级 LRU，不是整表重置。
+ * - 为什么不再往上取：512 MiB 挡位里图形/渲染驻留按真机报告 ≈ 200 MiB、装载基线 ≈ 139 MiB；
+ *   代码缓存侧三件相加 = 节点两表硬顶 32 MiB（[RUNTIME_NODE_ENTRY_BUDGET]）
+ *   + 本表 34.6 MiB + 钉住表 ≤ 0.8 MiB（[RUNTIME_STMT_PIN_BUDGET]，口径见其注记）
+ *   ≈ 67.4 MiB。再上一档（1 shl 18 = 69.2 MiB 本表）就让这一侧顶到 102 MiB，
+ *   开始挤压变量与渲染临时。
+ * - 为什么不再往下压：整表重置型的收缩实测把引导从 ~3 分钟拖到 28 分钟（见
+ *   [RUNTIME_NODE_ENTRY_BUDGET]）；块级 LRU 的代价来自「工作集被反复逐出重解」，
+ *   预算压到实测工作集（41,887）以下就等于把正常游玩推进抖动区。
+ *
+ * 语义边界：装载趟与编译器档不武装（无运行期物化）；武装后只有**运行期填块**受界。
+ * 「同一下标恒同一实例」对未被逐出的块成立；被逐出块里的下标重新物化会得到新实例 ——
+ * 需要跨逐出保身份的下标（CALLSHARP 候选、数据节语句）走
+ * [LazyStatementRecords.pinStatementIdentities] 按条钉住，见下一条常量。
+ */
+internal const val RUNTIME_STMT_ENTRY_BUDGET: Int = 1 shl 17
+
+/**
+ * 钉住条目表上界（条）。钉住集 = CALLSHARP 候选 ∪ 数据节语句下标（全量语料约 4,000 条量级）。
+ *
+ * 取值口径（算式）：每条钉住条目的增量成本 = 4 B 下标（排序 `IntArray` 里一项）
+ * + 一条 `HashMap<Int, Statement>` 表项 ≈ 48 B（Integer 键 16 B + 表项槽 32 B，按 0.75
+ * 装载因子摊到每项；条目实例本身本来就要物化，不算增量）≈ 52 B。1 shl 14 = 16,384 条
+ * ⇒ 最坏 16,384 × 52 B = 851,968 B ≈ 0.81 MiB。
+ *
+ * 为什么按条钉、不按块钉：数据节 3,874 条散在全量池 1,712,420 条里（平均每 442 条一条），
+ * 按块钉等于把 418 个块**全部**钉死，上界当场失效。
+ *
+ * 超限处置 = fail-closed：不静默丢弃钉住（丢掉等于悄悄破身份契约），照旧收进表里并在
+ * census 读数（`stmtPinOverflow`）里计超限条数 ⇒ 宁可让内存上界短暂失效**且失效可见**，
+ * 也不许让「同一下标恒同一实例」无声破裂。写入方只有两处、都在装载/会话建立期各一次
+ * （`ConstantPool.sharpStatementIndices`、`SidecarTables.dataSectionStatementIndex`），
+ * 运行期没有增长点。
+ */
+internal const val RUNTIME_STMT_PIN_BUDGET: Int = 1 shl 14
 
 /**
  * 单张字符串表数据块的映射上限（128 MiB）。
@@ -1157,6 +1211,7 @@ private fun readCallArgs(
                     isStr = (flags and ErbcFormat.CallArgFlags.IS_STR) != 0,
                     name = name,
                     present = (flags and ErbcFormat.CallArgFlags.PRESENT) != 0,
+                    isFloat = (flags and ErbcFormat.CallArgFlags.IS_FLOAT) != 0,
                 ),
             )
         }
@@ -1179,6 +1234,7 @@ private fun readParamNameTable(
     cur: StreamCursor,
     expectedFuncCount: Int,
     stats: DecodeStats? = null,
+    gate: RuntimeMaterializationGate,
 ): ParamNameTable {
     val funcCount = cur.count("形参名段函数个数", 4)
     if (funcCount != expectedFuncCount) {
@@ -1198,7 +1254,7 @@ private fun readParamNameTable(
         dataFrom[i] = cur.pos
         repeat(n) { names[cur.u32()] }
     }
-    return ParamNameTable(cur.window, names, counts, dataFrom)
+    return ParamNameTable(cur.window, names, counts, dataFrom, gate)
 }
 
 /**
@@ -1212,10 +1268,11 @@ private class ParamNameTable(
     private val strings: StreamStringTable,
     private val counts: IntArray,
     private val dataFrom: IntArray,
+    private val gate: RuntimeMaterializationGate,
 ) {
     fun namesOf(funcIndex: Int): List<String> {
         val n = counts[funcIndex]
-        return if (n == 0) emptyList() else LazyParamNames(window, strings, dataFrom[funcIndex], n)
+        return if (n == 0) emptyList() else LazyParamNames(window, strings, dataFrom[funcIndex], n, gate)
     }
 
     fun hasAny(): Boolean {
@@ -1235,6 +1292,7 @@ private class LazyParamNames(
     private val strings: StreamStringTable,
     private val dataFrom: Int,
     private val count: Int,
+    private val gate: RuntimeMaterializationGate,
 ) : AbstractList<String>() {
     /**
      * 逐项备忘（只有真被取过的项才落槽）：`ProcessRuntime.onFunctionEnter` 每次调用都会读
@@ -1243,16 +1301,36 @@ private class LazyParamNames(
      */
     private val memo = arrayOfNulls<String>(count)
 
+    /**
+     * 运行期物化失败的收敛备忘（口径见 [MaterializationFailures]）。实例与 [FunctionInfo]
+     * 同寿 ⇒ 备忘同样同寿，「同节点（同函数的同个形参名）不重复抛」在实例内成立。
+     */
+    private val failures = MaterializationFailures(gate)
+
     override val size: Int get() = count
 
+    @Suppress("TooGenericExceptionCaught")
     override fun get(index: Int): String {
         if (index < 0 || index >= count) {
+            // 越界分支（stab-b 修复批）：门关 = 原样 IOOBE（装载期形状）；门开 = 运行期口径
+            // 同句收敛 CodeEE。
+            if (gate.runtimeEntered) {
+                throw CodeEE("形参名下标越界: $index（共 $count 项）（${gate.source}）")
+            }
             throw IndexOutOfBoundsException("形参名下标越界: $index（共 $count 项）")
         }
         memo[index]?.let { return it }
-        val s = strings[window.u32At(dataFrom + index * 4)]
-        memo[index] = s
-        return s
+        try {
+            val s = strings[window.u32At(dataFrom + index * 4)]
+            memo[index] = s
+            return s
+        } catch (e: Throwable) {
+            // 门关原样上抛 / 门开收敛 CodeEE —— 口径与理由见
+            // [MaterializationFailures.convergeOrRethrow]。
+            // @Suppress 理由：这里**刻意**接住 Throwable（含 Error）—— 收敛口径要求
+            // 「物化失败任何非 CodeEE 异常」都不得直穿 VM，根因经 initCause 进因果链。
+            throw failures.convergeOrRethrow(index, "形参名", e)
+        }
     }
 }
 
@@ -1283,12 +1361,29 @@ private class LazyParamNames(
  * 由 `reference/emuera-cs/MinorShift.Emuera.Runtime.Script.Data/LabelDictionary.cs:318-322`
  * 的 `point.Index = count; count++` 逐条登记，不存在需要全表聚合的字段。
  */
+/**
+ * 段 4 惰性函数表的**按产物上下文**（stab-b 修复批）：解码常量 + 运行期交接门。
+ * 单独成类只为把 [MappedFunctionTable] 的构造参数压回阈值内 —— 语义上它们是同一份
+ * 「本产物」读数（文件长度 / pc 下界来自装载趟，门随产物交接）。
+ */
+private class FunctionTableContext(
+    /** 产物文件长度（解码游标的越界判据口径，与装载趟同值）。 */
+    val fileSize: Int,
+    /** 记录校验趟的绝对 pc 下界（R7 基线；全量产物 = 0）。 */
+    val pcFrom: Int,
+    /** 运行期交接门：见 [RuntimeMaterializationGate]。 */
+    val gate: RuntimeMaterializationGate,
+)
+
 private class MappedFunctionTable(
     private val window: SectionWindow,
-    private val fileSize: Int,
+    ctx: FunctionTableContext,
     private val recordOffsets: IntArray,
     private val strings: StreamStringTable,
     private val paramNames: ParamNameTable?,
+) : AbstractList<FunctionInfo>(), LazyFunctionTable {
+    private val fileSize = ctx.fileSize
+
     /**
      * 记录校验趟的绝对 pc 下界（R7 基线；全量产物 = 0）。
      *
@@ -1296,24 +1391,43 @@ private class MappedFunctionTable(
      * 不随基线扩参），带基线时下界由实现自持：entryPc 与标签 pc 都是绝对 pc，合法区间是
      * `[pcFrom, instructionCount)`（与 `ErbcReader.validate` 的窗口判界同口径）。
      */
-    private val pcFrom: Int,
-) : AbstractList<FunctionInfo>(), LazyFunctionTable {
+    private val pcFrom = ctx.pcFrom
+
+    private val gate = ctx.gate
+
     private val cache = arrayOfNulls<FunctionInfo>(recordOffsets.size)
+
+    /** 运行期物化失败的收敛备忘（口径见 [MaterializationFailures]）。 */
+    private val failures = MaterializationFailures(gate)
 
     override val size: Int get() = recordOffsets.size
 
     override var materializedCount: Int = 0
         private set
 
+    @Suppress("TooGenericExceptionCaught")
     override fun get(index: Int): FunctionInfo {
         if (index < 0 || index >= recordOffsets.size) {
+            // 越界分支（stab-b 修复批）：门关 = 原样 IOOBE（装载期形状）；门开 = 运行期口径
+            // 同句收敛 CodeEE（VM 调度层的函数下标判界先行，这里只兜直取面）。
+            if (gate.runtimeEntered) {
+                throw CodeEE("函数下标越界: $index（共 ${recordOffsets.size} 个）（${gate.source}）")
+            }
             throw IndexOutOfBoundsException("函数下标越界: $index（共 ${recordOffsets.size} 个）")
         }
         cache[index]?.let { return it }
-        val f = decode(index)
-        cache[index] = f
-        materializedCount++
-        return f
+        try {
+            val f = decode(index)
+            cache[index] = f
+            materializedCount++
+            return f
+        } catch (e: Throwable) {
+            // 门关原样上抛 / 门开（运行期首次物化失败：产物磁盘损坏 / 补丁窗口被改）收敛
+            // CodeEE —— 口径与理由见 [MaterializationFailures.convergeOrRethrow]。
+            // @Suppress 理由：这里**刻意**接住 Throwable（含 Error）—— 收敛口径要求
+            // 「物化失败任何非 CodeEE 异常」都不得直穿 VM，根因经 initCause 进因果链。
+            throw failures.convergeOrRethrow(index, "函数", e)
+        }
     }
 
     /** 从记录自己的起始偏移重放一条函数记录（读序与索引趟、与 `ErbcReader` 逐字相同）。 */
@@ -1487,8 +1601,7 @@ private class MappedFunctionTable(
             funcCount: Int,
             strings: StreamStringTable,
             paramNames: ParamNameTable?,
-            fileSize: Int,
-            pcFrom: Int,
+            ctx: FunctionTableContext,
         ): MappedFunctionTable {
             val offsets = IntArray(funcCount)
             val seen = HashSet<String>(funcCount)
@@ -1513,7 +1626,7 @@ private class MappedFunctionTable(
                     cur.i32()
                 }
             }
-            return MappedFunctionTable(cur.window, fileSize, offsets, strings, paramNames, pcFrom)
+            return MappedFunctionTable(cur.window, ctx, offsets, strings, paramNames)
         }
     }
 }
@@ -1772,6 +1885,26 @@ internal class BlockRefs<T : Any>(val size: Int) {
         blocks.set(blockIndex, null)
     }
 
+    /**
+     * 单块内**按槽**清空（堆压回收的细粒度补充）：[keep] 返回 true 的槽保留，其余置空；
+     * 块本体不弃 —— 钉住实例还要留在原下标上（整块弃会解出第二个实例，数据节以实例为键）。
+     *
+     * 返回清掉的槽数。与 [clearBlock] 的分工：块里没有钉住实例时整块弃更彻底，有钉住时走这条。
+     */
+    fun clearSlots(blockIndex: Int, keep: (Int) -> Boolean): Int {
+        val b = blocks.get(blockIndex) ?: return 0
+        val arr = castBlock(b)
+        val base = blockIndex shl BLOCK_SHIFT
+        var cleared = 0
+        for (j in 0 until arr.length()) {
+            if (arr.get(j) != null && !keep(base + j)) {
+                arr.set(j, null)
+                cleared++
+            }
+        }
+        return cleared
+    }
+
     /** 升序遍历**已物化**的条目（释放原文一类批处理；不再白扫 171 万个空槽）。 */
     fun forEachActive(block: (T) -> Unit) {
         for (i in 0 until blocks.length()) {
@@ -1781,11 +1914,21 @@ internal class BlockRefs<T : Any>(val size: Int) {
         }
     }
 
-    /** 已物化条数（诊断/perf 装置读数；不参与任何取值）。 */
-    fun nonNullEntries(): Int {
-        var n = 0
-        forEachActive { n++ }
-        return n
+
+    /**
+     * 该块是否「没有条目可清」：未分配（背衬已弃）与已清空都算。
+     *
+     * 按槽回收用它一处判两件事 —— 未分配块直接跳过语义等同，已清空的块要连背衬一并弃；
+     * 判据不看 LRU 戳（戳在武装之前填的块上恒 0，按戳判会把它们整片跳过）。
+     */
+    fun isEmptyBlock(blockIndex: Int): Boolean {
+        val arr = blocks.get(blockIndex)?.let { castBlock(it) }
+        var empty = true
+        if (arr != null) for (j in 0 until arr.length()) if (arr.get(j) != null) {
+            empty = false
+            break
+        }
+        return empty
     }
 
     /** 已分配的块数（perf 装置按「块数 × 块宽」算常驻）。 */
@@ -1980,11 +2123,95 @@ internal class BlockU32s(
  * 串字节混成一条。三个生产事实不变：单线程 VM 下锁接近零竞争、装载期仍然零物化、
  * 按升序整池取用时的代表实例次序与整池档逐条相同。
  */
+
+/**
+ * 运行期交接门（stab-b 修复批，2026-11-18）：装载/诊断路径与**运行期物化**的分界。
+ *
+ * 移植自有面（ADR-005 判词，原版无锚）：erbc 是移植自研产物格式，原版 ERB 装载期
+ * 一次性解析、没有「惰性物化」对应面 —— 坏脚本 = 装载期红字/拒载，顶层
+ * `catch (Exception)`（Process.cs:462-476）红字继续。移植侧的惰性池把同一类损坏
+ * 推迟到「首次取用才解码」，如果此刻把装载层异常（ErbcFormatException 一族）裸抛进
+ * VM 执行栈，`ProcessRuntime.executeCore` 只盖章 CodeEE / ExprEvalException
+ * （ProcessRuntime.kt:1598-1608）⇒ 非 CodeEE 直穿 → VM 线程死 → 停机失败屏，
+ * 结局比原版重且无「红字后继续」的退路。裁定（组长 2026-11-18）：**运行期**物化失败
+ * 转 CodeEE（损坏原因 + 位置，玩家可见）走红字、该语句失败、会话继续；
+ * 禁止吞异常、禁止静默；同节点首个失败即收敛（后续请求重抛同一收敛实例，
+ * 不重复解码、不新建错误对象）。
+ *
+ * 「运行期」的判定就是本门：`LazyStatementRecords.releaseRaws` 翻位 —— 它由
+ * `Program.releaseStatementRaws`（ProcessRuntime 构造期，Program.kt:1003-1020）调用，
+ * 是「装载/装配结束、VM 开始执行」的既有交接点。门关着（装载趟、诊断快照、
+ * 变异差分测试、`loadMappedEager` 对照档）一切异常形状**逐字保留**：装载期失败
+ * 仍由 ProgramLoader 的四类 catch 收口成 ErbcLoadException/失败屏，惰性档与整池档
+ * 的「异常类型与消息逐字相同」对拍（ErbcStreamEquivalenceTest / LazyStatementDecodeTest）
+ * 靠的正是这条不变量；门开着（VM 执行期）物化失败才收敛成 CodeEE 走红字。
+ *
+ * [source] = 产物标识（与装载层 withSource 同口径的路径），收敛文案带上它，
+ * 多产物（主程序 + mod 补丁段）场景能指认是哪份产物坏了。
+ */
+internal class RuntimeMaterializationGate(
+    /** 产物标识：收敛文案的「哪份产物」维度（`file.path.toString()`，同 [MappedExprSource] 的 source）。 */
+    val source: String,
+) {
+    /** true = 已越过装载/装配交接（`releaseRaws` 翻位）；此后惰性物化失败按运行期口径收敛 CodeEE。 */
+    @Volatile
+    var runtimeEntered: Boolean = false
+        private set
+
+    /** 运行期交接（仅 `LazyStatementRecords.releaseRaws` 调用 —— 装配链与执行链的既有分界点）。 */
+    fun enter() {
+        runtimeEntered = true
+    }
+}
+
+/**
+ * 运行期物化失败的**收敛备忘**（stab-b 修复批）：下标 → 首个失败收敛出的 [CodeEE]。
+ *
+ * 四个惰性物化面（语句 / 表达式 / 函数 / 形参名）各持一份实例；条目数 ≤ 实际坏记录数，
+ * 正常产物恒空，只在失败路径读写，热路径零成本。「同节点不重复抛」的落点：同一下标的
+ * 后续失败在备忘命中后**重抛同一实例**（首个失败即收敛：不重复解码产生新错误对象）。
+ */
+internal class MaterializationFailures(private val gate: RuntimeMaterializationGate) {
+
+    private val map = HashMap<Int, CodeEE>()
+
+    /**
+     * 收敛本体（调用方已判门开）：同 key 已有收敛实例 → 原样返回；否则新建带位置与
+     * 损坏原因的 [CodeEE]、挂 [cause] 进因果链并记入备忘。[line] 为 best-effort 取行
+     * （记录头自身损坏/窗口不可读时折 -1 走「无位置」口径，[CodeEE.displayLine] 对负数
+     * 原样返回）—— 取行失败不影响收敛本身的形状。
+     */
+    fun converged(key: Int, what: String, cause: Throwable, line: () -> Int = { -1 }): CodeEE =
+        synchronized(map) {
+            map[key] ?: CodeEE(
+                "产物损坏：$what $key 物化失败（${gate.source}）：${cause.message ?: cause.javaClass.simpleName}",
+                line = runCatching(line).getOrDefault(-1),
+            )
+                .apply { initCause(cause) }
+                .also { map[key] = it }
+        }
+
+    /**
+     * 口径分派：门关（装载/诊断）原样上抛 [cause] —— 惰性档与整池档的「异常类型与消息
+     * 逐字相同」对拍（ErbcStreamEquivalenceTest / LazyStatementDecodeTest）和 ProgramLoader
+     * 的四类 catch 收口都靠这条不变量；[CodeEE] 原样透传（已是受控错误，不二次包装）。
+     * 门开（运行期首次物化失败，产物磁盘损坏 / 补丁窗口被改）：裸抛非 CodeEE 会直穿
+     * `ProcessRuntime.executeCore` 的 CodeEE 盖章点 → VM 线程死 → 停机；收敛成 CodeEE
+     * 走红字、该语句失败、会话继续（组长裁定 2026-11-18，移植自有面 ADR-005 判词，
+     * 原版无惰性物化对应面、无锚，判据自立）。
+     */
+    fun convergeOrRethrow(key: Int, what: String, cause: Throwable, line: () -> Int = { -1 }): Nothing {
+        if (cause is CodeEE || !gate.runtimeEntered) throw cause
+        throw converged(key, what, cause, line)
+    }
+}
+
 internal class LazyStatementRecords(
     private val arena: RecordSource,
     private val window: SectionWindow,
     private val fileSize: Int,
     private val recordOffsets: RecordOffsets,
+    private val gate: RuntimeMaterializationGate,
 ) : LazyStatementPool {
     /**
      * 条目槽（CMP-56 + MEM7 刀 2）：分块引用表，**只有被物化到的块才分配**。
@@ -1995,6 +2222,18 @@ internal class LazyStatementRecords(
      */
     private val cached = BlockRefs<Statement>(recordOffsets.size)
 
+    // ---- 运行期条目缓存的块级 LRU 上界（2026-11-17；取值口径见 RUNTIME_STMT_ENTRY_BUDGET）----
+    //
+    // 与 [RecordSource] 节点表同形：上界按**块**计（4,096 槽/块），超预算逐出戳最冷的
+    // 那一块，热块（正在跑的循环与最近访问的代码）按访问戳天然幸存。整表重置型收缩被
+    // 否决过（见 RUNTIME_NODE_ENTRY_BUDGET 的实测：引导 3 分钟拖到 28 分钟）。
+    // 状态与算法见 [StatementBlockLru]；线程口径：填块/逐出全在 [materializeLock] 内
+    // （= VM 线程 + 诊断线程串行解码），快路径的 touch 是锁外一次 LongArray 写
+    // （与节点表 nodeAt 同口径：最坏只是戳略旧）。
+
+    /** 条目缓存的块级 LRU（未武装 = 无界，装载趟与编译器档口径）。 */
+    private val blockLru = StatementBlockLru { cached.clearBlock(it) }
+
     /**
      * 物化慢路径的实例锁（CMP-56）。锁住的不只是条目表，还有三样**共享可变状态**：
      * [RecordSource.nodes]（惰性节点表 + ensureDepth）、段 3 的 [window]（`SectionWindow`
@@ -2002,10 +2241,31 @@ internal class LazyStatementRecords(
      * 解出两个实例、或把两条记录的串字节混成一条 ⇒ 必须整段串行。
      *
      * 快路径（[cached] 命中）不拿锁；生产 VM 单线程时锁只在首次物化时短暂竞争。
+     * 钉住表的写入共用这一把（传给 [StatementPins] 的构造参数），两表必须互斥，
+     * 否则声明钉住与同下标的并发物化会各写一份实例。
      */
     private val materializeLock = Any()
 
+    /**
+     * 钉住表（[StatementPins]；空表 = 未声明钉住）。
+     *
+     * 四个身份契约成员（[pinStatementIdentities] / [pinnedStatements] / [statementPinOverflow] /
+     * [setStatementEvictionSink]）**不**由它委托：[setStatementEvictionSink] 必须落在
+     * [blockLru]（纪元回调接的是条目缓存逐出侧），委托会把回调接到钉住表的空实现上，
+     * 逐出后 Vm 的 64 槽 L1 备忘就再也收不到失效信号（实测该委托让纪元用例转红）。
+     */
+    private val pins = StatementPins(recordOffsets.size, { cached.get(it) }, materializeLock)
+
+    /** 运行期块逐出次数（诊断读数；装载趟不计）。委托读 [StatementBlockLru.evictions]。 */
+    override val statementCacheEvictions: Int
+        get() = blockLru.evictions
     private val interner = ArgInterner()
+
+    /**
+     * 运行期物化失败的收敛备忘（stab-b 修复批，口径见 [MaterializationFailures]）。
+     * 访问全部在 [materializeLock] 内（statementAt 的解码段本就在锁内），无热路径成本。
+     */
+    private val failures = MaterializationFailures(gate)
 
     /** 原文是否已被释放（`Program.releaseStatementRaws` 转发过来）。 */
     private var rawsReleased = false
@@ -2017,11 +2277,22 @@ internal class LazyStatementRecords(
 
     override val totalCount: Int get() = recordOffsets.size
 
+    @Suppress("TooGenericExceptionCaught")
     override fun statementAt(index: Int): Statement {
         if (index < 0 || index >= recordOffsets.size) {
+            // 越界分支（stab-b 修复批）：门关 = 原样 IOOBE（防绕过 VM 判界的调用方，装载期
+            // 对拍与 LazyStatementDecodeTest 靠这条形状）；门开 = 运行期口径，同一句文案
+            // 收敛成 CodeEE 走红字（VM 调度层自己的判界在 Vm.kt:2338-2340 先行，这里只是
+            // 绕过 VM 的直取面——诊断快照、flat 片构建——的运行期兜底）。
+            if (gate.runtimeEntered) {
+                throw CodeEE("语句池下标越界: $index（共 ${recordOffsets.size} 条）（${gate.source}）")
+            }
             throw IndexOutOfBoundsException("语句池下标越界: $index（共 ${recordOffsets.size} 条）")
         }
-        cached.get(index)?.let { return it }
+        cached.get(index)?.let { hit ->
+            blockLru.touch(index shr BlockRefs.BLOCK_SHIFT)
+            return hit
+        }
         // OBS2-L2 探针（**只加探针**，锁的粒度/顺序/语义一字未动）：被观察的还是
         // [materializeLock] 这一把、还是「双检 + 解码 + 去重 + 写回」这一段；把块的值交出来
         // 只为了让记录点落在监视器**外侧**（LockWatch 类 KDoc 的叶锁不变式，形状照
@@ -2029,29 +2300,51 @@ internal class LazyStatementRecords(
         // 不进 LockWatch、零分配。锁内双检的「别的线程已物化」早退**不记样本**（同 MappedErbc 口径）。
         val watch = LockWatch.handleOrNull()
         val enterNs = if (watch === null) 0L else System.nanoTime()
-        var acquiredNs = 0L
-        var decodedCount = 0L
         val created = synchronized(materializeLock) {
-            if (watch !== null) acquiredNs = System.nanoTime()
+            val acquiredNs = if (watch !== null) System.nanoTime() else 0L
             // 双检：并发的第二个线程在锁外可能也看到 null，这里必须再查一次（CMP-56）。
-            cached.get(index)?.let { return it }
-            val s = arena.readStatement(StreamCursor(window, recordOffsets.get(index), fileSize))
-            // 按条规范化去重：与改造前「整池一次遍历」共用同一张表，只是把每条的工作挪到物化时
-            interner.run(listOf(s))
-            if (rawsReleased) s.releaseRaw()
-            cached.set(index, s)
-            materializedCount++
-            // tag = 本段在锁内解码的语句条数（逐条物化恒 1；装载趟压扁段 = 本趟条数）。
-            if (watch !== null) decodedCount = 1L
-            s
-        }
-        if (watch !== null) {
-            watch.noteSegment(
-                LockWatch.ID_ERBC_MATERIALIZE_LOCK, enterNs, acquiredNs, System.nanoTime(), decodedCount,
-            )
+            // 钉住表也在这条快路上（钉住条目从不进 [cached]，见 [StatementPins] 的 KDoc）。
+            val hit = cached.get(index) ?: pins.instanceAt(index)
+            // tag = 本段在锁内解码的语句条数（命中路径恒 0；逐条物化恒 1）。
+            var decoded = 0L
+            val result = if (hit != null) {
+                blockLru.touch(index shr BlockRefs.BLOCK_SHIFT)
+                hit
+            } else {
+                decoded = 1L
+                try {
+                    val s = arena.readStatement(StreamCursor(window, recordOffsets.get(index), fileSize))
+                    // 按条规范化去重：与改造前整池一次遍历共用同一张表，只是把每条的工作挪到物化时
+                    interner.run(listOf(s))
+                    if (rawsReleased) s.releaseRaw()
+                    if (!pins.put(index, s)) {
+                        cached.set(index, s)
+                        blockLru.touchOnFill(index shr BlockRefs.BLOCK_SHIFT)
+                    }
+                    materializedCount++
+                    s
+                } catch (e: Throwable) {
+                    // 门关（装载/诊断）原样上抛、门开（运行期首次物化）收敛 CodeEE —— 口径与
+                    // 理由见 [MaterializationFailures.convergeOrRethrow]；行取记录头 0 基源行
+                    // （与 [scanStatementHeaders] 同源，记录头损坏时折 -1 走「无位置」口径）。
+                    // @Suppress 理由：这里**刻意**接住 Throwable（含 Error）—— 收敛口径要求
+                    // 「物化失败任何非 CodeEE 异常」都不得直穿 VM（OOM/栈深的运行期物化失败
+                    // 同样要走红字面），根因经 initCause 进因果链，不吞不静默。
+                    throw failures.convergeOrRethrow(index, "语句", e) {
+                        window.u32At(recordOffsets.get(index) + 1).toInt()
+                    }
+                }
+            }
+            if (watch !== null) {
+                watch.noteSegment(
+                    LockWatch.ID_ERBC_MATERIALIZE_LOCK, enterNs, acquiredNs, System.nanoTime(), decoded,
+                )
+            }
+            result
         }
         return created
     }
+
 
     /**
      * CALLSHARP 装载趟扫描（CSHARP-WIRE C2）：逐条记录读**首字节**判语句标签
@@ -2065,14 +2358,12 @@ internal class LazyStatementRecords(
      * [materializeLock] 是为了与逐条物化共用同一份窗口游标状态（非 pin 档的
      * `byteAt` 会重映射换块）；生产调用点在会话装配段（VM 线程、无竞争），锁零等待。
      */
-    override fun sharpStatementIndices(): IntArray {
+    override fun sharpStatementIndices(): IntArray = synchronized(materializeLock) {
         val out = ArrayList<Int>()
-        synchronized(materializeLock) {
-            for (i in 0 until recordOffsets.size) {
-                if (window.byteAt(recordOffsets.get(i)) == StmtTag.CALL_SHARP) out.add(i)
-            }
+        for (i in 0 until recordOffsets.size) {
+            if (window.byteAt(recordOffsets.get(i)) == StmtTag.CALL_SHARP) out.add(i)
         }
-        return out.toIntArray()
+        out.toIntArray()
     }
 
     /**
@@ -2096,9 +2387,7 @@ internal class LazyStatementRecords(
         synchronized(materializeLock) {
             for (i in 0 until recordOffsets.size) {
                 val at = recordOffsets.get(i)
-                val line = window.u32At(at + 1)
-                val codeName = arena.str(window.u32At(at + 9))
-                visit(codeName, line)
+                visit(arena.str(window.u32At(at + 9)), window.u32At(at + 1))
             }
         }
     }
@@ -2160,54 +2449,120 @@ internal class LazyStatementRecords(
         return built
     }
 
+    /** 见 [StatementCacheHooks.pinStatementIdentities]（锁由 [pins] 自持）。 */
+    override fun pinStatementIdentities(indices: IntArray) = pins.pinStatementIdentities(indices)
+
+    override val pinnedStatements: Int get() = pins.pinnedCount
+
+    override val statementPinOverflow: Int get() = pins.overflowCount
+
+    /**
+     * 见 [StatementCacheHooks.setStatementEvictionSink]：回调装到 [blockLru]（条目缓存逐出的一侧），
+     * **不是**钉住表。安装动作与填块/逐出同锁，保证「块已清」与「纪元已 ++」是同一次发布。
+     */
+    override fun setStatementEvictionSink(sink: (() -> Unit)?) {
+        synchronized(materializeLock) { blockLru.evictionSink = sink }
+    }
+
+    /**
+     * 堆压回收：条目缓存整块还 + 段 3 节点表整块还（口径见接口 KDoc）。
+     *
+     * 属性形态 = [LazyStatementPool.releaseRuntimeCache] 的实现位（接口用模板方法把入口留在
+     * 函数上；本类函数数已顶到 detekt TooManyFunctions 阈值，实现位因此让给属性，见接口 KDoc）。
+     *
+     * 三条边界：
+     * - **钉住下标恒同一实例**：钉住集（CALLSHARP 候选 ∪ 数据节，约 4,000 条）散布在在用的块上，
+     *   整块弃几乎还不出东西 ⇒ 有钉住的块改按槽清（[BlockRefs.clearSlots]），钉住实例留在原下标。
+     * - **在 [materializeLock] 内做**：块清空与 [blockLru] 的纪元回调是同一次发布，
+     *   否则 VM 的 64 槽语句备忘会拿陈旧实例去执行/比较。
+     * - 节点表那一发同锁（[RecordSource] 的共享可变状态与条目缓存同锁，见 [materializeLock] KDoc）。
+     */
+    override val runtimeCacheRelease: RuntimeCodeRelease get() = synchronized(materializeLock) {
+        val shift = BlockRefs.BLOCK_SHIFT
+        // 整块弃：块里没有钉住实例才走这条（钉住表 4,000 条量级，散布在用的块上 ⇒ 大多数块
+        // 都含钉住实例，只靠整块弃在真机上几乎还不出东西）。
+        val stmtBlocks = blockLru.dropAll { block ->
+            pins.hasPinnedIn(block shl shift, (block + 1) shl shift)
+        }
+        // 含钉住的块改成按槽清：只留钉住实例（身份契约要求原下标恒同一实例），其余槽置空。
+        // 判据 lambda 提到循环外 —— 每块一个捕获对象在「堆已经吃紧」的时刻没有意义。
+        val keepPinned: (Int) -> Boolean = { idx -> pins.isPinned(idx) }
+        var stmtEntries = 0
+        for (bi in 0 until cached.blockCount) {
+            // 非空块才有槽可清；判据不看 LRU 戳（武装之前填的块戳恒 0，按戳判会整片漏清）。
+            if (!cached.isEmptyBlock(bi)) stmtEntries += cached.clearSlots(bi, keepPinned)
+            // 钉住实例本来就不进块表（pins.put 命中即不入 cached），所以按槽清完的块通常是
+            // 空壳：空背衬一并弃掉，既省 16 KiB，也别让 census 把空壳读成「条目缓存还在」。
+            if (cached.isEmptyBlock(bi)) {
+                cached.clearBlock(bi)
+                blockLru.dropEmptied(bi)
+            }
+        }
+        blockLru.releaseSlots(stmtEntries)
+        val nodeBlocks = arena.dropCachedNodes()
+        RuntimeCodeRelease(
+            statementBlocks = stmtBlocks,
+            nodeBlocks = nodeBlocks,
+            statementEntries = stmtEntries,
+        )
+    }
+
     /** 已物化的当场释放；未物化的由 [statementAt] 在解出来时立刻释放（口径同整池遍历）。 */
     override fun releaseRaws() {
         synchronized(materializeLock) {
             rawsReleased = true
+            // 运行期交接（stab-b 修复批）：本调用来自 Program.releaseStatementRaws ←
+            // ProcessRuntime 构造期（Program.kt:1003-1020），是「装配结束、VM 开始执行」
+            // 的既有分界点。此后四个惰性物化面（语句 / 表达式 / 函数 / 形参名）的失败
+            // 按 [RuntimeMaterializationGate] 的运行期口径收敛 CodeEE；翻位必须在
+            // 下方 materializedCount == 0 早退**之前**（早退只省条目扫描，不省交接）。
+            gate.enter()
             // 生产装配时惰性池通常尚未物化任何语句（materializedCount == 0）：此时只需立起
             // rawsReleased —— 之后首次 statementAt 解出条目时会在物化路径上当场 releaseRaw，
             // 无需白扫条目槽（2026-10-24 装载提速；MEM7 刀 2 后连「白扫」的那张表本身都不在）。
             // 判据与 cached[index] = s 在同一把 materializeLock 下维护，锁内看到 0 就不可能漏条目。
             if (materializedCount == 0) return
             cached.forEachActive { it.releaseRaw() }
+            // 钉住条目不在 cached 里，单独走一遍。
+            pins.releaseRaws()
         }
     }
 
     /**
-     * 装载收尾武装（`Program.armRuntimeCodeCacheBudgets` 接线）：三件运行期缓存一起接上界 ——
-     * 本池的 [interner]（规范化代表表 + 内建串池）与本池 [arena]（段 3 节点表）。
-     * 段 2 表达式池的节点表归 [MappedExprSource] 自己武装（`Program` 门面分别调两边）。
-     * 幂等：重复武装同值无害。
+     * 装载收尾武装（`Program.armRuntimeCodeCacheBudgets` 接线）：四件运行期缓存一起接上界 ——
+     * 本池的条目缓存（[blockLru] 的块级 LRU）、[interner]（规范化代表表 + 内建串池）
+     * 与本池 [arena]（段 3 节点表）。段 2 表达式池的节点表归 [MappedExprSource] 自己武装
+     * （`Program` 门面分别调两边）。幂等：重复武装同值无害（重置戳表与 liveBlocks）。
      */
     override fun armRuntimeBudgets(
+        stmtEntries: Int,
         nodeEntries: Int,
         internForms: Int,
         internStrings: Int,
-    ) {
-        interner.armRuntimeBudget(internForms)
-        interner.strings.armRuntimeDistinctBudget(internStrings)
-        arena.armRuntimeNodeBudget(nodeEntries)
-    }
+    ) = armCaches.armWith(stmtEntries, nodeEntries, internForms, internStrings)
 
-    override fun codeCacheCensus(): CodeCacheCensus = CodeCacheCensus(
-        nodeBlocks = arena.cachedNodeBlocks(),
-        nodeEvictions = arena.runtimeNodeEvictions,
-        internForms = interner.formCount,
-        internStrings = interner.strings.distinct,
-    )
+    override val codeCacheCensus: CodeCacheCensus
+        get() = CodeCacheCensus(
+            nodeBlocks = arena.cachedNodeBlocks(),
+            nodeEvictions = arena.runtimeNodeEvictions,
+            internForms = interner.formCount,
+            internStrings = interner.strings.distinct,
+            stmtBlocks = cached.allocatedBlocks(),
+            stmtEvictions = statementCacheEvictions,
+            stmtPins = pins.pinnedCount,
+            stmtPinOverflow = pins.overflowCount,
+        )
 
-    override fun seedInterning(roots: List<Expr?>): ArgInterner.Stats {
-        synchronized(materializeLock) {
-            // 种子行：池外临时语句，整段表达式池当作它的 args（与 Program.expressionPoolSeed 同一口径）
-            val seed = InstructionStmt(FunctionCode.__NULL__, ExpressionArrayArgument(roots), -1, "")
-            val stats = interner.run(listOf(seed))
-            // 串池读数必须跟着交出去（`perfBaseline` 的「串池命中率」只有这一个来源）；
-            // 惰性池的串表与后续逐条物化共用同一个 `interner.strings`，所以这里是累计值。
-            return ArgInterner.Stats(
-                0, stats.merged, stats.forms, stats.nodes, stats.ms,
-                strings = interner.strings.snapshot(),
-            )
-        }
+    override fun seedInterning(roots: List<Expr?>): ArgInterner.Stats = synchronized(materializeLock) {
+        // 种子行：池外临时语句，整段表达式池当作它的 args（与 Program.expressionPoolSeed 同一口径）
+        val seed = InstructionStmt(FunctionCode.__NULL__, ExpressionArrayArgument(roots), -1, "")
+        val stats = interner.run(listOf(seed))
+        // 串池读数必须跟着交出去（`perfBaseline` 的「串池命中率」只有这一个来源）；
+        // 惰性池的串表与后续逐条物化共用同一个 `interner.strings`，所以这里是累计值。
+        ArgInterner.Stats(
+            0, stats.merged, stats.forms, stats.nodes, stats.ms,
+            strings = interner.strings.snapshot(),
+        )
     }
 
     /**
@@ -2227,10 +2582,345 @@ internal class LazyStatementRecords(
      *
      * 关通道不 unmap（JVM 语义）：已建映射继续有效，所以「回到标题」复用同一会话照常工作。
      */
-    override fun releaseMmap(): Boolean {
-        if (!arena.stringsChannelFree()) return false
-        window.closeUnderlying()
+    override fun releaseMmap(): Boolean = armCaches.releaseMmap()
+
+    /**
+     * 武装与释放的落点：四件运行期缓存（条目表 / 规范化代表表 / 内建串池 / 段 3 节点表）与映射通道。
+     *
+     * 抽成一个私有无名对象，只为把 [armRuntimeBudgets] 与 [releaseMmap] 两个转发体从本类函数表
+     * 里挪走（类受 TooManyFunctions = 11 约束）。动作逐字等同原先写在本类里的四行武装 +
+     * 两行关通道判断，没有任何语义变化。
+     */
+    private val armCaches = object {
+        fun armWith(stmtEntries: Int, nodeEntries: Int, internForms: Int, internStrings: Int) {
+            blockLru.arm(stmtEntries, cached.blockCount)
+            interner.armRuntimeBudget(internForms)
+            interner.strings.armRuntimeDistinctBudget(internStrings)
+            arena.armRuntimeNodeBudget(nodeEntries)
+        }
+
+        /**
+         * 关映射通道的保护条件见 [releaseMmap] 的 KDoc：串池数据块没整块 pin 时（>128 MiB）
+         * 必须留着 fd，宁可多占一个也不许把惰性解码变成「跑到某条语句才炸」。
+         */
+        fun releaseMmap(): Boolean {
+            if (!arena.stringsChannelFree()) return false
+            window.closeUnderlying()
+            return true
+        }
+    }
+
+}
+/**
+ * 语句条目缓存的**块级 LRU**：给「物化过的语句实例」这张表加上界。
+ *
+ * ## 为什么按块、不按条
+ *
+ * 上限按**块**计（[BlockRefs.BLOCK] = 4,096 槽/块），超预算就逐出访问戳最冷的那一整块。
+ * 逐块的两条理由：① `BlockRefs` 的懒分配块是 16 KiB 背衬，逐块才能整块还回去；
+ * ② 按条逐出要把每个槽的戳都记着，而热代码天然是「一段一段」被反复跑 —— 块粒度就把
+ * 正在跑的循环、最近访问的代码整段留住。
+ *
+ * 整表重置型收缩被否决过：见 `RUNTIME_NODE_ENTRY_BUDGET` KDoc 里的实测（引导从 ~3 分钟
+ * 拖到 28 分钟）—— 一次全清等于把「刚热起来的代码」全部驱逐，下一轮逐条重解码。
+ *
+ * ## 与节点表那份的差别
+ *
+ * 语句条目表**没有「升序构建窗口」**这类驱逐禁区：它只在运行期按需填（装载趟走
+ * `buildFlatStatementsRange`，压扁即弃、不进本表），所以 [touchOnFill] 不需要
+ * `RecordSource.touchBlockOnFill` 里那个 `ascendingBuild` 判断。
+ *
+ * ## 线程口径
+ *
+ * 填块与逐出全在 [LazyStatementRecords.materializeLock] 内；快路径的 [touch] 是**锁外**
+ * 一次 `LongArray` 写（与节点表 `nodeAt` 同口径：最坏只是戳略旧一点，不影响上界）。
+ * [evictions] 与 [evictionSink] 用 @Volatile 发布，因为 census 读出面可能在别的线程（回调本身由调用方在物化锁内安装）。
+ */
+private class StatementBlockLru(
+    /** 逐出一块时的回收动作（`BlockRefs.clearBlock`）。 */
+    private val clearBlock: (Int) -> Unit,
+) {
+    /** 块数上界（0 = 未武装 = 无界；装载趟与编译器档口径）。 */
+    private var runtimeBlockBudget = 0
+
+    /** LRU 时钟（每次 touch 自增；Long 不回绕）。 */
+    private var blockClock = 0L
+
+    /** 每块最近访问戳（0 = 自武装以来从未碰过 = 未分配）；按块下标索引。 */
+    private var blockStamps = LongArray(0)
+
+    /** 自武装以来已分配（有戳）的块数。 */
+    private var liveBlocks = 0
+
+    @Volatile
+    var evictions: Int = 0
+
+    /** 逐出回调（由 [LazyStatementRecords.setStatementEvictionSink] 在物化锁内安装）。 */
+    @Volatile
+    var evictionSink: (() -> Unit)? = null
+
+    /**
+     * 武装：把 [maxEntries] 条折成块数上界并重建戳表。
+     *
+     * `coerceAtLeast(2)` 与节点表同口径 —— 至少 2 块，否则「正在跑的那块 + 即将填的那块」
+     * 会把彼此顶掉，变成每两次取指重解码一次。
+     *
+     * @param blockCount 本表的总块数（[BlockRefs.blockCount]）
+     */
+    fun arm(maxEntries: Int, blockCount: Int) {
+        runtimeBlockBudget = ((maxEntries + BlockRefs.BLOCK - 1) / BlockRefs.BLOCK).coerceAtLeast(2)
+        blockStamps = LongArray(blockCount)
+        blockClock = 0L
+        liveBlocks = 0
+    }
+
+    /** 摸一块（命中与填块都调）：刷新访问戳。未武装（戳表未分配）零成本直返。 */
+    fun touch(bi: Int) {
+        if (blockStamps.isEmpty()) return
+        blockStamps[bi] = ++blockClock
+    }
+
+    /** 填块路径：新块计入 [liveBlocks]，超预算就逐出最冷块。 */
+    fun touchOnFill(bi: Int) {
+        if (blockStamps.isEmpty()) return
+        if (blockStamps[bi] == 0L) liveBlocks++
+        touch(bi)
+        if (liveBlocks > runtimeBlockBudget) evictColdest()
+    }
+
+    /** 逐出最冷块（戳最小者）；每次填块至多一次，扫描 O(块数)。 */
+    private fun evictColdest() {
+        var coldest = -1
+        var coldestStamp = Long.MAX_VALUE
+        for (i in blockStamps.indices) {
+            val s = blockStamps[i]
+            if (s != 0L && s < coldestStamp) {
+                coldestStamp = s
+                coldest = i
+            }
+        }
+        if (coldest < 0) return
+        clearBlock(coldest)
+        blockStamps[coldest] = 0L
+        liveBlocks--
+        evictions++
+        // 纪元 ++ 在调用方的物化锁内 ⇒ 「块已清空」与「纪元已变」对别的线程是同一次发布，
+        // 不会读到「纪元变了但块还在」的中间态。
+        evictionSink?.invoke()
+    }
+
+    /**
+     * 堆压回收：把**所有**已分配的块整块清掉（[keep] 返回 true 的块留下），返回清掉的块数。
+     *
+     * 与 [evictColdest] 的区别只有触发源（堆水位 vs 超额填块）与粒度（全部 vs 最冷一块）：
+     * 戳清零同样成立「有戳 ⟺ 已分配」不变式，[evictions] 同样累计，[evictionSink] 同样在
+     * 调用方的物化锁内触发一次（让 VM 的语句备忘整表失效 —— 清的可能不止一块）。
+     *
+     * 只在堆吃紧时调（宿主两处安全点）：稳态调用等于把热代码整段驱逐，下一轮逐条重解码。
+     */
+    fun dropAll(keep: (Int) -> Boolean): Int {
+        if (blockStamps.isEmpty()) return 0
+        var cleared = 0
+        for (i in blockStamps.indices) {
+            if (blockStamps[i] != 0L && !keep(i)) {
+                clearBlock(i)
+                blockStamps[i] = 0L
+                liveBlocks--
+                cleared++
+            }
+        }
+        if (cleared > 0) {
+            evictions += cleared
+            evictionSink?.invoke()
+        }
+        return cleared
+    }
+
+    /**
+     * 按槽回收的记账（[dropAll] 之外的另一半）：块里的钉住实例还要留在原下标上，
+     * 所以只清槽不弃块 —— 但清掉的槽照样让 VM 的 L1 备忘失效，故触发一次纪元回调。
+     */
+    fun releaseSlots(count: Int) {
+        if (count <= 0) return
+        evictionSink?.invoke()
+    }
+
+    /**
+     * 弃掉一个已清空的块：戳清零、[liveBlocks] 递减、[evictions] 累计，与 [evictColdest] 同口径。
+     * 戳本就 0（武装前就填过 / 已被 [dropAll] 弃掉）时只清戳、不动计数 —— 那种块没有计数可减。
+     */
+    fun dropEmptied(bi: Int) {
+        if (bi in blockStamps.indices && blockStamps[bi] != 0L) {
+            blockStamps[bi] = 0L
+            liveBlocks--
+            evictions++
+        }
+    }
+}
+
+/**
+ * 语句条目缓存里的**钉住表**：一批下标 → 实例，只增不减、永不逐出。
+ *
+ * ## 谁需要它
+ *
+ * 条目缓存上了界以后，「同一个下标恒返回同一实例」这条老契约在**跨逐出**的场合不再自动成立。
+ * 但有两处消费者拿实例身份当键或当判据：
+ *
+ * - `ConstantPool.sharpStatementIndices`：CALLSHARP 候选，装载期扫一遍、调用方对候选逐条
+ *   `statementAt`，之后按住那句实例不放（`core/fn/PluginMethods.kt` 的 sharp 链接表）；
+ * - `SidecarTables.dataSectionStatementIndex`：数据节下标表，键就是语句实例
+ *   （`IdentityHashMap<Statement, Int>`，全量语料 3,874 条）。
+ *
+ * 这些下标一旦被逐出再解出第二个实例，身份契约当场破 —— 而且破得很安静（表里多的那条
+ * 是死键，查不到并不报错）。所以它们必须钉住。
+ *
+ * ## 为什么按条钉、不按块钉
+ *
+ * 数据节 3,874 条散在全量池 1,712,420 条里（平均每 442 条一条，而一块 4,096 条）
+ * ⇒ 按块钉等于把几乎全部块钉死，上界当场失效。按条进一张独立小表（下标 + 实例）就同时
+ * 保住两个目标：身份恒定、上界有效。代价是钉住条目**不进**条目缓存 —— 否则每个块为
+ * 一条语句付 16 KiB 背衬，还会「逐出 → 回填」反复抖。
+ *
+ * ## 上界与 fail-closed
+ *
+ * 钉住表本身也有上界（[RUNTIME_STMT_PIN_BUDGET] 条，算式见那个常量的 KDoc）。超限的做法是
+ * **照旧收进表、只计 [overflow]**：宁可让上界短暂失效，也不许悄悄丢身份 —— 丢掉的那条会在
+ * 逐出后变成死键，是查不出来的静默错误，而多占的几 MiB 是看得见的。
+ *
+ * ## 并发
+ *
+ * 全部写入都由构造参数 `lock`（= [LazyStatementRecords.materializeLock]，是同一把实例锁）
+ * 串起来：[pinStatementIdentities] 与慢路径的 [put] 互斥，所以表内没有额外的同步开销。
+ * [pinOverflow] 用 @Volatile 发布，因为 census 读取面可能不在物化线程上。
+ */
+internal class StatementPins(
+    /** 条目总数（丢掉越界下标）。 */
+    private val limit: Int,
+    /**
+     * 取「本下标在条目缓存里已有的实例」（声明钉住时把实例权威转移进本表）。
+     *
+     * 可变，是因为池与表互相引用：池要先有表才能把表声明成 y 委托目标，表又要能读池的
+     * 条目缓存。装载收尾前没人调 [pinStatementIdentities]，所以回填窗口没有并发意义。
+     */
+    var materialized: (Int) -> Statement? = { null },
+    /** 物化锁：钉住表的写入与条目缓存的写入口必须互斥（同一把 [LazyStatementRecords.materializeLock]）。 */
+    private val lock: Any = Any(),
+) {
+    /** 钉住下标（升序、去重；空 = 未声明钉住）。 */
+    private var indices: IntArray = IntArray(0)
+
+    /** 钉住下标 → 实例（只增不减；永不逐出）。 */
+    private val instances = HashMap<Int, Statement>()
+
+    @Volatile
+    private var pinOverflow: Int = 0
+
+    /** 当前钉住条数（= [instances] 的条数；未物化的钉住下标不算 —— 它们还没有实例要保）。 */
+    val pinnedCount: Int get() = instances.size
+
+    /** 超预算条数（fail-closed 的可见面）。 */
+    val overflowCount: Int get() = pinOverflow
+
+    /**
+     * 区间 `[from, until)` 内是否有钉住下标（堆压回收按块判「这块能不能还」用）。
+     *
+     * 钉住表是升序去重表 ⇒ 二分找第一个 `>= from` 的下标再比一次就够，与 [isPinned] 同量级。
+     */
+    fun hasPinnedIn(from: Int, until: Int): Boolean {
+        if (indices.isEmpty() || until <= from) return false
+        var lo = 0
+        var hi = indices.size
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (indices[mid] < from) lo = mid + 1 else hi = mid
+        }
+        return lo < indices.size && indices[lo] < until
+    }
+
+    /** 本下标是否被钉住（升序表二分；钉住集 4,000 条量级 ⇒ ≤ 13 次比较）。 */
+    fun isPinned(index: Int): Boolean {
+        var lo = 0
+        var hi = indices.size - 1
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            val v = indices[mid]
+            when {
+                v < index -> lo = mid + 1
+                v > index -> hi = mid - 1
+                else -> return true
+            }
+        }
+        return false
+    }
+
+    /** 钉住条目的已物化实例；未钉住或尚未物化 ⇒ null（调用方走正常物化路径）。 */
+    fun instanceAt(index: Int): Statement? {
+        if (indices.isEmpty() || !isPinned(index)) return null
+        return instances[index]
+    }
+
+    /**
+     * 把刚物化出来的 [statement] 收进钉住表。
+     *
+     * @return true = 本下标被钉住、实例已收进表（调用方**不要**再写条目缓存）；
+     *   false = 未钉住，调用方照常写缓存。
+     */
+    fun put(index: Int, statement: Statement): Boolean {
+        if (indices.isEmpty() || !isPinned(index)) return false
+        instances[index] = statement
         return true
+    }
+
+    /**
+     * 声明一批钉住下标（[StatementCacheHooks.pinStatementIdentities] 的实现）。
+     *
+     * [materialized] 取「本下标在条目缓存里已有的实例」：声明钉住之前就物化过的条目，
+     * 实例权威要从条目缓存**转移**到本表，否则那块被逐出后同一下标会解出第二个实例。
+     * 取不到（还没物化）也无妨 —— 首次 [instanceAt] 走正常物化路径时 [put] 会补上。
+     * 越界下标一律丢弃（池长由构造参数 [limit] 给定）。
+     */
+    fun pinStatementIdentities(indices: IntArray) {
+        if (indices.isEmpty()) return
+        synchronized(lock) {
+            val inRange = indices.filter { it >= 0 && it < limit }.sorted().toIntArray()
+            if (inRange.isEmpty()) return
+            this.indices = mergeSorted(this.indices, inRange)
+            for (i in inRange) {
+                if (instances.containsKey(i)) continue
+                materialized(i)?.let { instances[i] = it }
+            }
+            pinOverflow = (instances.size - RUNTIME_STMT_PIN_BUDGET).coerceAtLeast(0)
+        }
+    }
+
+    /** 释放已物化钉住条目的原文驻留（`Program.releaseStatementRaws` 转发过来）。 */
+    fun releaseRaws() {
+        for (s in instances.values) s.releaseRaw()
+    }
+
+    /** 两份升序表求并（去重；钉住集只在装载/会话建立期声明，成本可忽略）。 */
+    private fun mergeSorted(sorted: IntArray, add: IntArray): IntArray {
+        if (sorted.isEmpty()) return add
+        val out = IntArray(sorted.size + add.size)
+        var i = 0
+        var j = 0
+        var k = 0
+        while (i < sorted.size || j < add.size) {
+            when {
+                i >= sorted.size -> out[k++] = add[j++]
+                j >= add.size -> out[k++] = sorted[i++]
+                else -> {
+                    val a = sorted[i]
+                    val b = add[j]
+                    when {
+                        a < b -> { out[k++] = a; i++ }
+                        b < a -> { out[k++] = b; j++ }
+                        else -> { out[k++] = a; i++; j++ }
+                    }
+                }
+            }
+        }
+        return out.copyOf(k)
     }
 }
 
@@ -2392,7 +3082,7 @@ internal class ErbcStreamDecoder private constructor(
      * 段 4 函数表 + 段 8 形参名的解码（主线程与预取线程**共用这一份实现**，异常类型/文案/位置
      * 逐字一致）。预取线程失败时主线程走这里，抛出的错误与串行路径完全相同。
      */
-    private fun decodeFunctions(stats: DecodeStats?): FunctionsBundle {
+    private fun decodeFunctions(stats: DecodeStats?, gate: RuntimeMaterializationGate): FunctionsBundle {
         if (!header.hasSection(ErbcFormat.SECTION_FUNCTIONS)) {
             throw ErbcDecodeException(0, "函数表缺失：v1 产物必须携带 SECTION_FUNCTIONS")
         }
@@ -2426,6 +3116,7 @@ internal class ErbcStreamDecoder private constructor(
                 ),
                 funcCount,
                 stats,
+                gate,
             )
         } else {
             null
@@ -2438,8 +3129,7 @@ internal class ErbcStreamDecoder private constructor(
             funcCount,
             funcStrings,
             paramNames,
-            fileSize,
-            pcFrom = base.instructionBase,
+            FunctionTableContext(fileSize, base.instructionBase, gate),
         )
         return FunctionsBundle(functions, entryFunction, globalSlots)
     }
@@ -2630,6 +3320,10 @@ internal class ErbcStreamDecoder private constructor(
         fun decodeProgram(): Program {
             val flags = header.flags
             val offsets = header.offsets
+            // 运行期交接门（stab-b 修复批）：本产物全部四个惰性物化面共用一扇门，
+            // 翻位点在 LazyStatementRecords.releaseRaws（= ProcessRuntime 构造期的
+            // Program.releaseStatementRaws 转发）。装载/诊断路径门关，异常形状逐字保留。
+            val gate = RuntimeMaterializationGate(file.path.toString())
 
             // ---- 段 0：字符串池（index 即下标）------------------------------------
             val strings: List<String> = if (offsets[ErbcFormat.SECTION_STRINGS] == 0) {
@@ -2751,7 +3445,7 @@ internal class ErbcStreamDecoder private constructor(
                             stmt7CallArgs = decodeCallArgsTable(codeCount, prefetchStats)
                             stmt6Count = codeCount
                         }
-                        prefetchedFunctions = decodeFunctions(prefetchStats)
+                        prefetchedFunctions = decodeFunctions(prefetchStats, gate)
                     } catch (t: Throwable) {
                         prefetchFailure = t
                     }
@@ -2819,7 +3513,7 @@ internal class ErbcStreamDecoder private constructor(
                     // 它本来就是产物里 `[rootsStart, rootsStart + 4×poolCount)` 的一段连续 u32，
                     // 而这段已经在 [win] 的整段 pin 里 ⇒ `expr(k)` 按绝对偏移直取
                     // （328,509 × 4 = 1.3 MiB 常驻 → 0）。
-                    lazyExprSource = MappedExprSource(arena, win, rootsStart, poolCount, file.path.toString())
+                    lazyExprSource = MappedExprSource(arena, win, rootsStart, poolCount, gate)
                     emptyList()
                 } catch (t: Throwable) {
                     // 收口口径（顺序不可换）：
@@ -2937,7 +3631,7 @@ internal class ErbcStreamDecoder private constructor(
                         // 从 `nodes[]` 弃掉 —— 终态与改造前「先建全表、enableLazyNodes 清空」一致：
                         // 之后 child() 按节点自己的偏移重放、statementAt() 按记录偏移重放。
                         arena.discardBuiltNodes()
-                        lazyPool = LazyStatementRecords(arena, win, fileSize, recordOffsets)
+                        lazyPool = LazyStatementRecords(arena, win, fileSize, recordOffsets, gate)
                         emptyList()
                     } else {
                         ArrayList<Statement>(stmtCount).apply {
@@ -2966,7 +3660,7 @@ internal class ErbcStreamDecoder private constructor(
             // 段 4 的**内容**在 [decodeFunctions] 里（惰性函数表，M11-MEM）；预取线程只负责把它
             // 在后台算出来，主线程这里 join 取结果 —— 两条设计不冲突：预取解决「什么时候算」，
             // 惰性表解决「算完常驻多少」。
-            val funcsBundle = prefetchedFunctions ?: decodeFunctions(stats)
+            val funcsBundle = prefetchedFunctions ?: decodeFunctions(stats, gate)
             val functions = funcsBundle.functions
             val entryFunction = funcsBundle.entryFunction
             val globalSlots = funcsBundle.globalSlots
@@ -3184,7 +3878,7 @@ internal class ErbcStreamDecoder private constructor(
                     Opcode._SET_INT -> requirePool(op, b, program.constantCount, pc, "常量池")
                     Opcode._SET_STR -> requirePool(op, b, program.stringCount, pc, "字符串池")
                     Opcode._PRINT_LITERAL -> requirePool(op, a, program.stringCount, pc, "字符串池")
-                    Opcode._EVAL_INT, Opcode._EVAL_STR, Opcode._EVAL_INT_JZ -> {
+                    Opcode._EVAL_INT, Opcode._EVAL_STR, Opcode._EVAL_INT_JZ, Opcode._EVAL_FLOAT -> {
                         if (!hasExpr) {
                             throw ErbcDecodeException(
                                 0,
@@ -3587,10 +4281,16 @@ private class MappedExprSource(
     win: SectionWindow,
     rootsFrom: Int,
     private val poolCount: Int,
-    /** 产物标识（与装载层 `withSource` 同一个口径）。 */
-    private val source: String,
+    /**
+     * 运行期交接门（stab-b 修复批）：装载/诊断口径与运行期口径的分界 + 产物标识。
+     * 原 `source` 构造参（`file.path.toString()`）并进门里，省一份重复持有。
+     */
+    private val gate: RuntimeMaterializationGate,
 ) : LazyExprSource {
     private val roots = BlockU32s(win.fork(), rootsFrom, poolCount)
+
+    /** 运行期物化失败的收敛备忘（口径见 [MaterializationFailures]）。 */
+    private val failures = MaterializationFailures(gate)
 
     /**
      * 关通道前的**表达式侧判据**（CMP-19 的补门）：本池运行期只剩两条回读路 ——
@@ -3619,25 +4319,57 @@ private class MappedExprSource(
         arena.armRuntimeNodeBudget(nodeEntries)
     }
 
-    override fun codeCacheCensus(): CodeCacheCensus = CodeCacheCensus(
-        nodeBlocks = arena.cachedNodeBlocks(),
-        nodeEvictions = arena.runtimeNodeEvictions,
-        internForms = -1,
-        internStrings = -1,
-    )
+    /**
+     * 堆压回收：段 2 的节点表整块还回去（口径见 [LazyExprSource.releaseRuntimeCache]）。
+     *
+     * 只盖本池自己那张 [RecordSource]（段 2 的结点），与段 3 那张互不相干 —— 两池的 arena
+     * 是两份（`ErbcStreamDecoder` 里段 2 / 段 3 各建一张 `RecordSource`）。
+     *
+     * 线程口径（为什么不加锁）：回收的两个调用点（回合边界 / 页中检查点）都在 VM 线程的
+     * 指令边界上，而表达式解码同样只在 VM 线程发生 —— 唯一已知的跨线程取 expr 是
+     * `GameHost` 的步数超限现场取证（`p.expr(p.a(pc))`），那时 VM 已抛错停下，与回收
+     * 不并发。若将来出现「VM 在跑、别的线程解表达式」的路径，这里必须和 [arena] 的
+     * 解码路共享同一把锁，不能只锁回收这一侧。
+     */
+    override val runtimeCacheRelease: RuntimeCodeRelease
+        get() = RuntimeCodeRelease(statementBlocks = 0, nodeBlocks = arena.dropCachedNodes())
 
+    override val codeCacheCensus: CodeCacheCensus
+        get() = CodeCacheCensus(
+            nodeBlocks = arena.cachedNodeBlocks(),
+            nodeEvictions = arena.runtimeNodeEvictions,
+            internForms = -1,
+            internStrings = -1,
+        )
+
+    @Suppress("TooGenericExceptionCaught")
     override fun node(index: Int): Expr {
         // 判界在取数之前（与改造前的 `roots.size` 判定同一条文案），块表读不承担越界语义
         if (index < 0 || index >= poolCount) {
+            // 越界分支（stab-b 修复批）：门关 = 原样 ErbcDecodeException（装载期对拍形状）；
+            // 门开 = 运行期口径，同一句文案收敛成 CodeEE（VM 的 checkPoolIndex 判界先行，
+            // 这里只兜绕过判界的直取面 —— 诊断快照 / exprList 等）。
+            if (gate.runtimeEntered) {
+                throw CodeEE("表达式池下标越界: $index（共 $poolCount 条）（${gate.source}）")
+            }
             throw ErbcDecodeException(0, "表达式池下标越界: $index（共 $poolCount 条）")
         }
         return try {
             arena.nodeAt(roots[index])
         } catch (e: ErbcFormatException) {
-            // 惰性档的解码发生在运行期首次访问：在这里补上装载层口径
-            // （产物路径 + `ErbcLoadException`），让「装载期就坏」与「首次访问才发现坏」
-            // 对外是**同一句话**——`ErbcStreamEquivalenceTest` 的逐字节对拍就靠这一条。
-            throw ErbcLoadException("$source: ${e.message}", e)
+            if (!gate.runtimeEntered) {
+                // 装载/诊断口径（门关）：惰性档的解码发生在运行期首次访问：在这里补上装载层口径
+                // （产物路径 + `ErbcLoadException`），让「装载期就坏」与「首次访问才发现坏」
+                // 对外是**同一句话**——`ErbcStreamEquivalenceTest` 的逐字节对拍就靠这一条。
+                throw ErbcLoadException("${gate.source}: ${e.message}", e)
+            }
+            throw failures.converged(index, "表达式", e)
+        } catch (e: Throwable) {
+            // 门关原样上抛 / 门开收敛 CodeEE —— 口径与理由见
+            // [MaterializationFailures.convergeOrRethrow]。
+            // @Suppress 理由：这里**刻意**接住 Throwable（含 Error）—— 收敛口径要求
+            // 「物化失败任何非 CodeEE 异常」都不得直穿 VM，根因经 initCause 进因果链。
+            throw failures.convergeOrRethrow(index, "表达式", e)
         }
     }
 }
@@ -3833,6 +4565,33 @@ internal class RecordSource(
             liveBlocks--
             runtimeNodeEvictions++
         }
+    }
+
+    /**
+     * 堆压回收：把本表所有已分配的节点块整块清掉（稠密前缀保护区与升序构建窗口内不动），
+     * 返回清掉的块数。
+     *
+     * 三条不变式与 [evictColdest] 逐字同源：戳清零（「有戳 ⟺ 已分配」）、[liveBlocks] 递减、
+     * [runtimeNodeEvictions] 累计。清掉的块之后按需重放重建（[lazyEnsure] 走同一条记录字节），
+     * 因此解出的结点逐字段相同 —— 与 LRU 逐出的语义后果完全一致，只是触发源换成了堆水位。
+     *
+     * 升序构建窗口内直返 0：那一窗口的不变式是「≤ 游标的结点必已就位」，整块还回去会把
+     * 本轮刚建好的块清空（同 [touchBlockOnFill] 的禁区）。
+     */
+    fun dropCachedNodes(): Int {
+        if (blockStamps.isEmpty() || ascendingBuild) return 0
+        val protectedThrough = if (prefixBuiltThrough < 0) -1 else prefixBuiltThrough / BlockRefs.BLOCK
+        var cleared = 0
+        for (i in blockStamps.indices) {
+            if (i > protectedThrough && blockStamps[i] != 0L) {
+                nodes.clearBlock(i)
+                blockStamps[i] = 0L
+                liveBlocks--
+                cleared++
+            }
+        }
+        runtimeNodeEvictions += cleared
+        return cleared
     }
 
     // ---- 惰性节点重建（M10-MEM）----------------------------------------------------

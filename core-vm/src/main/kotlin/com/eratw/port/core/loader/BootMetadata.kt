@@ -526,7 +526,7 @@ private const val MAX_FUNCTION_INDEX = 1 shl 20
  * 写出侧 [BootMetaCodec.flagsOf] 只置 7 位（`isEvent`=1 … `returnsStr`=64），所以合法值恒在
  * `0..127`。读侧此前对 flags 不判界：`flags and 128` 这类高位既不报错也不进 [FuncMeta]
  * （`isEvent = flags and 1 != 0` 等只有低 7 位的消费者），存储位腐/手改产物就此**静默丢标志**
- * —— 事件分桶（`FunctionTable.eventBucket`）与返回类型会跟着错，却没有一条装载期判据。
+ * —— 事件分桶（`FunctionTable.eventDispatchOrder`）与返回类型会跟着错，却没有一条装载期判据。
  *
  * 负数同理：`atomInt` 收 `-1` 时 `and 1`/`and 64` 全为真，一份坏档能把普通函数变成
  * 「事件 + 方法 + 返回字符串」。故读侧严卡 `0..127`，与表达式侧的 0/1 位口径对齐。

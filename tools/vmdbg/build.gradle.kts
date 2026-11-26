@@ -30,6 +30,10 @@ dependencies {
     // 编成 .erbc 产物目录。方向安全（与 core-vm 对 erbcc 的测试依赖同一口径）：
     // erbcc(main) → core-vm(main)；vmdbg(main) → core-vm(main)；vmdbg(test) → erbcc(main) 无环。
     testImplementation(project(":tools:erbcc"))
+    // 产物新鲜度闸（DBG-TOOLING 波）：assemble 用 ErbcCompilerDigest.compute/locateRepoRoot
+    // 对 manifest 的 compiler-digest 做重算比对（STALE 静默跑完是明确缺口，探查确认 vmdbg
+    // 全 main 源集零判定点）。erbcc(main) 本就是 vmdbg(test) 依赖，提到 main 无新环。
+    implementation(project(":tools:erbcc"))
 }
 
 tasks.withType<Test>().configureEach {

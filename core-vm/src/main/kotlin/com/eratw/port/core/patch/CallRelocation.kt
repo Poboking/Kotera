@@ -11,7 +11,7 @@ import com.eratw.port.core.code.SymbolCatalog
  * |---|---|---|
  * | [CallSentinels.CALL_SUPER_SENTINEL] | 调用「本函数的前一同名实现」 | 前实现物理下标，且 `_CALL.b` **必须置 DIRECT 位**（绕过 dispatch，防二次跳转成环）；无前实现 = 链接错误 |
  * | [CallSentinels.TRY_CALL_SUPER_SENTINEL] | 同上但可缺 | 有前实现同 CALL_SUPER；没有 = 整条语句折 NOP（**不写任何返回槽**，同官方 TRYCALL 缺目标语义） |
- * | 其余负值 | 外部导入哨兵 `-(extIdx+1)` | 该 Package `externalCalls[extIdx]` 的 LSC 胜者物理下标 |
+ * | 其余负值 | 外部导入哨兵 `-(extIdx+1)` | 已解析：该 Package `externalCalls[extIdx]` 的 LSC 胜者物理下标；未解析（S9 改判）＝ [Outcome.MissingByName]，链接器改写为缺名残桩跳转 |
  * | `>= 0` | 模块内下标 | 净偏移重定位后的绝对物理下标（运行期照常走 dispatch） |
  *
  * **净偏移公式**（§3）：「目标全局起始下标 − 模块编译期自带 base」。零基线模块 base=0。
@@ -38,6 +38,15 @@ object CallRelocation {
 
         /** TRYCALL_SUPER 无前实现：整条语句折 NOP，不写任何返回槽。 */
         data object NoSuperNop : Outcome
+
+        /**
+         * 未解析外部导入（2026-11-24 S9 改判，CONTRACT-S9-MISSING-CALL.md L2）：
+         * 组合里没有非事件胜者提供 [name]（缺依赖 / base 月更删函数 / 目标是事件名）。
+         * 本对象**不带物理下标**——链接器按名查「缺名残桩」表拿到残桩物理下标后改写
+         * `a`；调用点 `b` 原样透传（bit31 TRY 位由链接器判：置位 = 整条折 NOP，
+         * 同 TRY 族缺目标跳过语义）。运行期残桩按名解析，报错时机与文案 = 原版。
+         */
+        data class MissingByName(val name: String) : Outcome
     }
 
     /**
@@ -76,12 +85,16 @@ object CallRelocation {
             val extIdx = CallSentinels.externalIndexOf(a)
             val table = imports
                 ?: throw RelocationException("外部导入哨兵 $a 出现在没有导入表的 Package 里$at")
-            if (extIdx !in table.imports.indices) {
-                throw RelocationException(
-                    "外部导入槽越域：extIdx=$extIdx，externalCalls 共 ${table.imports.size} 项$at",
+            when (val entry = table.entryAt(extIdx)) {
+                null -> throw RelocationException(
+                    "外部导入槽越域：extIdx=$extIdx，导入表共 " +
+                        "${table.imports.size + table.unresolved.size} 项$at",
                 )
+                is ExternalImportTable.ResolvedImport ->
+                    return Outcome.External(entry.physicalIndex)
+                is ExternalImportTable.UnresolvedImport ->
+                    return Outcome.MissingByName(entry.name)
             }
-            return Outcome.External(table.imports[extIdx].physicalIndex)
         }
         // 判序走到这里时 a 必 >= 0：所有负值要么是 super 哨兵、要么是外部导入哨兵
         // （CallSentinels.isExternal 的定义），不存在第三类负值。

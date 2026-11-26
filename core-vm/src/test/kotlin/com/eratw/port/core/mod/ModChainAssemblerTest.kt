@@ -202,12 +202,15 @@ class ModChainAssemblerTest {
         )
         val registry = assertNotNull(result.eventRegistry)
         val members = registry.membersOf("EV")
-        assertEquals(7, members.size)
-        assertEquals(listOf(0, 1, 2, 2, 2, 3, 3), members.map { it.bucket })
+        // 同体成员若同时带 #PRI 与 #LATER，按「事件桶并列加桶」各落一桶（判词 21 / 台账 B23）：
+        // BASE 的同体成员在 bucket 2 里出现两次（一次对应 PRI 位、一次对应 LATER 位），
+        // 故成员数由 7 变 8 —— 期望值随该语义更新，勿按旧口径钉 7。
+        assertEquals(8, members.size)
+        assertEquals(listOf(0, 1, 2, 2, 2, 2, 3, 3), members.map { it.bucket })
         assertEquals(
             listOf(
                 ModuleLinker.BASE_OWNER_ID, "mod.a",
-                ModuleLinker.BASE_OWNER_ID, "mod.a", "mod.b",
+                ModuleLinker.BASE_OWNER_ID, ModuleLinker.BASE_OWNER_ID, "mod.a", "mod.b",
                 "mod.a", "mod.b",
             ),
             members.map { it.ownerPackageId },
@@ -215,9 +218,12 @@ class ModChainAssemblerTest {
         // 同桶按链接序 = 绝对物理下标递增（不硬编码具体数值，只钉单调性）。
         val normalPhys = members.filter { it.bucket == 2 }.map { it.physicalIndex }
         assertEquals(normalPhys.sorted(), normalPhys)
+        // 注册表按「桶位」列成员（双旗标成员各带自己的桶位 ⇒ 同一物理下标出现两次，
+        // 见 EventRegistry.membersOf 的 KDoc），catalog 侧每个物理实现只登记一次。
+        // 故两侧按「去重后的物理下标」对齐，而不是逐槽位对齐。
         assertEquals(
             result.linked!!.catalog.eventMembersOf("EV").map { it.physicalIndex },
-            members.map { it.physicalIndex }.sorted(),
+            members.map { it.physicalIndex }.distinct().sorted(),
         )
         assertTrue(registry.hasSingle("EV"))
         assertTrue("EV" in registry.eventKeys)

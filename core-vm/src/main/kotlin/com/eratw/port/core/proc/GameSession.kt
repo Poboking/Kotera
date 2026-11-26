@@ -13,6 +13,7 @@ import com.eratw.port.core.config.ConfigValue
 import com.eratw.port.core.config.EffectiveConfig
 import com.eratw.port.core.config.JsonSetting
 import com.eratw.port.core.config.parseBoolLiteral
+import com.eratw.port.core.data.csv.CharaCsvLoader
 import com.eratw.port.core.data.csv.GameData
 import com.eratw.port.core.data.csv.GameDataLoader
 import com.eratw.port.core.data.csv.UserKeywordTables
@@ -415,6 +416,15 @@ class GameSession(
      */
     val echoInputMode: EchoInputMode = EchoInputMode.REPLICA,
     /**
+     * 指令链收尾的按键等待总闸（`Process.cs:2413-2422` 置位、`:2449-2455` 消费）：
+     * 缺省 true = 原版口径，每条返回非 0 的指令回菜单前等一次回车；false = 不等待。
+     *
+     * 玩家侧缺省开着（设置页「指令后等一次按键」），会话装配期定死，改完重开一局生效
+     * （与 [echoInputMode] / [reflowConsole] 同款口径）。桌面装置与全部既有定向用例
+     * 走缺省值，逐字不变。
+     */
+    val waitAfterCommand: Boolean = true,
+    /**
      * RT2 G 车 / P1-5：Mod 链接产物的 dispatch 表（`LinkedProgram.catalog.dispatch`，
      * `SymbolCatalog.build` 内建分派幂等自检）。缺省 null = 无 Mod 链产物 ⇒
      * [ProcessRuntime.functionDispatch] 缺省 null ⇒ `VirtualMachine.resolveDispatch`
@@ -475,6 +485,19 @@ class GameSession(
      * 的会话不得共存（两套替换源会漂移）。两条都由本类构造期 `require` 整包拒绝。
      */
     modChain: ModChainRuntimePlan? = null,
+    /**
+     * 随包角色模板的**链接序 packageIds**（ERA-W1，A2 挂账收账）：宿主从 Mod 链接产物提取的
+     * 真链接序（生产源 = `ModChainRuntimePlan.catalog.candidates` 的 ownerPackageId 首现序，
+     * 候选列表序即链接序，见 SymbolCatalog 类 KDoc），喂给 [registerModCharacterTemplates]。
+     *
+     * 空表（缺省）= 无声明，`mods/rt2/` 下 `.chara` 目录维持既有**目录名序**，逐位不变
+     * （fail-closed：关态 modRuntime / 旁路装配 / 未接线宿主全走此形态）；
+     * 非空 = 声明序在前的包先注册（同 NO 先到先得的胜者随声明改变），声明外的目录排在
+     * 所有已声明目录之后、彼此按目录名序（与 LinkOrder「未显式指定的模块排在所有已指定
+     * 模块之后」的冻结语义同形）。声明含重复 ID 时判非法：整体降级目录名序并留 WARN，
+     * 不抛（见 [charaTemplateWarnings]）。
+     */
+    val modLinkOrderIds: List<String> = emptyList(),
     /**
      * M1-4 阶段二：装载相位产出的 Mod CSV 注入上下文（CONTRACT-RT2-M14B-IMPL §1 裁定 1/3/7）。
      *
@@ -780,6 +803,17 @@ class GameSession(
 
     /** [sharpLoadWarnings] 的后备缓冲（宿主装配段经 [recordSharpLoadWarnings] 回填）。 */
     private val sharpWarnBuffer = ArrayList<String>()
+
+    /**
+     * 随包角色模板装配期的告警清单（ERA-W1）。目前唯一来源 = [modLinkOrderIds] 声明非法
+     * （含重复 ID）触发整体降级目录名序时的 WARN（fail-closed，不抛）；模板 CSV 解析告警
+     * 沿用 A2 的忽略口径（`ignoredWarnings` 落地即弃，不进本清单）。
+     * 呈现面 = 宿主装配段既有日志通道（同 [sharpLoadWarnings] 的形状）。
+     */
+    val charaTemplateWarnings: List<String> get() = charaWarnBuffer
+
+    /** [charaTemplateWarnings] 的后备缓冲（装配期 [registerModCharacterTemplates] 写入）。 */
+    private val charaWarnBuffer = ArrayList<String>()
 
     /** 宿主装配段把 `prefillSharpLinks`（core/fn）的返回值交进来（C3 的会话读数面）。 */
     fun recordSharpLoadWarnings(warnings: List<String>) {
@@ -1145,6 +1179,12 @@ class GameSession(
             store.loadItemPrice(data.itemPrices)
             store.reloadStrNames()
         }
+        // ERA-A2 随包角色模板注入（收录面方案）：base 模板注册之后，按 rt2 下
+        // `<packageId>.chara/` 目录序逐包 registerTemplate。序的真源 = [modLinkOrderIds]
+        // 声明序（ERA-W1 升格：宿主从链接产物 candidates 提取的真链接序）；空表 = 既有目录
+        // 名序逐位不变。同 NO 先到先得由 VariableStore.registerTemplate 的 putIfAbsent
+        // 保证（VariableStore.kt:2225-2227）：base 已有 NO 不被 mod 覆盖，mod 新 NO 落位。
+        registerModCharacterTemplates(gameRoot, store, gameData?.registry, modLinkOrderIds, charaWarnBuffer)
         // 引擎基础状态：CSV 有角色模板 0 时种真实角色，否则 4 个裸角色（同 GoldenPipeline）
         if (gameData != null && store.template(0L) != null) store.addCharacter(0L)
         else repeat(BARE_CHARACTERS) { store.characters.addBare() }
@@ -1408,6 +1448,8 @@ class GameSession(
             gamebase = gameData?.gameBase ?: GameBaseData(),
             titleMenuString0 = effective.string(ConfigKey.TitleMenuString0),
             titleMenuString1 = effective.string(ConfigKey.TitleMenuString1),
+            // COMEND-WAIT（2026-11-22）：指令收尾按键等待的会话级总闸，原版口径缺省开。
+            waitAfterCommand = waitAfterCommand,
         )
         // 键入回显（ECHO-INPUT，2026-11-04）：交付消费点的生效文本 → console 的正常打印路径。
         // 原版 = doInputToEmueraProgram 末尾 Print(str) + PrintFlush（EmueraConsole.cs:1280-1282）：
@@ -1539,6 +1581,12 @@ class GameSession(
             engineSurface = engineSurface,
             // ENGC-4：字符串 `>=`/`<=` 方言直接取档案（缺省 FIXED = 4.981 实跑口径）。
             stringCompareDialect = compatProfile.stringCompare,
+            // 形参默认值表（侧车 `param-defaults` 段）：被调侧 `Def[i]`，运行期在
+            // `bindOmittedArgDefault` 消费。编译期 `padOmittedArgs` 补不了 `CALLFORM`
+            // 族（被调名是运行期表达式），PC 实测这类调用同样按 `Def[i]` 顶替
+            // （`CalledFunction.cs:167`，探针 `dynDefaultInt=7`）⇒ 表必须留到运行期。
+            // 这是 [metadata] 唯一的长期消费者（其余段在下面的 SidecarTables 收口后回收）。
+            callDefaults = metadata.paramDefaults,
         )
         // 暂停开关的就绪发布（见 [setBackgroundPaused]）：先发布 runtime，再在**同一把锁**
         // 下消费装配期间收到的意图 —— 两个方向都走 [backgroundPauseLock]，意图不会丢。
@@ -1562,6 +1610,8 @@ class GameSession(
         // 8) 编译期元数据 → 运行期索引。**这里之后不再引用 [metadata]**：标签表剪枝成
         //    有标签函数的紧凑表、数据节按语句池下标直查（见 [SidecarTables]），
         //    其余段（#DIM 原文 / 宏表 / fileByKey）随 metadata 一起可回收。
+        //    唯一例外 = `paramDefaults`：已在构造 `ProcessRuntime` 时整表交出去
+        //    （运行期 `CALLFORM` 族补位要它，见上方 `callDefaults` 注释），此后本类不再持有。
         //    标签查找的键由 ProcessRuntime.tryResolveLabel 前置大写（ProcessRuntime.kt 的
         //    `labelPc(functionKey.uppercase(), label.uppercase())`），投影层不再重复归一。
         //    R7-C4：补丁侧标签/数据节在此合并 —— 键域与 base 不相交（标签键 = 函数键，
@@ -1872,7 +1922,7 @@ class GameSession(
          * 而不是把生产阈值压回合法链以下 —— 那正是本报告的发生方式。
          *
          * ENGFIX-3（2026-11-05）重定位：官方死循环保护从不按指令数中止（墙钟 + 弹框问玩家，
-         * `Process.cs:470-489`），core 侧已复刻该语义（VmConfig.infiniteLoopAlertTimeMs +
+         * 1.824 `Process.cs:493-512`、skia `Process.cs:481-515`），core 侧已复刻该语义（VmConfig.infiniteLoopAlertTimeMs +
          * VmHost.askInfiniteLoop）。本常量随之**降级为移植层极端兜底**（LoopGuardCause.DeviceBudget）：
          * 量级取「正常游戏永不触及」（`EVENTTRAIN` 起床链实测 2.90 亿条仍有两个数量级余量），
          * 不是官方语义 —— ADR-005 例外登记项（随 app 弹框接线波次一并落账）。
@@ -1990,11 +2040,16 @@ internal class SidecarTables(
      * 只收 [sections] 登记过的下标（全量 3,874 条），**不**扫整个语句池（1.7M 条，
      * 且会把懒装载的语句树整棵物化）；越界键跳过。见
      * `ProcessRuntime.installDataSectionStatementIndex` 的 KDoc。
+     *
+     * 建表之前先把这批下标**钉住**（`Program.pinStatementIdentities`，2026-11-17）：本表以
+     * 语句实例做 IdentityHashMap 键，而惰性池的运行期条目缓存已上界化 ⇒ 不钉住的话，一次
+     * 块级逐出就会让同一下标解出第二个实例，查表静默 miss（数据节退化成 no-op 分支）。
      */
     fun dataSectionStatementIndex(program: Program): IdentityHashMap<Statement, Int> {
+        val inRange = sections.keys.filter { it >= 0 && it < program.statementCount }.toIntArray()
+        program.pinStatementIdentities(inRange)
         val out = IdentityHashMap<Statement, Int>(sections.size * 2)
-        for (idx in sections.keys) {
-            if (idx < 0 || idx >= program.statementCount) continue
+        for (idx in inRange) {
             out[program.statement(idx)] = idx
         }
         return out
@@ -2082,3 +2137,64 @@ internal fun relationFoldTables(
     }
     return routed + extra
 }
+
+/**
+ * ERA-A2 随包角色模板注入（收录面方案）。扫描 `mods/rt2/` 下所有 `<packageId>.chara/`
+ * 目录，按 [linkOrderIds] 声明序（ERA-W1 升格）逐包消费，每包走 [CharaCsvLoader] 解析后
+ * 逐个 [VariableStore.registerTemplate]。
+ *
+ * 排序语义（fail-closed，无声明零行为差）：
+ * - [linkOrderIds] 空（关态 / 旁路 / 未接线宿主）⇒ 维持既有**目录名序**（`sortedBy`），逐位不变；
+ * - 非空且合法（无重复 ID）⇒ 声明里出现的目录按声明位置先注册，声明外的目录排其后、
+ *   彼此按目录名序（与 LinkOrder「未显式指定的模块排在所有已指定模块之后」的冻结语义同形）；
+ * - 声明非法（重复 ID）⇒ 整体降级回目录名序 + WARN 进 [GameSession.charaTemplateWarnings]，
+ *   不许抛。
+ *
+ * 同 NO 先到先得由 registerTemplate 的 putIfAbsent 保证（VariableStore.kt:2225-2227）：
+ * 本函数调用点在 base 模板注册之后 ⇒ base 已有 NO 不被 mod 覆盖，mod 新 NO 落位。
+ *
+ * 路径口径：app 侧 `ModRuntimeAssembly.RT2_MANIFEST_DIR_NAME = "rt2"`
+ * （ModRuntimeAssembly.kt:278）；core 层不反向依赖 app，故这里以字面量对齐，
+ * 测试 `EraA2*` / `EraW1*` 钉一致性。
+ */
+private fun registerModCharacterTemplates(
+    gameRoot: Path,
+    store: VariableStore,
+    registry: VariableRegistry?,
+    linkOrderIds: List<String>,
+    warnings: MutableList<String>,
+) {
+    val rt2 = gameRoot.resolve(MOD_DIR_NAME).resolve(RT2_DIR_NAME).toFile()
+    val dirs = rt2
+        .listFiles { f -> f.isDirectory && f.name.endsWith(MOD_TEMPLATE_SUFFIX, ignoreCase = true) }
+        ?: return
+    val declared = linkOrderIds.distinct()
+    val declarationUsable = declared.size == linkOrderIds.size
+    val ordered = if (declarationUsable && declared.isNotEmpty()) {
+        dirs.sortedWith(
+            compareBy(
+                { dir ->
+                    val rank = declared.indexOf(dir.name.removeSuffix(MOD_TEMPLATE_SUFFIX))
+                    if (rank < 0) Int.MAX_VALUE else rank
+                },
+                { it.name },
+            ),
+        )
+    } else {
+        if (!declarationUsable) {
+            warnings += "随包角色模板排序声明非法（重复 ID），整体降级目录名序：$linkOrderIds"
+        }
+        dirs.sortedBy { it.name }
+    }
+    val activeRegistry = registry ?: VariableRegistry()
+    val ignoredWarnings = ArrayList<String>()
+    for (dir in ordered) {
+        for (template in CharaCsvLoader.load(dir.toPath(), activeRegistry, ignoredWarnings)) {
+            store.registerTemplate(template)
+        }
+    }
+}
+
+private const val MOD_DIR_NAME = "mods"
+private const val RT2_DIR_NAME = "rt2"
+private const val MOD_TEMPLATE_SUFFIX = ".chara"

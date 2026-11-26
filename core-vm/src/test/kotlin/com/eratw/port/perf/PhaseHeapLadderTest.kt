@@ -11,7 +11,9 @@ import kotlin.test.assertTrue
  * 断言的是判读口径本身，不是任何基准字节数：
  * - 差分按分面键对齐、缺键按 0（跨相位可比的前提）；
  * - 边际尺 7,933 B/条（`HeapRootAttributionProbe` 的等距抽样实测，落在 [MARGINAL_STMT_BYTES]）
- *   的正反算；
+ *   的正反算 —— 注意它是**抽样边际值、不是单条常驻**：同探针换 N 就单调衰减
+ *   （N=1,000⇒12,361 / 3,000⇒5,588 / 12,000⇒1,680 / 20,000⇒1,138），只能同 N 横向差分；
+ *   任何容量折算一律用 [SINGLE_STMT_RESIDENT_BYTES]（277 B，差 28 倍）；
  * - 「单调不回吐」的两半（每步不越容差回落 + 累计过容差）各自都能单独否决；
  * - 单位数为 0 一律给 0（无定义不硬造数，这是交付纪律不是数学）。
  */
@@ -33,7 +35,15 @@ class PhaseHeapLadderTest {
     @Test
     fun `边际尺正反算与无定义档`() {
         assertEquals(1_000L, PhaseLadderMath.stmtCountFromBytes(1_000L * MARGINAL_STMT_BYTES, MARGINAL_STMT_BYTES))
-        assertEquals(7_933L, MARGINAL_STMT_BYTES, "尺的钉点：上一路抽样实测 每条物化语句 7,933 B")
+        assertEquals(7_933L, MARGINAL_STMT_BYTES, "抽样边际尺的钉点：上一路等距抽样实测；换 N 会衰减，不许拿它折算容量")
+        assertEquals(
+            277L, SINGLE_STMT_RESIDENT_BYTES,
+            "单条常驻钉点：壳 26 + 实参/表达式/串 251（上游自估 250 B，LabelDictionary.cs:76-79）",
+        )
+        assertTrue(
+            SINGLE_STMT_RESIDENT_BYTES * 10 < MARGINAL_STMT_BYTES,
+            "抽样边际尺恒远大于单条常驻（余量是解码时顺带填的 arena 节点块，随 N 摊薄）",
+        )
         assertEquals(0L, PhaseLadderMath.stmtCountFromBytes(12345L, 0L), "尺为 0 = 无定义，给 0 而不是抛")
         assertEquals(0L, PhaseLadderMath.stmtCountFromBytes(12345L, -1L))
     }

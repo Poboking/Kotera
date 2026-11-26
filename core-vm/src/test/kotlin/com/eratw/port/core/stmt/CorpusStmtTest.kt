@@ -10,13 +10,27 @@ import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions
 
 /**
- * 全量语料语句层验证（默认跳过；设置 `ERATW_CORPUS` 后运行）。
+ * 全量语料语句层验证（`ERATW_CORPUS` 有值才跑；缺 env 走 assumption）。
  *
- * 运行方式：
+ * ## 为什么打 `@Tag("corpus-gate")` 而不进通用 `:core-vm:test`
+ *
+ * 本类判的是**玩家包里的字节**：`ERATW_CORPUS` 指到语料根时要求 0 解析失败 / 0 块错误。
+ * 通用闸必须喂真语料**原文**（金标准对拍的 oracle 就是原文），而原文上 CB-005 的 4 行
+ * `CASE [[油炸跳蛋]]`（第三方口上按 4.980 的 `_Rename.csv` 写成，键在 4.981 表里缺席，
+ * 原版 `LexicalAnalyzer.cs:808-826` 同拒）必然解析失败 ⇒ 在通用闸里它永远是红的残值。
+ * 出包链会先按 `devtools/corpus-patches` staging 再编，所以「0 失败」只有在**补丁后**的字节上才成立。
+ *
+ * 因此本类归 `corpus-gate` 口径，由 `:core-vm:corpusCompileGate` 圈进来跑（该任务先 staging、
+ * 再把 `ERATW_CORPUS`/`ERATW_GAMEDIR` 指到补丁副本）。这意味着 `CorpusValidator.run` 的
+ * `build/stmt-report` 也是「玩家包字节」的读数，与 `CorpusCompileSmokeTest` 同口径。
+ *
+ * 运行方式（出包字节口径，唯一法定入口）：
  * ```
- * ERATW_CORPUS=<…>/ERB ../.tooling/gradle-8.10.2/bin/gradle --no-daemon :core-vm:test --tests "*CorpusStmtTest*"
+ * ERATW_GAMEDIR=<语料根> ERATW_CORPUS=<语料根>/ERB \
+ *   ./gradlew --configure-on-demand :core-vm:corpusCompileGate
  * ```
  */
+@org.junit.jupiter.api.Tag("corpus-gate")
 class CorpusStmtTest {
     @Test
     fun fullCorpus() {

@@ -177,18 +177,28 @@ private class Parser(
                 finishFunction()
                 var arity = 0
                 var slots = 0
+                var paramNames: List<String> = emptyList()
                 for (t in args.drop(1)) {
                     val kv = t.text.split('=', limit = 2)
                     if (kv.size != 2) fail("无法解析的函数属性: ${t.text}")
                     when (kv[0].lowercase()) {
                         "arity" -> arity = parseInt(kv[1], "arity")
                         "slots" -> slots = parseInt(kv[1], "slots")
+                        // 形参名表（逗号分隔）：生产 ERB 编译器对带头部形参的函数恒登记
+                        //（`FunctionInfo.paramNames`），变量层绑定（bindCallArgs 逐位路径）
+                        // 以它为前提。测试夹具要表达生产形状（运行期调用点原生绑定走逐位
+                        // 路径而不是类型桶回退），由此键补上。
+                        "params" ->
+                            paramNames = kv[1].split(',').map { it.trim() }.filter { it.isNotEmpty() }
                         else -> fail("未知函数属性: ${kv[0]}")
                     }
                 }
+                if (paramNames.isNotEmpty() && paramNames.size != arity) {
+                    fail("params= 形参名数(${paramNames.size})与 arity($arity) 不一致: ${args[0].text}")
+                }
                 declaredSlots = slots
                 funcMaxSlot = slots - 1
-                funcIndex = b.declareFunction(args[0].text, b.here(), arity, slots)
+                funcIndex = b.declareFunction(args[0].text, b.here(), arity, slots, paramNames)
             }
 
             ".end" -> finishFunction()
@@ -313,12 +323,24 @@ private class Parser(
                 if (ops.isEmpty()) fail("_CALL 缺少函数")
                 val argc = if (ops.size >= 2) parseInt(ops[1].text, "实参数") else 0
                 val retDst = if (ops.size >= 3) slot(ops[2]) else SlotAddr.NONE
-                if (ops.size > 3) fail("_CALL 最多 3 个操作数")
+                // 第 4..6 操作数 = 可选旗标关键字（2026-11-26 B1 测试面）：strret / jump / try，
+                // 与编译器 emitCall 的 strRet / isJump / tryBit 三面一一对应；反汇编按同名
+                // 后缀回印，往返一致。此前汇编语法表达不了这三面，嵌套 hook 的三类接管点
+                // （isStrRet / 尾跳 / TRY）只能靠手补字节测。
+                var flags = 0
+                for (i in 3 until ops.size) {
+                    flags = flags or when (ops[i].text.lowercase()) {
+                        "strret" -> Opcode.STR_RET_FLAG
+                        "jump" -> Opcode.JUMP_FLAG
+                        "try" -> Opcode.TRY_FLAG
+                        else -> fail("_CALL 未知旗标关键字: ${ops[i].text}（可用 strret / jump / try）")
+                    }
+                }
                 val fname = ops[0].text
                 if (fname.startsWith('#')) {
-                    b.emit(op, parseInt(fname.drop(1), "函数下标"), argc, retDst, currentLine)
+                    b.emit(op, parseInt(fname.drop(1), "函数下标"), argc or flags, retDst, currentLine)
                 } else {
-                    val pc = b.emit(op, 0, argc, retDst, currentLine)
+                    val pc = b.emit(op, 0, argc or flags, retDst, currentLine)
                     callFixups += CallFixup(pc, fname, currentLine)
                 }
             }
@@ -419,6 +441,13 @@ private class Parser(
                 expectOps(ops, 3, Opcode.nameOf(op))
                 val pc = b.emit(op, slot(ops[0]), slot(ops[1]), 0, currentLine)
                 jumpOperand(pc, 3, ops[2])
+            }
+
+            // 浮点实参追加段（249）：a = 表达式池下标（浮点表达式）、b = 帧内整型槽
+            // （执行时按 `doubleToRawLongBits` 位型写入）；形态同 `_EVAL_INT`，但它是扩展段成员。
+            Opcode._EVAL_FLOAT -> {
+                expectOps(ops, 2, "_EVAL_FLOAT")
+                b.emit(op, exprIndex(ops[0]), slot(ops[1]), 0, currentLine)
             }
 
             else -> fail("未支持的扩展指令: ${Opcode.nameOf(op)}")

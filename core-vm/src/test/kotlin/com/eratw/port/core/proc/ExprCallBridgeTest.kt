@@ -133,9 +133,9 @@ class ExprCallBridgeTest {
         // spec: IdentifierDictionary.cs:562-580, 628）
         val miss = assertFailsWith<CodeEE> { rt.evalContext.callFunction("NO_SUCH_FN", emptyList()) }
         assertTrue("未定义的函数 NO_SUCH_FN" in (miss.message ?: ""), miss.message ?: "")
-        // 个数检查（spec: FunctionMethod.cs:302-335）
+        // 个数检查（spec: FunctionMethod.cs:307-318，定长形参表 = ArgsCountNotMatches）
         val arity = assertFailsWith<CodeEE> { rt.evalContext.callFunction("GETBIT", listOf(Value.IntV(1))) }
-        assertTrue("参数个数不匹配" in (arity.message ?: ""), arity.message ?: "")
+        assertTrue("GETBIT函数: 需要2个参数，但传入了1个" in (arity.message ?: ""), arity.message ?: "")
         // 占位机制回归（占位已归零，271 项全真实现）：用本地注册表测占位抛错语义。
         val reg = BuiltinRegistry()
         reg.registerUnimplemented("SCRATCH_UNIMPL_FN", com.eratw.port.core.expr.OperandType.INT, 1, 1)

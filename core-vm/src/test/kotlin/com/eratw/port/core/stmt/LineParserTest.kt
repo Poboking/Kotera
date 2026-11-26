@@ -404,7 +404,7 @@ class LineParserTest {
         //  口上・メッセージ関連/個人口上/063 Kagerou [影狼]/影狼/M_KOJO_K63_独自関数.ERB:46——全部读成 0），
         // 既丢真值也不报错（2026-11-01 语料全量扫描：#LOCALSIZE/#LOCALSSIZE 17,109 行，
         // 字面量 17,107、常量名形态 2、其余形态 0）。
-        val p = LineParser(dimConsts = mapOf("人物数量上限" to 200L))
+        val p = LineParser(consts = ParamConsts(ints = mapOf("人物数量上限" to 200L)))
         assertEquals(
             listOf(200L),
             assertIs<SharpStmt>(p.parseSharpLine("#LOCALSIZE 人物数量上限", 3)).values,

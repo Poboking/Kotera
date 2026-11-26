@@ -23,6 +23,9 @@ kotlin.sourceSets.named("main") {
 dependencies {
     api(project(":mod-api"))
     testImplementation(project(":core-vm"))
+    // 轻量内存台架：作者不启引擎也能验业务逻辑（`FamilyModHarnessTest` 是示范）。
+    // 它只依赖 :mod-api，不进 main 的依赖可见面，与本文件「test 例外」的既有纪律同口径。
+    testImplementation(project(":mod-testing"))
     testImplementation(kotlin("test"))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)

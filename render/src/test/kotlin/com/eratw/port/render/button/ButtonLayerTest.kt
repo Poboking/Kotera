@@ -360,6 +360,43 @@ class ButtonLayerTest {
         assertEquals(intTarget, layer.hit(0, 1))
     }
 
+    /**
+     * 引擎 hover 第一步（2026-11-18）：悬停 × 焦点 = 绘制高亮，触屏抬起不亮。
+     *
+     * 判据源 = 原版 `isSelecting || isFocus`（`ConsoleButtonString.cs:279-280`，PC 上
+     * 两者都由 `EmueraConsole.cs:2524-2585` 的 MoveMouse 悬停驱动）；触屏按下路
+     * （hover=false）与旧口径逐字等价 ⇒ 零回归。
+     */
+    @Test
+    fun `悬停指针驱动绘制高亮而触屏抬起不亮`() {
+        val layer = ButtonLayer()
+        layer.attach(listOf(row(button("BTN", 1L), text("--"), button("[X]", "SVAL"))))
+        val intTarget = layer.hit(0, 1)
+        assertNotNull(intTarget)
+        // 触屏抬起（pressed=false、hover 默认 false）：有焦点但不该亮 —— 旧行为逐字保持。
+        layer.setPointer(0, 1, pressed = false)
+        assertTrue(layer.isFocused(intTarget))
+        assertFalse(layer.isHighlighted(intTarget))
+        assertFalse(layer.pointerActive())
+        // 悬停：指着即亮（PC 的 isFocus / isSelecting 都是悬停驱动，不需要按下）。
+        layer.setPointer(0, 1, pressed = false, hover = true)
+        assertTrue(layer.pointerActive())
+        assertTrue(layer.isHighlighted(intTarget))
+        assertFalse(layer.isPressed(intTarget))
+        // 悬停移到非按钮格：高亮灭（`pointingStrings.Clear` 的等价物，`EmueraConsole.cs:2291,2308`）。
+        layer.setPointer(0, 3, pressed = false, hover = true)
+        assertFalse(layer.isHighlighted(intTarget))
+        // clearPointer 连 hover 一起清。
+        layer.setPointer(0, 1, pressed = false, hover = true)
+        layer.clearPointer()
+        assertFalse(layer.pointerActive())
+        assertFalse(layer.isHighlighted(intTarget))
+        // 按下路不变：pressed=true 仍亮（触屏 GFX-09 口径零回归）。
+        layer.setPointer(0, 1, pressed = true)
+        assertTrue(layer.isHighlighted(intTarget))
+        assertTrue(layer.isPressed(intTarget))
+    }
+
     /** 基准 259 行：`PRINTBUTTONC "BC", 2` 右对齐补齐 25 格，补齐段也在命中区内。 */
     @Test
     fun `基准 PRINTBUTTONC 整行 25 格都是命中区`() {

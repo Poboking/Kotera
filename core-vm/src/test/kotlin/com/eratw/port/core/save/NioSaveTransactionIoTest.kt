@@ -12,7 +12,7 @@ import org.junit.jupiter.api.io.TempDir
 /**
  * 生产 [NioSaveTransactionIo] 的真盘验收（RT2 C 车，era-arch §8 :208「生产 NIO 实现落位」）：
  * 逐端口方法在临时目录上钉语义 —— read 缺失回 null、write 失败即抛且 force、rename 覆盖换名、
- * delete 幂等、availableBytes 取自文件存储、越界路径当场拒绝。
+ * delete 幂等、availableBytes 沿父链探测（根还不存在也不抛）、越界路径当场拒绝。
  */
 class NioSaveTransactionIoTest {
 
@@ -55,6 +55,17 @@ class NioSaveTransactionIoTest {
         port.fsync("a.bin")
         port.fsync("missing.bin") // 缺失静默（write 侧已 force）
         assertTrue(port.availableBytes() > 0)
+    }
+
+    @Test
+    fun `根还不存在时沿父链探测且不抛不读成 0`() {
+        // 真机开局首存的形态：事务根还没建（或刚建一半）。旧实现是
+        // Files.getFileStore(不存在的路径) —— 桌面就抛 NoSuchFileException，
+        // Android 更无条件抛 SecurityException（见 SaveTransactionIo.availableBytes 的 KDoc）。
+        val port = NioSaveTransactionIo(temp.resolve("not-yet/created"))
+        val free = port.availableBytes()
+        assertTrue(free > 0L, "沿父链应给出正读数，实际 $free")
+        assertTrue(free < Long.MAX_VALUE, "既然探测得到就不该退回未知哨兵，实际 $free")
     }
 
     @Test

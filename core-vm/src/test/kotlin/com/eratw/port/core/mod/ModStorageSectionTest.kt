@@ -15,7 +15,7 @@ import kotlin.test.assertTrue
 class ModStorageSectionTest {
     @Test
     fun emptyContainerHasExactTenByteHeader() {
-        val expected = hex("4d535431000100000000")
+        val expected = hex("4d535431000200000000")
         assertContentEquals(expected, ModStorageSectionCodec.encode(emptyList()))
         assertTrue(ModStorageSectionCodec.decode(expected, emptySet()).isEmpty())
     }
@@ -27,10 +27,37 @@ class ModStorageSectionTest {
             "b" to ModValue.IntValue(0x0102030405060708L),
             "a" to null,
         ))
-        val expected = hex("4d5354310001000000010001700000000300016100000162010102030405060708000163020004e4b8ad00")
+        // v2：段尾多一个 i32 dataVersion（本段 0）。
+        val expected = hex(
+            "4d5354310002000000010001700000000300016100000162010102030405060708" +
+                "000163020004e4b8ad0000000000",
+        )
         assertContentEquals(expected, ModStorageSectionCodec.encode(listOf(section)))
         assertEquals(listOf(section), ModStorageSectionCodec.decode(expected, setOf("p")))
         assertContentEquals(expected, ModStorageSectionCodec.encode(ModStorageSectionCodec.decode(expected, emptySet())))
+    }
+
+    @Test
+    fun legacyV1BytesDecodeWithDataVersionZeroAndReEncodeAsV2() {
+        val legacy = raw(version = 1, sectionCount = 1) {
+            text("p"); writeInt(1); text("k"); writeByte(0)
+        }
+        val decoded = ModStorageSectionCodec.decode(legacy, setOf("p")).single()
+        assertEquals(0, decoded.dataVersion, "旧档缺 dataVersion 字段必须视作 0")
+        assertTrue(decoded.isTombstone("k"))
+
+        val upgraded = ModStorageSectionCodec.encode(listOf(decoded))
+        val writtenVersion = ((upgraded[4].toInt() and 0xFF) shl 8) or (upgraded[5].toInt() and 0xFF)
+        assertEquals(ModStorageSectionCodec.VERSION, writtenVersion, "写出必须升级成当前格式版本")
+        assertEquals(decoded, ModStorageSectionCodec.decode(upgraded, setOf("p")).single())
+        val reencoded = ModStorageSectionCodec.encode(ModStorageSectionCodec.decode(upgraded, emptySet()))
+        assertContentEquals(upgraded, reencoded, "v2 再编码必须逐字节稳定")
+    }
+
+    @Test
+    fun negativeDataVersionIsRejectedInV2Segments() {
+        val bytes = raw(version = 2) { text("p"); writeInt(0); writeInt(-1) }
+        assertEquals(17, rejected(bytes, Reason.INVALID_DATA_VERSION).offset)
     }
 
     @Test
@@ -110,9 +137,10 @@ class ModStorageSectionTest {
             text("gone"); writeByte(0)
             text("n"); writeByte(1); writeLong(Long.MIN_VALUE)
             text("text"); writeByte(2); text("留")
+            writeInt(7)
         }
-        val original = raw(sectionCount = 2) {
-            text("a.on"); writeInt(1); text("v"); writeByte(2); text("old")
+        val original = raw(version = 2, sectionCount = 2) {
+            text("a.on"); writeInt(1); text("v"); writeByte(2); text("old"); writeInt(0)
             write(orphanBytes)
         }
         val decoded = ModStorageSectionCodec.decode(original, setOf("a.on"))
@@ -200,7 +228,8 @@ class ModStorageSectionTest {
 
     @Test
     fun unknownVersionsAreRejectedBeforeParsingSections() {
-        for (version in listOf(0, 2, 0xFFFF)) {
+        // v1（只读兼容）与 v2（当前写出）之外一律拒：0 与 3 是紧邻边界的非法值，0xFFFF 是 u16 极值。
+        for (version in listOf(0, 3, 0xFFFF)) {
             val bytes = raw(version = version, sectionCount = 0) { }
             assertEquals(4, rejected(bytes, Reason.UNSUPPORTED_VERSION).offset)
         }

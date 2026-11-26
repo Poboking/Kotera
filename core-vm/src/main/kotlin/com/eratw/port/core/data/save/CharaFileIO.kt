@@ -2,6 +2,7 @@ package com.eratw.port.core.data.save
 
 import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.fn.SaveFileKind
+import com.eratw.port.core.save.FileSystemOps
 import com.eratw.port.core.save.SaveDiagnostics
 import com.eratw.port.core.vars.VarType
 import com.eratw.port.core.vars.VariableCode
@@ -193,7 +194,7 @@ object CharaFileIO {
         val gb = store.registry.gameBase
         if (!GameBaseGate.uniqueCodeEqualTo(gb, data.uniqueCode)) return false // :2300
         if (!GameBaseGate.checkVersion(gb, data.scriptVersion, scriptVersionDefined)) return false // :2305
-        data.applyTo(store, restoreCharacters = true, setLastLoad = false) // 追加角色块，:2315
+        writeBack(data, store)
         return true
     }
 
@@ -348,6 +349,49 @@ object CharaFileIO {
     // ------------------------------------------------------------------
     // 校验：口径本体在 [GameBaseGate]（GameBase.cs:60-80），本层不再各写一份近似。
     // ------------------------------------------------------------------
+}
+
+/**
+ * `LOADCHARA` 的**写回段**（:2315 的 `CharacterData` 还原进角色表）。
+ *
+ * 收敛口径（2026-11-18 stab-b 修复批）：原版 `LoadChara` 对还原段只包 `try/finally`
+ * **不 catch**（VariableEvaluator.cs:2295-2329），任何异常冒泡到 `DoScript` 顶层
+ * `catch (Exception)`（Process.cs:462-476）→ `handleExceptionInSystemProc` 红字上屏、
+ * 游戏继续。移植侧本段若裸抛非 [CodeEE] 异常（applyTo 分配、列写回、needInit 尾段
+ * 清零等任何运行时回归 / OOM），会穿透语句层（`ProcessRuntime.executeCore` 只盖章
+ * CodeEE / ExprEvalException）→ VM 线程死 → 停机失败屏 —— 与原版「红字继续」结局不符。
+ * 因此这里把**非 CodeEE** 异常收敛成带官方文案的 [CodeEE] 上抛（cause 经 initCause
+ * 挂进因果链，不吞不静默）；[CodeEE] 本身（applyTo 的角色行预算闸等）原样透传，
+ * 不二次包装 —— 预算文案是玩家可读的具体原因，包一层通用文案只会丢信息。
+ *
+ * 「带语句位置信息」由既有盖章管线完成：本函数抛出的 [CodeEE] 无位置字段
+ * （funcName == null / line < 0 / pc < 0），`LOADCHARA` 语句执行体里穿出时由
+ * `ProcessRuntime.stampPosition`（ProcessRuntime.kt:3888）按当前帧补函数/行/pc ——
+ * 与 `FileSystemOps.loadData` 写回段（FileSystemOps.kt:746-765，save-B2）同一形状；
+ * 文案同样取 [FileSystemOps.MES_LOAD_UNEXPECTED]（官方 `Lang.Error.UnexpectedErrorInLoaddata`，
+ * lang/emuera.zhs.xml:704）：原版 LoadChara 没有 catch、无对应 Lang 条目，取同族
+ * 官方文案是移植自有面的自立判据（ADR-005，无原版锚）。
+ *
+ * 放在 object 外：`CharaFileIO` 的对象成员数已顶到 detekt `TooManyFunctions` 阈值（11），
+ * 拓扑上它也只是「写回段收敛」这一段（与 [emitUserCharaSegment] 同一理由）。
+ * internal = 直测缝：收敛段需要「applyTo 抛非 CodeEE」的确定性输入才能验收，
+ * 读侧产物字节无法构造（read 侧维度与 values 一致性在解码时已判死），故把写回段
+ * 拆成独立函数供测试直接驱动（生产路径唯一调用者 = [CharaFileIO.load]）。
+ */
+@Suppress("TooGenericExceptionCaught")
+internal fun writeBack(data: SaveData, store: VariableStore) {
+    try {
+        // 追加角色块，:2315
+        data.applyTo(store, restoreCharacters = true, setLastLoad = false)
+    } catch (e: CodeEE) {
+        // 已是受控错误（角色行预算闸等）：原样上抛，不二次包装。
+        throw e
+    } catch (e: Throwable) {
+        // @Suppress 理由：这里**刻意**接住 Throwable（含 OOM）—— 收敛口径要求写回段
+        // 「任何非 CodeEE 异常」都转受控错误走红字（与 loadData 写回段同式），根因经
+        // initCause 进因果链，不吞不静默（吞掉装没事 = 掩盖，禁止）。
+        throw CodeEE(FileSystemOps.MES_LOAD_UNEXPECTED).apply { initCause(e) }
+    }
 }
 
 /**

@@ -65,6 +65,34 @@ import java.util.concurrent.TimeUnit
  * - 语料根：`ERATW_GAMEDIR`，缺省取 `ERATW_CORPUS` 的上一级（CSV/resources/sav 所在层）。
  * - 报告：`build/perf-decomp.md`（测试 JVM 的 cwd = `core-vm/` 模块目录）。
  *
+ * ## 产物必须与当前源码同版（否则读数不可归因）
+ *
+ * 本用例的读数与 `.erbc` 产物**逐字节绑定**：旧产物不是「旧一点的数据」，而是另一套源码编出来的
+ * `Program`。2026-11-18 实测同一份语料下，11-15 的旧产物（5,095,595 指令 / 1,940,620 语句）与
+ * 当前源码重编的产物（5,101,761 / 1,940,630）分别给 -317.2 与 -315.9 MiB 的残差 —— 只差 1.3 MiB，
+ * 足以让「A 类：产物过期」与「B 类：口径漂移」看起来一模一样。所以任何红先做一次同版重编再定性：
+ *
+ * ```powershell
+ * $env:ERATW_CORPUS='<游戏根>/ERB'
+ * .\gradlew.bat --configure-on-demand ":tools:erbcc:compileCorpus" `
+ *   "-Pcorpus=$env:ERATW_CORPUS" "-Pout=<worktree>/eratw-android/core-vm/build/erbc-fresh"
+ * $env:ERATW_ERBC_DIR='<worktree>/eratw-android/core-vm/build/erbc-fresh/erbc.v1'
+ * ```
+ *
+ * 约 1.5 分钟；`out` 必须是**新目录**而不是 `tools/erbcc/build/erbc-out`（那里是包内预置产物的位置，
+ * 覆盖它等于把装机基准换了）。判据：产物目录里 `manifest.txt` 的 `instructions` / `statements`
+ * 计数字段与 `--out` 日志里本次编译的读数一致，才说明这份产物就是当前源码。
+ *
+ * ## 惰性供给档下的口径（2026-11-18 重定基）
+ *
+ * `ProgramLoader.loadMapped` 自 M10-MEM 起装载的是**惰性** `Program`：段 3 语句与段 2 表达式
+ * 按需解码（块级 LRU 上界），CODE 段按映射读 —— 于是装载后 `S3` 只有 ~150 MiB，而不再是
+ * 源码直编档的 ~709 MiB。因此本装置：
+ *
+ * 1. 程序侧只归属**运行期缓存水位**（[PoolDecomp.programRows] 里的惰性分支），不整池物化；
+ * 2. 「已归属」旧判据（固定 256..1280 MiB）随口径一起重定基成**对实测常驻增量的两向一致**
+ *    （见下面断言处注释），残差 -64 MiB 的判据不动。
+ *
  * ## 读数口径的两条硬约定
  *
  * 1. **互斥可加**：先到者拥有共享实例（语句 `args` 先于 `exprs` 池遍历），所以各行能相加；
@@ -77,7 +105,7 @@ import java.util.concurrent.TimeUnit
  *
  * ## 断言的是不变量，不是某个 MiB
  *
- * 读数随 JVM/GC/堆上限浮动，故只锁：已归属落在合理量级、残差不为大负数、
+ * 读数随 JVM/GC/堆上限浮动，故只锁：已归属与实测常驻增量互相覆盖（两向容差）、残差不为大负数、
  * seal 后三张索引实测为 null、失效索引三行之和与公式一致、遍历后复读没有明显污染。
  * 具体 MiB 全在报告与控制台里。
  */
@@ -221,7 +249,19 @@ class PoolDecompAuditTest {
         assertEquals(indexSum, result.staleIndexBytes, "失效索引三行之和必须等于 measure 的 staleIndexBytes")
         assertEquals(formula, indexSum, "失效索引 =（常量 + 字符串 + 表达式）条数 × 48B")
         assertTrue(sealProof.contains("null"), "seal 后三张去重索引必须为 null：$sealProof")
-        assertTrue(result.attributed in 256L * MIB..1280L * MIB, "已归属量级异常：${mibOf(result.attributed)}")
+        // 已归属必须与实测常驻**双向**互相覆盖。旧判据是 256..1280 MiB 的绝对窗口，那是
+        // 「源码直编 / eager 装载」口径（S3 ≈ 709 MiB）；M10-MEM 之后 `loadMapped` 是惰性
+        // 语句/表达式池 + 映射 code，装载后 S3 只有 ~150 MiB（2026-11-18 实测 153.3 MiB），
+        // 拿 eager 窗口卡它只会永远红；而只把下界调小又会让「整池凭空多归属」照样绿。
+        // 所以判据改成对实测常驻增量的两向一致：多于实测 = 归属了读数时已不可达的对象，
+        // 少于实测 = 漏归属。64/96 MiB 与下面两条断言同一量级（HeapMeter 标定噪声 ±10 MiB 的 6~9 倍）。
+        val liveBytes = s3 - s0min
+        assertTrue(
+            result.attributed in (liveBytes - 64L * MIB)..(liveBytes + 96L * MIB),
+            "已归属 ${mibOf(result.attributed)} 与实测常驻增量 ${mibOf(liveBytes)} 相差超过容差" +
+                "（残差 ${signedOf(result.residual)}）：归属了读数时已不可达的对象，或漏归属了常驻池。" +
+                "惰性供给档先看 PoolDecomp.programRows 是否走了缓存水位而不是整池物化。",
+        )
         assertTrue(result.residual > -64L * MIB, "残差为大负数，说明做过归属的对象在读数时已不可达：${signedOf(result.residual)}")
         assertTrue(
             kotlin.math.abs(result.postWalkUsed - s3) < 96L * MIB,

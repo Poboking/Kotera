@@ -32,6 +32,7 @@ import org.junit.jupiter.api.assertThrows
 import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -86,6 +87,7 @@ class ModRuntimeHostTest {
         private val label: String,
         private val failOnEnable: Boolean = false,
         private val disableThrows: Boolean = false,
+        private val failOnNewGame: Boolean = false,
         private val onLoadHook: (ModContext) -> Unit = {},
     ) : EraMod {
         override fun onLoad(context: ModContext) {
@@ -105,6 +107,49 @@ class ModRuntimeHostTest {
 
         override fun onUnload() {
             trace += "$label:onUnload"
+        }
+
+        override fun onNewGame() {
+            trace += "$label:onNewGame"
+            if (failOnNewGame) error("$label 故意在 onNewGame 抛异常")
+        }
+
+        override fun onSaveLoaded() {
+            trace += "$label:onSaveLoaded"
+        }
+
+        override fun onTurnBoundary() {
+            trace += "$label:onTurnBoundary"
+        }
+    }
+
+    /**
+     * 回合边界故意抛错的 mod：验证宿主扇出「per-mod 隔离、不二次抛、不 revoke、不混 trace」。
+     * 生命周期空实现用自增计数占位（避免 detekt `EmptyFunctionBlock` 新增违例）。
+     */
+    private class TurnBoundaryBoomMod(private val trace: MutableList<String>) : EraMod {
+        var loads: Int = 0
+            private set
+
+        override fun onLoad(context: ModContext) {
+            loads++
+        }
+
+        override fun onEnable() {
+            loads++
+        }
+
+        override fun onDisable() {
+            loads++
+        }
+
+        override fun onUnload() {
+            loads++
+        }
+
+        override fun onTurnBoundary() {
+            trace += "modB:onTurnBoundary"
+            error("modB 故意在 onTurnBoundary 抛异常")
         }
     }
 
@@ -171,11 +216,15 @@ class ModRuntimeHostTest {
         assertNull(states[1].failure)
 
         val ctxA = host.contextOf("modA")!! as ModContextImpl
+        val ctxB = host.contextOf("modB")!! as ModContextImpl
+        // 全链共享一份 HookPipeline（priority 全局序的前提，见 ModRuntimeHost.hookPipeline）：
+        // 任一 context 的 dispatch 都走同一张表，失败 modA 的绑定已被 revoke 掉。
         ctxA.hookPipeline.dispatch("COM300", emptyArray()) { ModValue.of(1L) }
         assertEquals(0, aHits)
-        val ctxB = host.contextOf("modB")!! as ModContextImpl
-        ctxB.hookPipeline.dispatch("COM300", emptyArray()) { ModValue.of(1L) }
         assertEquals(1, bHits)
+        assertTrue(ctxA.hookPipeline === ctxB.hookPipeline, "两个 context 必须指向同一份 pipeline")
+        ctxB.hookPipeline.dispatch("COM300", emptyArray()) { ModValue.of(1L) }
+        assertEquals(2, bHits)
 
         assertTrue(logs.any { it.contains("[modA][ERROR]") && it.contains("onLoad 或 onEnable 失败") })
 
@@ -337,22 +386,76 @@ class ModRuntimeHostTest {
                 normalUnregistered = true
             }
         }
-        host.revokeAll(listOf(throwing, normal)) { errors += it }
+        revokeRegistrations(listOf(throwing, normal)) { errors += it }
         assertTrue(normalUnregistered)
         assertEquals(1, errors.size)
         assertEquals("故意抛错", errors[0].message)
     }
 
     @Test
-    fun `EventApi 拒接必抛且消息含 M2-6 与生产消费点未接`() {
+    fun `EventApi 装载后真可注册且进会话共享注册表`() {
         val host = newHost(mutableListOf(), "modA")
         host.install(listOf("modA" to TraceMod(mutableListOf(), "modA")))
         val ctx = host.contextOf("modA")!!
-        val ex = assertThrows<UnsupportedOperationException> {
-            ctx.events.register("EVENT", EventBucket.NORMAL) { EventResult.CONTINUE }
+        val registration = ctx.events.register("EVENT", EventBucket.NORMAL) { EventResult.CONTINUE }
+        assertTrue(host.eventHandlers.hasHandlers("EVENT"), "注册必须落进会话共享注册表（否则派发侧读不到）")
+        registration.unregister()
+        assertFalse(host.eventHandlers.hasHandlers("EVENT"))
+        // ONLY 桶在运行期硬拒：它终止整条事件链，运行期插入会让 base 与其它 Mod 的成员全失效。
+        val ex = assertThrows<IllegalArgumentException> {
+            ctx.events.register("EVENT", EventBucket.ONLY) { EventResult.CONTINUE }
         }
-        assertTrue(ex.message!!.contains("M2-6"))
-        assertTrue(ex.message!!.contains("生产消费点未接"))
+        assertTrue(ex.message!!.contains("ONLY"))
+    }
+
+    @Test
+    fun `事件注册经 track 收集_关闭与失败回滚都会真撤销`() {
+        val host = newHost(mutableListOf(), "modE")
+        host.install(
+            listOf(
+                "modE" to object : EraMod {
+                    override fun onLoad(context: ModContext) {
+                        context.events.register("EVENT", EventBucket.NORMAL) { EventResult.CONTINUE }
+                    }
+
+                    override fun onEnable() = Unit
+
+                    override fun onDisable() = Unit
+
+                    override fun onUnload() = Unit
+                },
+            ),
+        )
+        assertTrue(host.eventHandlers.hasHandlers("EVENT"), "onLoad 里注册的处理器必须落进会话共享表")
+        host.shutdown()
+        assertFalse(
+            host.eventHandlers.hasHandlers("EVENT"),
+            "shutdown 必须撤销本 mod 的事件注册（绕过 track = onDisable 之后处理器仍在命中）",
+        )
+
+        // 装配失败回滚同口径：onEnable 抛错时 onLoad 期间注册的处理器必须被撤销。
+        val failing = newHost(mutableListOf(), "modF")
+        failing.install(
+            listOf(
+                "modF" to object : EraMod {
+                    override fun onLoad(context: ModContext) {
+                        context.events.register("EVENT2", EventBucket.NORMAL) { EventResult.CONTINUE }
+                    }
+
+                    override fun onEnable() {
+                        error("故意失败")
+                    }
+
+                    override fun onDisable() = Unit
+
+                    override fun onUnload() = Unit
+                },
+            ),
+        )
+        assertFalse(
+            failing.eventHandlers.hasHandlers("EVENT2"),
+            "装配失败回滚必须撤销 onLoad 期间注册的事件处理器",
+        )
     }
 
     @Test
@@ -396,6 +499,136 @@ class ModRuntimeHostTest {
         hostA.shutdown()
         assertEquals(emptySet<String>(), a.uiRegisteredKeys())
         assertEquals(setOf("BTN"), b.uiRegisteredKeys())
+    }
+
+    @Test
+    fun `新局与读档通知只达已启用 mod 且异常被隔离`() {
+        val logs = mutableListOf<String>()
+        val trace = mutableListOf<String>()
+        val host = newHost(logs, "modA", "modB", "modC")
+        host.install(
+            listOf(
+                "modA" to TraceMod(trace, "modA"),
+                // modB 的通知故意抛错：必须只影响它自己，且不二次抛。
+                "modB" to TraceMod(trace, "modB", failOnNewGame = true),
+                "modC" to TraceMod(trace, "modC"),
+            ),
+        )
+        trace.clear()
+
+        host.notifyNewGame()
+        assertEquals(listOf("modA:onNewGame", "modB:onNewGame", "modC:onNewGame"), trace)
+        assertTrue(
+            logs.any { it.contains("onNewGame 异常已隔离") && it.contains("modB") },
+            "modB 的失败必须留痕且只留它自己：$logs",
+        )
+
+        trace.clear()
+        host.notifySaveLoaded()
+        assertEquals(listOf("modA:onSaveLoaded", "modB:onSaveLoaded", "modC:onSaveLoaded"), trace)
+        host.shutdown()
+    }
+
+    @Test
+    fun `安装失败与已关闭的 mod 不再收相位通知`() {
+        val logs = mutableListOf<String>()
+        val trace = mutableListOf<String>()
+        val host = newHost(logs, "modOk", "modBad")
+        host.install(
+            listOf(
+                "modOk" to TraceMod(trace, "modOk"),
+                "modBad" to TraceMod(trace, "modBad", failOnEnable = true),
+            ),
+        )
+        trace.clear()
+
+        host.notifyNewGame()
+        host.notifySaveLoaded()
+        assertEquals(listOf("modOk:onNewGame", "modOk:onSaveLoaded"), trace)
+
+        // 已彻底关闭的 mod 也不再收：shutdown 之后连 enabled 都不再兑现通知。
+        host.shutdown()
+        trace.clear()
+        host.notifyNewGame()
+        assertEquals(emptyList<String>(), trace)
+    }
+
+    @Test
+    fun `相位通知不混进安装与卸载的精确 trace`() {
+        val trace = mutableListOf<String>()
+        val host = newHost(mutableListOf(), "modA")
+        host.runAll(listOf("modA" to TraceMod(trace, "modA")))
+        assertEquals(
+            listOf("modA:onLoad(modA)", "modA:onEnable", "modA:onDisable", "modA:onUnload"),
+            trace,
+        )
+    }
+
+    @Test
+    fun `回合边界通知只达已启用 mod 且入账固定 scope`() {
+        val logs = mutableListOf<String>()
+        val trace = mutableListOf<String>()
+        val host = newHost(logs, "modA", "modB")
+        host.install(
+            listOf(
+                "modA" to TraceMod(trace, "modA"),
+                // modB 的回合通知故意抛错：必须只影响它自己，且不二次抛。
+                "modB" to TurnBoundaryBoomMod(trace),
+            ),
+        )
+        val ledger = ModTimingLedger()
+        host.timing = ledger
+        trace.clear()
+
+        host.notifyTurnBoundary()
+        assertEquals(listOf("modA:onTurnBoundary", "modB:onTurnBoundary"), trace)
+        assertTrue(
+            ledger.forPackage("modA").any { it.scope == "lifecycle.onTurnBoundary" },
+            "回合边界通知必须入账固定 scope lifecycle.onTurnBoundary：${ledger.forPackage("modA")}",
+        )
+        assertTrue(
+            logs.any { it.contains("onTurnBoundary 异常已隔离") && it.contains("modB") },
+            "modB 的失败必须留痕且只留它自己：$logs",
+        )
+
+        // 收口之后不再兑现回合通知（幂等旁路）。
+        host.shutdown()
+        trace.clear()
+        host.notifyTurnBoundary()
+        assertEquals(emptyList<String>(), trace)
+    }
+
+    @Test
+    fun `随机面在 onLoad 之前就位_同种子可复现_换种子重放`() {
+        // mod 在 onLoad 里就要能抽数（初始化随机布局是常见需求）⇒ adopt 必须早于生命周期。
+        fun drawsAfterAdopt(seed: Long?): List<Int> {
+            val host = newHost(mutableListOf(), "modR")
+            if (seed != null) host.adoptRandomSeed(seed)
+            var drawn: List<Int> = emptyList()
+            val mod = object : EraMod {
+                override fun onLoad(context: ModContext) {
+                    drawn = List(8) { context.rng.nextInt(1000) }
+                }
+
+                override fun onEnable() = Unit
+
+                override fun onDisable() = Unit
+
+                override fun onUnload() = Unit
+            }
+            host.install(listOf("modR" to mod))
+            return drawn
+        }
+
+        val first = drawsAfterAdopt(null)
+        assertEquals(8, first.size, "onLoad 阶段的 context.rng 必须可用（未装配会抛 fail-closed）")
+        assertEquals(first, drawsAfterAdopt(null), "同一决策种子下两次装配必须抽到同一串")
+        assertNotEquals(first, drawsAfterAdopt(20260226L), "换决策种子必须换序列")
+        assertEquals(
+            drawsAfterAdopt(20260226L),
+            drawsAfterAdopt(20260226L),
+            "同一档内种子下必须可复现（读档重放口径）",
+        )
     }
 
     @Test

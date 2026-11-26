@@ -1,10 +1,12 @@
 package com.eratw.port.erbcc.compile
 
+import com.eratw.port.core.expr.FloatLiteral
 import com.eratw.port.core.expr.OperandType
 import java.nio.file.Path
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.io.TempDir
@@ -107,6 +109,53 @@ class DimfSidecarTest {
         assertTrue(
             result.dimWarnings.none { it.message.contains("倍率") },
             "DIMF 不应产生 level 2 解析失败: ${result.dimWarnings.map { it.message }}",
+        )
+    }
+
+    /**
+     * 端到端：ERH `#DIMF CONST 全局倍率 = 2.5` → ERB 函数头 `PFLT = 全局倍率` → `paramDefaults`
+     * 里该位必须折成 [FloatLiteral]（=2.5），而不是留成「不支持 → 运行期静默 0」。
+     *
+     * 覆盖三段：① 前端 ERH 装载认 `#DIMF`（不认会被当未知指令、按 level 2 中止整条链）；
+     * ② `CorpusCompile` 把 ERH 浮点常量折成 `floatConsts` 交给语句层；
+     * ③ `LineParser.foldConstDefault` 的 FLOAT 支按表折 `FloatLiteral`。
+     *
+     * PC 判词（4.981 桌面宿主实测）：ERH `#DIMF CONST MYFLT = 1.5` + `@F(ARG, PFLT = MYFLT)`
+     * + `CALL F, 0` ⇒ 该位取 1.5（折成 `SingleFloatTerm`，与整型/字符串常量名同一条
+     * `Restructure`；锚 `ErbLoader.cs:724-752`）。
+     */
+    @Test
+    fun `ERH浮点常量名默认值折进paramDefaults`() {
+        val root = dir.resolve("corpus3")
+        java.nio.file.Files.createDirectories(root)
+        root.resolve("globals.ERH").writeText("#DIMF CONST 全局倍率 = 2.5")
+        root.resolve("main.ERB").writeText(
+            """
+            @永恒回归_默认值探针(ARG, PFLT = 全局倍率)
+            #DIMF PFLT
+            #DIM OUT, 4
+            OUT:1 = TOINT(PFLT * 100)
+            RETURN
+            """.trimIndent(),
+        )
+
+        val result = CorpusCompile.compile(root)
+        assertTrue(result.ok, "合成语料应编译成功: ${result.failures}")
+
+        val key = "永恒回归_默认值探针".uppercase()
+        val defs = result.bootMetadata.paramDefaults[key]
+        assertNotNull(defs, "函数头默认值必须进 paramDefaults: ${result.bootMetadata.paramDefaults.keys}")
+        val folded = defs.getOrNull(1)
+        assertIs<FloatLiteral>(
+            folded,
+            "ERH 浮点常量名默认值必须折成 FloatLiteral，实得: $folded（逐位默认值: $defs）",
+        )
+        assertEquals(2.5, folded.value, "折出的浮点值必须等于 ERH 里登记的 2.5")
+
+        // ERH 的 `#DIMF` 不得再走「未知指令 → level 2 中止整条 ERH 链」那条路。
+        assertTrue(
+            result.dimWarnings.none { it.message.contains("全局倍率") },
+            "ERH #DIMF 不应产生装载告警: ${result.dimWarnings.map { it.message }}",
         )
     }
 }

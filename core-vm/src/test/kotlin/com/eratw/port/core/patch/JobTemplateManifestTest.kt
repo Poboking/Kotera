@@ -4,6 +4,7 @@ import com.eratw.port.core.mod.ModDeclarationAdapter
 import com.eratw.port.modapi.BuiltinPhase
 import com.eratw.port.modapi.JobCatchUp as ModJobCatchUp
 import com.eratw.port.modapi.JobTemplateDecl
+import com.eratw.port.modapi.JobTemplateKey
 import com.eratw.port.modapi.ModManifest
 import com.eratw.port.modapi.PhaseDecl
 import org.junit.jupiter.api.Test
@@ -132,7 +133,9 @@ class JobTemplateManifestTest {
             val ex = assertFailsWith<ManifestFormatException> { ManifestCodec.decode(toBytes(lines)) }
             val m = ex.message!!
             assertTrue(m.contains("$old 已拒载"))
-            assertTrue(m.contains("请用 /3 编码器重出 Manifest"))
+            // /8（write-grants）双读上线后拒载文案改成「/3 至 /8」（ManifestCodec.kt 的 magic 闸），迁移提示逐字跟改；
+            // 「文案必须列全实收版本」的自证判据在 ManifestCodecTest.legacyRejectionCopyListsEveryVersionTheDecoderAccepts。
+            assertTrue(m.contains("请用 /3 至 /8 的编码器重出 Manifest"))
             assertTrue(m.contains("B2"))
             assertTrue(m.contains("RT2MANIFEST/3"))
         }
@@ -171,7 +174,7 @@ class JobTemplateManifestTest {
         val ok = ModDeclarationAdapter.toDescriptor(
             ModManifest(
                 packageId = "demo.ok",
-                jobTemplates = listOf(JobTemplateDecl("T", BuiltinPhase.ACTION)),
+                jobTemplates = listOf(JobTemplateDecl(JobTemplateKey("T"), BuiltinPhase.ACTION)),
             ),
         )
         assertEquals("ACTION", ok.jobTemplateDeclarations.single().phase)

@@ -18,6 +18,7 @@ import com.eratw.port.core.frontend.Symbols
 import com.eratw.port.core.patch.CallSentinels
 import com.eratw.port.core.patch.ModuleDescriptor
 import com.eratw.port.core.proc.FuncMeta
+import java.util.Locale
 
 /**
  * legacy 窗口补丁 → 零基线 RT2 Module 转码器（M2-4，era-arch-v61u.md:75）。
@@ -44,7 +45,13 @@ import com.eratw.port.core.proc.FuncMeta
  * 2. **`_CALL.a` 语义分野**（FUNCTION 槽不走机械平移，`CallRelocation.kt:8-17` 四支的
  *    编译期对应形）：`a >= functionBase` ⇒ 模块内下标（`a - functionBase`）；
  *    `a < functionBase` ⇒ 导入哨兵 `-(extIdx+1)`，imports 表按名内注（名字查
- *    base 目录，查不到 = fail-closed 拒绝转码）。补丁编译档不开 SUPER
+ *    base 目录，查不到 = fail-closed 拒绝转码——编译器与转码器同源
+ *    `base.metadata.functions`，该分支纯防御）。**事件名放行**（S9 改判 T1/T2，
+ *    CONTRACT-S9-MISSING-CALL.md）：CALL 事件名（base 事件入口或本包被截断的合成
+ *    入口）同样按名进 imports——链接期无非事件胜者 ⇒ 缺名残桩，运行期
+ *    `resolveFunctionIndex` 按 `CompatiCallEvent` 配置解析（NO = `CallToEventFunc`
+ *    原文报错；YES = 真调首成员，spec: CalledFunction.cs:100-103、
+ *    LabelDictionary.cs:181-184）。补丁编译档不开 SUPER
  *    （R7 裁定），super 哨兵不可能出现，出现即拒绝。
  * 3. **合成事件入口退役**：窗口模型的合成入口（`<事件名>`，body 调 base 入口 + 成员，
  *    `PatchCompiler` 步骤 11.5）在模块形态**整体截断**——模块成员经 LSC events 视图进
@@ -53,8 +60,8 @@ import com.eratw.port.core.proc.FuncMeta
  *    入口的调用无法表达为导入（`ModuleLinker` 拒事件名导入）。合成入口恒在全部成员
  *    **之后**声明（`PatchCompiler` 步骤序）⇒ 截断 = 裁掉指令流尾部，成员 pc 不动；
  *    「入口之后还有成员」的形态 = 上游编译序变化，fail-closed 拒绝（不静默截活代码）。
- *    **fail-closed 负控**：保留代码若有 `_CALL` 指向被截断的入口下标（用户源直接
- *    CALL 事件名），转码拒绝并点名。
+ *    **保留代码指向被截断入口的 `_CALL`**（用户源直接 CALL 事件名，S9 T1 改判）⇒
+ *    按事件名进 imports（同上，运行期按配置解析），不再拒绝转码。
  * 4. **元数据 rebase**：FunctionInfo entryPc/labelPc、callArgs 键、FuncMeta index/defIndex
  *    各按窗口基线下移；跳转是函数内相对偏移（`Opcode.kt` `_JUMP` 注），不动；
  *    表达式 FuncCall 走名字通道（`Expr.FuncCall.name` 运行期解析），天然 base 无关，不动。
@@ -65,8 +72,8 @@ import com.eratw.port.core.proc.FuncMeta
  *
  * - 事件桶位（#ONLY/#PRI/#LATER）补丁面本就不采集（PatchCompiler 类尾 TODO(verify) 4），
  *   转码照实携带 NORMAL 桶，不新增语义。
- * - 签名导出恒空（补丁函数无签名规范串）⇒ MODERN 下补丁函数覆盖 base 被签名闸拒——
- *   与 R7 I6-② 同向（补丁本就不许覆盖非事件函数），非回归。
+ * - 签名导出**只覆盖声明面**：覆盖集（模块名 ∩ base 名）里的键逐个导出 base 指纹（R7-①），
+ *   其余补丁函数指纹仍为空串——非覆盖键不参与签名闸比较，导出全套指纹属需组长接线。
  * - `_CALL_BY_NAME` / `_JUMP_BY_NAME`（CALLFORM/JUMPFORM 动态名通道；kojo-community 三包
  *   共 13 处真源形态）在重定位分类表里全槽 NONE（`a` = 帧内名字槽地址，非池下标、
  *   非静态 pc）⇒ 零基化 = 逐字保留，按名决议在运行期对链接产物成立；转码面不外加
@@ -91,6 +98,35 @@ object PatchImportTranscoder {
         val imports: List<String>,
         /** 被截断的合成事件入口事件名（诊断，装载序）。 */
         val droppedEventEntries: List<String>,
+        /**
+         * 降级覆盖键（2026-11-23 KI 改判，BOARD KI-2）：base 侧车给不出签名指纹的覆盖键。
+         * 包照常落盘（链接期 last-wins 放行），清单供调用方汇进导入告警面
+         * （玩家可见「ABI 未校验，请向口上作者反馈」）。空 = 常态。
+         */
+        val degradedOverrideKeys: List<String> = emptyList(),
+    )
+
+    /**
+     * 覆盖装载的输入（[transcode] 的末位参数，把「查 base 指纹」与「包声明收窄」收成一个概念，
+     * 免得参数表继续长）。
+     *
+     * @param baseSignatureOf base 签名指纹查询口：大写归一函数键 → 规范指纹串，无该键或无签名段
+     *   ⇒ 空串。生产真源 = [com.eratw.port.core.patch.BaseSignatureCatalog] 走 `program.meta`
+     *   尾段，与装配期链接器读的是同一份。**2026-11-23 KI 改判后不再作前置闸**：缺指纹的
+     *   覆盖键照常声明（链接期 last-wins 放行 + ABI 未校验告警），查询口现在只用于把缺指纹键
+     *   收进 [Transcoded.degradedOverrideKeys] 降级清单（告警面用），**不是**容器签名段的值
+     *   来源（那是补丁自己的真实签名，见 [transcode]）。
+     * @param allowList 可选的**显式收窄声明**（市场面 `pack.json` 的 `overrideFunctions`；SAF
+     *   直选无清单即缺省）。`null` = 未声明 ⇒ 名单按「模块函数名 ∩ base 函数名（事件名除外）」
+     *   自动推导（存量第三方包零改）；非 `null` = 作者声明「本包只允许覆盖这些目标」，必须与
+     *   实际推导集**逐一相等**：多列（声明了不可覆盖的目标）或漏列（补丁含同名函数却没声明）
+     *   都拒——声明只能约束事实，不能放宽、也不能掩盖；`emptyList()` = 显式声明「本包不覆盖
+     *   任何函数」，此时补丁一旦含同名函数即拒。用途 = 作者钉住覆盖面，防后续改源时意外多覆盖
+     *   （次要能力，非覆盖名单的来源）。
+     */
+    data class OverrideInputs(
+        val baseSignatureOf: (String) -> String = { "" },
+        val allowList: Collection<String>? = null,
     )
 
     /**
@@ -100,14 +136,28 @@ object PatchImportTranscoder {
      * @param baseFunctionNameByIndex base 函数物理下标 → 大写归一名（base 侧车 functions 段；
      *   `_CALL` 跨 base 目标的导入名来源，查不到 = fail-closed）。
      * @param packageId 转码产物的包身份（调用方派生；链接序与 manifest 配对用）。
+     * @param override 覆盖装载的输入（base 签名查询口 + 可选显式收窄声明，见 [OverrideInputs]）。
+     *   覆盖集里的每个键（= 模块函数名 ∩ base 函数名，事件名除外）都必须拿到非空 base 指纹，
+     *   缺一个就抛——空指纹的覆盖会在装配期被
+     *   [com.eratw.port.core.code.OverrideSignatureException] 整链炸成启动砖化
+     *   （spec: SymbolCatalog.kt:213-237）。空表（缺省）= 纯加性补丁，`override-functions` 段与
+     *   签名段都不写，产物与放开前逐字节一致。
+     *
+     *   **融合方案（R7-①）**：覆盖名单仍按「模块函数名 ∩ base 函数名」现推（存量第三方包
+     *   无需补声明字段），但写进容器签名段的是 [result] 的**补丁真实签名**（编译期同一
+     *   SignatureExport 渲染器的指纹），不是本查询口给的 base 签名——链接期 MODERN 闸直比
+     *   base 指纹，签名不符即拒；若写 base 签名则恒等通过、ABI 闸形同虚设。本查询口只做
+     *   「base 有指纹才允许覆盖」的前置判据（防链接期空指纹），不再充当签名值来源。
      * @throws IllegalArgumentException 窗口基线脱节 / 补丁调用了 base 不存在的函数 /
-     *   保留代码引用合成入口 / super 哨兵出现 / 出口自检失败。
+     *   super 哨兵出现 / 出口自检失败 / 覆盖声明缺签名指纹 /
+     *   显式声明与实际可覆盖集不一致。
      */
     fun transcode(
         result: PatchCompiler.PatchResult,
         baseCounts: PatchCompiler.BaseCounts,
         baseFunctionNameByIndex: Map<Int, String>,
         packageId: String,
+        override: OverrideInputs,
     ): Transcoded {
         require(packageId.isNotBlank()) { "转码产物 packageId 不得为空" }
         require(result.funcMetas.isNotEmpty()) {
@@ -135,12 +185,6 @@ object PatchImportTranscoder {
             ),
             keptInstrCount,
         )
-        acc.callToDropped?.let { (local, ev) ->
-            throw IllegalArgumentException(
-                "补丁函数直接 CALL 事件名 $ev（目标 pc=$local 的合成入口）——模块链不支持该写法" +
-                    "（合成事件入口随窗口模型退役，事件成员经四桶派发）；请改用 CALLEVENT 或等价写法",
-            )
-        }
         val rebased = rebaseFunctions(program, result.funcMetas, funcBase, instrBase, entry.locals)
         val zeroProgram = buildZeroProgram(acc.keptWords, program, instrBase, keptInstrCount, rebased)
 
@@ -148,7 +192,10 @@ object PatchImportTranscoder {
         checkPoolIndexBounds(zeroProgram, allowCallSentinels = true)
         ErbcReader.requireJumpTargets(zeroProgram)
 
-        val importsList = acc.imports.keys.toList()
+        val overrides = declareOverrides(
+            rebased.metas, baseFunctionNameByIndex, override.baseSignatureOf, result.signatures,
+            override.allowList,
+        )
         return Transcoded(
             module = ErbModuleContainer.ErbModule(
                 packageId = packageId,
@@ -161,46 +208,37 @@ object PatchImportTranscoder {
                 allowSuperCalls = true,
                 program = zeroProgram,
                 functions = rebased.metas,
-                signatures = emptyMap(),
+                signatures = overrides.signatures,
             ),
             descriptor = ModuleDescriptor(
                 packageId = packageId,
                 version = "1",
-                externalCalls = importsList,
+                externalCalls = acc.imports.keys.toList(),
+                overrideFunctions = overrides.keys,
                 privateDims = result.privateDims.groupBy({ it.functionKey }, { it.spec }),
             ),
-            imports = importsList,
+            imports = acc.imports.keys.toList(),
             droppedEventEntries = entry.dropped,
+            degradedOverrideKeys = overrides.degradedKeys,
         )
     }
 
-    /** 窗口基线核对（脱节 = 编译上下文错位，fail-closed）。 */
-    private fun checkWindowBases(
-        program: Program,
-        metaCount: Int,
+    /**
+     * 便捷入口：只给 base 签名查询口、不带显式收窄声明（= 覆盖名单按同名自动推导）。
+     *
+     * 与 [OverrideInputs] 版本同一实现，只为让「没有包清单」的调用点（SAF 直选、单测夹具）
+     * 少写一层包装；语义与 `transcode(..., OverrideInputs(baseSignatureOf = f))` 逐字相同。
+     */
+    fun transcode(
+        result: PatchCompiler.PatchResult,
         baseCounts: PatchCompiler.BaseCounts,
-    ) {
-        val instrBase = baseCounts.instructionCount
-        val funcBase = baseCounts.functionCount
-        check(program.codeBase == instrBase * Instruction.WORDS) {
-            "补丁 codeBase=${program.codeBase} 与 base 指令计数 $instrBase 脱节——编译上下文错位，拒绝转码"
-        }
-        check(program.functionBase == funcBase) {
-            "补丁 functionBase=${program.functionBase} 与 base 函数计数 $funcBase 脱节"
-        }
-        check(
-            program.longBase == baseCounts.longCount && program.stringBase == baseCounts.stringCount &&
-                program.exprBase == baseCounts.exprCount && program.statementBase == baseCounts.statementCount,
-        ) {
-            "补丁池基线与 base 计数脱节（long=${program.longBase}/${baseCounts.longCount} " +
-                "string=${program.stringBase}/${baseCounts.stringCount} " +
-                "expr=${program.exprBase}/${baseCounts.exprCount} " +
-                "stmt=${program.statementBase}/${baseCounts.statementCount}）"
-        }
-        check(program.functions.size == metaCount) {
-            "补丁函数表 ${program.functions.size} 条与 FuncMeta $metaCount 条不同长"
-        }
-    }
+        baseFunctionNameByIndex: Map<Int, String>,
+        packageId: String,
+        baseSignatureOf: (String) -> String = { "" },
+    ): Transcoded = transcode(
+        result, baseCounts, baseFunctionNameByIndex, packageId,
+        OverrideInputs(baseSignatureOf = baseSignatureOf),
+    )
 
     /** 合成事件入口识别结果。 */
     private class EventEntries(
@@ -259,7 +297,6 @@ object PatchImportTranscoder {
     private class RewriteAcc(wordCount: Int) {
         val keptWords = IntArray(wordCount)
         val imports = LinkedHashMap<String, Int>() // 名字 → extIdx（内注序）
-        var callToDropped: Pair<Int, String>? = null // (局部下标, 事件名) 首个命中
     }
 
     /** 指令改写的静态上下文（指令流 + 元数据 + 窗口基线）。 */
@@ -310,13 +347,28 @@ object PatchImportTranscoder {
             val local = a - ctx.funcBase
             check(local in ctx.program.functions.indices) { "补丁 _CALL 目标越函数表：a=$a（pc=$pc）" }
             if (local in ctx.entryLocals) {
-                if (acc.callToDropped == null) acc.callToDropped = local to ctx.metas[local].key
+                // S9 改判 T1：CALL 本包被截断的合成事件入口 = 用户源直接 CALL 事件名 ——
+                // 按事件名进 imports（链接期缺名残桩，运行期按 CompatiCallEvent 配置
+                // 解析：NO = CallToEventFunc 原文；YES = 真调首成员）。不再拒绝转码。
+                importSentinel(acc, w, ctx.metas[local].key, pc)
             } else {
                 acc.keptWords[w + 1] = local
             }
         } else {
             rewriteImportCall(acc, w, pc, a, ctx.baseFunctionNameByIndex)
         }
+    }
+
+    /**
+     * 导入哨兵发射（S9 T1/T2 后 base 名与事件名共用）：imports 按名内注去重
+     *（同名共用同一哨兵槽），`a` 改写为 `-(extIdx+1)`。
+     */
+    private fun importSentinel(acc: RewriteAcc, w: Int, name: String, pc: Int) {
+        val extIdx = acc.imports.getOrPut(name) { acc.imports.size }
+        check(extIdx <= CallSentinels.IMPORT_INDEX_MAX) {
+            "导入表越上界 ${CallSentinels.IMPORT_INDEX_MAX}（extIdx=$extIdx，pc=$pc）"
+        }
+        acc.keptWords[w + 1] = -(extIdx + 1)
     }
 
     private fun rewriteImportCall(
@@ -331,15 +383,7 @@ object PatchImportTranscoder {
                 "补丁 _CALL 目标 a=$a（pc=$pc）在 base 函数目录里没有名字——" +
                     "侧车与产物错位，拒绝转码",
             )
-        require(!Symbols.isEventLabelName(name)) {
-            "补丁 _CALL 目标 $name（base 下标 a=$a，pc=$pc）是事件名——" +
-                "事件成员经 CALLEVENT 四桶派发；模块链拒绝按名导入事件入口"
-        }
-        val extIdx = acc.imports.getOrPut(name) { acc.imports.size }
-        check(extIdx <= CallSentinels.IMPORT_INDEX_MAX) {
-            "导入表越上界 ${CallSentinels.IMPORT_INDEX_MAX}（extIdx=$extIdx）"
-        }
-        acc.keptWords[w + 1] = -(extIdx + 1)
+        importSentinel(acc, w, name, pc)
     }
 
     /** 池引用机械下移（分类只问 [OpcodeRelocation]，与链接器平移面同一张表）。 */
@@ -458,3 +502,127 @@ private fun rebaseMeta(meta: FuncMeta, newIndex: Int, newDefIndex: Int): FuncMet
     defIndex = newDefIndex,
     position = meta.position,
 )
+
+/** 覆盖声明的出口：descriptor 的覆盖键集 + 容器签名表（两者必须是同一批键）。 */
+private class OverrideDeclaration(
+    val keys: Set<String>,
+    val signatures: Map<String, String>,
+    /**
+     * 降级覆盖键（2026-11-23 KI 改判，BOARD KI-2）：base 侧车给不出签名指纹的覆盖键。
+     * 照常进 [keys]/[signatures]（声明覆盖、链接期 last-wins 放行），另记清单供调用方
+     * 汇进导入告警面（玩家可见「ABI 未校验」）。空 = 全部覆盖键都有 base 指纹（常态）。
+     */
+    val degradedKeys: List<String> = emptyList(),
+)
+
+/**
+ * 覆盖声明面（R7-①）：模块函数名 ∩ base 函数名 = 覆盖集（事件名除外，同名事件是
+ * 叠加语义而不是覆盖）。
+ *
+ * 判据在这里现推而不是从 [PatchCompiler] 携带来：作废（poison）的函数压根不进模块函数表，
+ * 现推天然与产物同进退，不留「descriptor 点名了个模块里没有的键」这类分叉。
+ * 键序 = 模块函数表序（转码后确定）⇒ 签名段字节确定。
+ *
+ * **融合方案**：base 签名只作前置判据（有指纹才允许覆盖，防链接期空指纹启动砖化），
+ * 写进容器签名段的是 [patchSignatures] 给的补丁真实签名——链接期 MODERN 闸直比 base
+ * 指纹，补丁 ABI 不符即拒；若这里写 base 签名则恒等通过、ABI 闸形同虚设。
+ * **2026-11-23 KI 改判（BOARD KI-2）**：base 指纹缺失的键不再拒——改记入降级覆盖清单
+ * （[OverrideDeclaration.degradedKeys]）照常声明覆盖；链接期签名闸已同步改判为
+ * diagnostics 告警放行（spec: SymbolCatalog.kt build），砖化不再发生，前置闸撤销。
+ * 补丁真实签名缺失仍拒（转码器自算指纹缺失 = 内部错位，真异常）。
+ *
+ * **可选收窄**：[allowList] 非 null 时是包清单的显式声明，必须与实际推导集逐一相等
+ * （见 [checkDeclaredOverrides]）——声明不提供名单，只把「意外多覆盖」变成导入期硬拒。
+ *
+ * @throws IllegalArgumentException 覆盖键缺补丁真实签名（内部错位，真异常）；
+ *   显式声明与实际可覆盖集不一致。
+ */
+private fun declareOverrides(
+    metas: List<FuncMeta>,
+    baseFunctionNameByIndex: Map<Int, String>,
+    baseSignatureOf: (String) -> String,
+    patchSignatures: Map<String, String>,
+    allowList: Collection<String>?,
+): OverrideDeclaration {
+    val baseKeySet = baseFunctionNameByIndex.values.mapTo(HashSet()) { it.uppercase(Locale.ROOT) }
+    val keys = LinkedHashSet<String>()
+    for (meta in metas) {
+        val key = meta.key.uppercase(Locale.ROOT)
+        if (key in baseKeySet && !Symbols.isEventLabelName(key)) keys += key
+    }
+    allowList?.let { checkDeclaredOverrides(it, keys) }
+    val signatures = LinkedHashMap<String, String>(keys.size)
+    val degraded = ArrayList<String>()
+    for (key in keys) {
+        val baseSig = baseSignatureOf(key)
+        // 2026-11-23 KI 改判（BOARD KI-2）：base 指纹缺失不再拒——该键照常声明覆盖
+        //（链接期 last-wins 放行 + ABI 未校验告警，spec: SymbolCatalog.kt build diagnostics），
+        // 键收进降级清单随导入结果上告警面（玩家可见「该函数 ABI 未校验」）。
+        // 原判 = require(baseSig.isNotEmpty()) 抛——防空指纹覆盖在链接期炸成启动砖化，
+        // 链接期改判后前置闸失去存在意义。
+        if (baseSig.isEmpty()) degraded += key
+        val patchSig = patchSignatures[key] ?: ""
+        require(patchSig.isNotEmpty()) {
+            "覆盖声明缺补丁真实签名：$key —— 本波编译产物未导出该函数的签名指纹；" +
+                "写 base 签名顶替会让链接期 ABI 闸恒等通过（静默错值），故拒（fail-closed）"
+        }
+        signatures[key] = patchSig
+    }
+    return OverrideDeclaration(keys, signatures, degraded)
+}
+
+/**
+ * 显式声明的双向一致性闸（可选收窄能力，见 [transcode] 的 `overrideAllowList`）。
+ *
+ * 只做约束不做推导：覆盖名单的真源仍是「模块函数名 ∩ base 函数名（事件名除外）」的现推集。
+ * 两个方向都拒，是因为两种偏差都会造成**静默语义差**：多列 = 作者以为覆盖了实际覆盖不了
+ * 的目标；漏列 = 补丁带着没声明的同名函数进来，作者以为已收窄。键按大写归一对齐模块侧口径。
+ */
+private fun checkDeclaredOverrides(allowList: Collection<String>, derived: Set<String>) {
+    val declared = allowList.mapTo(LinkedHashSet()) { it.uppercase(Locale.ROOT) }
+    val phantom = declared - derived
+    require(phantom.isEmpty()) {
+        "包声明了不可覆盖的目标：${phantom.joinToString("、")} —— 本补丁实际可覆盖集 = " +
+            "「模块函数名 ∩ base 函数名（事件名除外）」= ${renderKeySet(derived)}；" +
+            "声明只能是该集的子集，不能放宽（fail-closed）"
+    }
+    val undeclared = derived - declared
+    require(undeclared.isEmpty()) {
+        "补丁含与 base 同名但包声明未列出的函数：${undeclared.joinToString("、")} —— " +
+            "声明集 = ${renderKeySet(declared)}" +
+            (if (declared.isEmpty()) "（= 显式声明不覆盖任何函数）" else "") +
+            "；这些函数仍会被链接期当作覆盖装载，请补进 pack.json 的 overrideFunctions " +
+            "或改名/删除（fail-closed）"
+    }
+}
+
+/** 键集的人话渲染（空集显式写「空」，免得报错里出现一对空括号）。 */
+private fun renderKeySet(keys: Set<String>): String = if (keys.isEmpty()) "空" else keys.joinToString("、")
+
+/** 窗口基线核对（脱节 = 编译上下文错位，fail-closed）。纯函数，与对象状态无关。 */
+private fun checkWindowBases(
+    program: Program,
+    metaCount: Int,
+    baseCounts: PatchCompiler.BaseCounts,
+) {
+    val instrBase = baseCounts.instructionCount
+    val funcBase = baseCounts.functionCount
+    check(program.codeBase == instrBase * Instruction.WORDS) {
+        "补丁 codeBase=${program.codeBase} 与 base 指令计数 $instrBase 脱节——编译上下文错位，拒绝转码"
+    }
+    check(program.functionBase == funcBase) {
+        "补丁 functionBase=${program.functionBase} 与 base 函数计数 $funcBase 脱节"
+    }
+    check(
+        program.longBase == baseCounts.longCount && program.stringBase == baseCounts.stringCount &&
+            program.exprBase == baseCounts.exprCount && program.statementBase == baseCounts.statementCount,
+    ) {
+        "补丁池基线与 base 计数脱节（long=${program.longBase}/${baseCounts.longCount} " +
+            "string=${program.stringBase}/${baseCounts.stringCount} " +
+            "expr=${program.exprBase}/${baseCounts.exprCount} " +
+            "stmt=${program.statementBase}/${baseCounts.statementCount}）"
+    }
+    check(program.functions.size == metaCount) {
+        "补丁函数表 ${program.functions.size} 条与 FuncMeta $metaCount 条不同长"
+    }
+}

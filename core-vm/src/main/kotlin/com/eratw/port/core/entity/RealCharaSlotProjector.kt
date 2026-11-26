@@ -246,10 +246,40 @@ class RealCharaSlotProjector(
         val entity = charaToEntity.remove(deletedIndex)
         if (entity != null) {
             entityToChara.remove(entity)
+            // 行生命周期 = 虚拟 NO 绑定生命周期：本钩子是单行/数组删行（DELCHARA 两种重载）
+            // 与 unproject 退场删行的唯一回环点，故在此回收（VirtualCharaNoRegistry.retire
+            // 只解绑、不让 nextCandidate 回退：旧号作废且永不复用；实体再投射拿新号）。
+            // 不放 unproject 里手调：那样 DELCHARA 直接删投射行就漏回收，且与本类 KDoc
+            // 「行增删只有这一个出口」的时序铁律冲突。
+            virtualNos?.retire(entity)
             // 行已被引擎删掉，格子无从读取：丢基线并计损失（ADR-005 即时语义，不假装无损）。
             relations?.forget(entity)
         }
         shiftAfter(deletedIndex)
+    }
+
+    /**
+     * 世界重置（整表清空）：关系基线整体丢弃 + 双向映射重建为空（世代递增）+ 虚拟 NO
+     * 身份表整体作废（续发游标不回退）。
+     *
+     * 口径逐条对齐既有 [unproject] 的退场语义，差别只在「整表 vs 单实体」：
+     * - [unproject] 先 [syncFromCharaSlot] 脱水再删行 —— 整表清空时行已不存在，格子无从
+     *   读取，脱水不可达（同 [onCharacterRowDeleted] 的 ADR-005 即时语义：不假装无损）；
+     * - [unproject] 经 relations 的 `onUnprojecting` 做差分回写 —— 整表重置里关系投影
+     *   整体作废（世界都重置了，回写没有接收者），故走 [RelationProjectionSynchronizer.forgetAll]
+     *   直接丢基线，不逐实体报损失（理由见该方法的 KDoc）；
+     * - [unproject] 会 [sweepPointers] 扫指针 —— **这里不扫**：原版 DELALLCHARA
+     *   （VariableEvaluator.cs:1275-1285）只 Dispose + Clear 角色表，TARGET/ASSI/PLAYER
+     *   原值保留、使用点越界照旧报错（ADR-005，不顺手修）；
+     * - 映射重建走唯一出口 [rewrite]（世代递增），与行排列/删除同一口径。
+     *
+     * 幂等：重复调用不会清错别人（映射/基线/号表都已是空），世代再递增一次是许可的。
+     */
+    override fun onWorldReset() {
+        relations?.forgetAll()
+        rewrite(emptyMap())
+        // 号表随世界作废，但续发游标不回退（旧号永不复用，见 resetIdentities 的 KDoc）。
+        virtualNos?.resetIdentities()
     }
 
     // ------------------------------------------------------------------

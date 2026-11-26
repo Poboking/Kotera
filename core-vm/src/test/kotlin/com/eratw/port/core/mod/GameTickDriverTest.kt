@@ -128,4 +128,46 @@ class GameTickDriverTest {
         assertEquals(1, jobRuns)
         assertEquals(1, report.firedJobs)
     }
+
+    @Test
+    fun `回合边界逐相位派发且未到点相位记 skipped`() {
+        val (tick, registry, scheduler) = driver(
+            phases = listOf(phase("pkgA", "EVENING")),
+            jobs = listOf(job("pkgA", "j1", phase = "DAY_END", firstDay = 1)),
+        )
+        val fired = mutableListOf<String>()
+        registry.subscribe("DAY_START", "pkgA") { fired += "DAY_START" }
+        registry.subscribe("EVENING", "pkgA") { fired += "EVENING" }
+        var jobRuns = 0
+        scheduler.bind("pkgA", "j1") { jobRuns++ }
+
+        val report = tick.tickTurn(1L, listOf("DAY_START", "DAY_END"))
+
+        assertEquals(listOf("DAY_START"), fired, "只派发计划内相位；EVENING 绑了但本边界没到点")
+        assertEquals(listOf("DAY_START", "DAY_END"), report.plannedPhases)
+        assertEquals(listOf("EVENING"), report.notDuePhases)
+        assertEquals(1, report.firedPhaseHandlers)
+        assertEquals(1, report.firedJobs, "任务口径不变：空相位不限相位，首边界即触发")
+        assertEquals(1, jobRuns)
+        assertEquals(0, report.failureCount)
+    }
+
+    @Test
+    fun `回合边界日变同时派发日终与日始`() {
+        val (tick, registry, scheduler) = driver(
+            phases = listOf(phase("pkgA", "EVENING")),
+            jobs = listOf(job("pkgA", "j2", phase = "DAY_END", firstDay = 1)),
+        )
+        val fired = mutableListOf<String>()
+        registry.subscribe("DAY_END", "pkgA") { fired += "DAY_END" }
+        registry.subscribe("DAY_START", "pkgA") { fired += "DAY_START" }
+        scheduler.bind("pkgA", "j2") { }
+
+        val report = tick.tickTurn(2L, listOf("DAY_END", "DAY_START"))
+
+        assertEquals(listOf("DAY_END", "DAY_START"), fired)
+        assertEquals(2, report.firedPhaseHandlers)
+        assertEquals(emptyList<String>(), report.notDuePhases)
+        assertEquals(1, report.firedJobs)
+    }
 }

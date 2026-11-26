@@ -922,6 +922,29 @@ class ErbProgramCompilerTest {
         assertEquals(Opcode._RET, p.instructionAt(fb.endPc - 1).op, "入口尾部 _RET")
     }
 
+    /**
+     * 在册 B23：#PRI+#LATER 同体的成员在 eventCallOrder 里出现两次 ⇒ 事件入口合成链照序
+     * 发两条 _CALL（合成侧不去重，本用例就是「重复成员进合成链是想要的语义」的证据）。
+     * spec: 4.981 LabelDictionary.cs:228-235 四个平行 if（:233 原注 eramaker 仕様）+
+     * CalledFunction.cs:228-243 桶 0→3 推进；PC 装载期原话「这个函数会被调用2次」
+     * （<internal-workdir>/PC-CMP-VERDICT.md 5.1）。
+     */
+    @Test
+    fun `事件入口重复成员名合成两条call`() {
+        val c = ErbProgramCompiler()
+        c.compileFunction(FuncSig("EVENTTURNEND#65"), parse("PRINTL A"))
+        c.compileFunction(FuncSig("EVENTTURNEND#61"), parse("PRINTL B"))
+        c.compileFunction(FuncSig("EVENTTURNEND#70"), parse("PRINTL C"))
+        // #65 = #PRI + #LATER ⇒ 桶 1 一次、桶 3 一次（调用方 = FunctionTable.eventDispatchOrder）
+        val ordered = listOf("EVENTTURNEND#65", "EVENTTURNEND#61", "EVENTTURNEND#65", "EVENTTURNEND#70")
+        val fb = c.compileEventEntry("EVENTTURNEND", ordered)
+        val p = c.build("EVENTTURNEND")
+        val calls = (fb.entryPc until fb.endPc - 1).map { p.instructionAt(it) }
+        assertEquals(4, calls.size, "重复成员进合成链 → 4 条 _CALL，不是 3 条")
+        assertEquals(ordered.map { indexOfFunc(p, it) }, calls.map { it.a }, "逐条按传入序 _CALL，重复项两次同目标")
+        assertEquals(Opcode._RET, p.instructionAt(fb.endPc - 1).op, "入口尾部 _RET")
+    }
+
     // ------------------------------------------------------------------
     // 错误处理
     // ------------------------------------------------------------------

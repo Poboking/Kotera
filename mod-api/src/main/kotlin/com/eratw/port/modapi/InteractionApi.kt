@@ -33,6 +33,10 @@ package com.eratw.port.modapi
 interface InteractionApi {
     /**
      * 订阅一个交互阶段钩子（五阶段之一）。同一包对同一阶段可注册多个处理器（按注册序）。
+     * 阶段须经本包 [ModManifest.interactionHooks] 声明（声明先于绑定，与 [HookApi.register]
+     * 同纪律），未声明 = 拒绝。
+     *
+     * @throws IllegalArgumentException 该包对该阶段的钩子未声明
      */
     fun registerHook(phase: InteractionPhase, handler: InteractionHandler): Registration
 

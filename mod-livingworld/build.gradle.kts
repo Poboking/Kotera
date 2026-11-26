@@ -15,6 +15,14 @@ kotlin {
     jvmToolchain(libs.versions.jvmTarget.get().toInt())
 }
 
+// `NpcKeys` / `BondKeys` / `LwFactKeys` / `LwEventKeys`（连同各自的 View / Facade）由
+// `:tools:modgen-accessors` 从四包 schema 生成后入库（照 mod-family / mod-memory 先例）。
+// 生成物**入库**而不是构建期现生：这样 `api(project(":mod-api"))` 之外零插件依赖，
+// 且 CI 上「盘上产物是否过期」由生成器的 `--check` 闸单独判。
+kotlin.sourceSets.named("main") {
+    kotlin.srcDir("src/generated/kotlin")
+}
+
 dependencies {
     api(project(":mod-api"))
     testImplementation(project(":core-vm"))

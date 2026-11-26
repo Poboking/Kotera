@@ -160,7 +160,8 @@ class FuncKeyInternTest {
         assertEquals(FunctionTable.TargetKind.EVENT, table.classify("ev"))
         assertEquals(FunctionTable.TargetKind.NOT_FOUND, table.classify("nope"))
         assertTrue(table.contains("Ev"))
-        assertEquals(listOf(3, 2), table.eventCallOrder("eV")?.map { it.index }, "ONLY 桶先于 NORMAL 桶")
+        // 并列加桶（在册 B23）：#ONLY 成员 3 同时落桶 0 与桶 2 ⇒ 桶 0 一次、桶 2 排在成员 2 之后。
+        assertEquals(listOf(3, 2, 3), table.eventCallOrder("eV")?.map { it.index }, "桶序 0→2，#ONLY 成员出现两次")
         assertNull(table.eventCallOrder("FOO"), "非事件名没有事件执行序")
         assertEquals("BAR", table.byFunctionIndex(1)?.key)
         assertNull(table.byFunctionIndex(99))

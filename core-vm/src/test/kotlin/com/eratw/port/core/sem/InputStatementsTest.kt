@@ -181,6 +181,51 @@ class InputStatementsTest {
         assertTrue(env.input.anyKeyCalls.isEmpty(), "跳过态延续到下一条 WAIT")
     }
 
+    /**
+     * 快进主判据（2026-11-17 根因修复）：一次跳过态**连续跑过**所有无值等待
+     * （WAIT / WAITANYKEY / TWAIT 无值形），标志不被逐次吞掉清零——原版
+     * `MesSkip = false` 在 while 循环之后（EmueraConsole.cs:1451-1456 / 蛇版
+     * 4.981 :1502-1515），直到撞取值等待才清零。旧口径一次长按只推进一页。
+     */
+    @Test
+    fun `一次跳过态连续跑过无值等待直到撞取值等待`() {
+        val env = SemTestEnv(InputOutcome(intValue = 7))
+        env.ctx.mesSkip = true
+        env.run(instr(FunctionCode.WAIT, VoidArgument()))
+        env.run(instr(FunctionCode.WAITANYKEY, VoidArgument()))
+        env.run(instr(FunctionCode.TWAIT, SpSwapCharaArgument(IntLiteral(300), IntLiteral(0))))
+        assertTrue(env.input.anyKeyCalls.isEmpty(), "连续无值等待全被输入循环跑过，不逐次清零")
+        assertTrue(env.ctx.mesSkip, "跳过态跨连续无值等待存活")
+        env.run(instr(FunctionCode.INPUT, inputsArg()))
+        assertFalse(env.ctx.mesSkip, "取值等待阻塞前清标志（循环后 :1456）")
+        env.run(instr(FunctionCode.WAIT, VoidArgument()))
+        assertEquals(listOf(false to false), env.input.anyKeyCalls, "链终结后 WAIT 恢复阻塞")
+    }
+
+    /** FORCEWAIT（StopMesskip）终结快进链：不吞、阻塞、清标志（:1451 while 条件）。 */
+    @Test
+    fun `FORCEWAIT 终结快进链且其后 WAIT 恢复阻塞`() {
+        val env = SemTestEnv()
+        env.ctx.mesSkip = true
+        env.run(instr(FunctionCode.WAIT, VoidArgument()))
+        env.run(instr(FunctionCode.FORCEWAIT, VoidArgument()))
+        assertEquals(listOf(false to true), env.input.anyKeyCalls, "循环在 StopMesskip 处 break")
+        assertFalse(env.ctx.mesSkip)
+        env.run(instr(FunctionCode.WAIT, VoidArgument()))
+        assertEquals(2, env.input.anyKeyCalls.size, "链终结后 WAIT 恢复阻塞")
+    }
+
+    /** 快进途中撞 INPUT(canSkip)：原版在 RunEmueraProgram 内读 MesSkip=true 直取默认值（:853-863）。 */
+    @Test
+    fun `快进连续跑过后 INPUT canSkip 取默认值`() {
+        val env = SemTestEnv(InputOutcome(intValue = 99))
+        env.ctx.mesSkip = true
+        env.run(instr(FunctionCode.WAIT, VoidArgument()))
+        env.run(instr(FunctionCode.INPUT, inputsArg(def = 42, canSkip = 1)))
+        assertEquals(42L, env.store.readInt("RESULT", longArrayOf(0)), "跳过态存活到 canSkip 快路径")
+        assertTrue(env.input.requests.isEmpty(), "canSkip 快路径不发起等待")
+    }
+
     // ---------------- INPUT / INPUTS ----------------
 
     @Test

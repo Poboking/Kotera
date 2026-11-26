@@ -114,6 +114,7 @@ object ModChainAssembler {
                 policy = policy,
                 baseSignatureOf = baseSignatureOf,
                 linkOrder = linkOrder,
+                diagnostics = trace::recordDiagnostic,
             ),
         )
         trace.record("link")
@@ -193,8 +194,19 @@ class CompiledModule(
 class ModChainTrace {
     private val steps = ArrayList<String>()
 
+    /**
+     * 覆盖裁决告警收集口（2026-11-23 KI 改判，BOARD KI-2）：撞名三态告警随留痕汇导出。
+     * 缺省空实现 = 既有调用点零变化；app 装配层把告警汇接到 logSink。
+     */
+    var overrideDiagnostics: (String) -> Unit = {}
+
     fun record(step: String) {
         steps += step
+    }
+
+    /** 覆盖裁决告警的汇接点（链接器 diagnostics 的透传目标）。 */
+    fun recordDiagnostic(message: String) {
+        overrideDiagnostics(message)
     }
 
     fun snapshot(): List<String> = steps.toList()

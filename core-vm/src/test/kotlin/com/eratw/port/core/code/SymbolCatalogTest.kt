@@ -57,16 +57,17 @@ class SymbolCatalogTest {
         assertTrue(catalog.hasSuper("FOO"))
     }
 
+    /** KI 改判（2026-11-23，BOARD KI-2）：未声明重名不再拒 —— last-wins 放行 + 告警。 */
     @Test
-    fun modernForbidsUndeclaredDuplicate() {
-        val ex = assertFailsWith<SymbolConflictException> {
-            SymbolCatalog.build(
-                listOf(candidate(0, "FOO", "base"), candidate(1, "FOO", "modA")),
-                ResolverPolicy.MODERN,
-            )
-        }
-        assertEquals("FOO", ex.key)
-        assertEquals(listOf("base", "modA"), ex.providers)
+    fun modernUndeclaredDuplicateWarnsAndLastWins() {
+        val diags = mutableListOf<String>()
+        val catalog = SymbolCatalog.build(
+            listOf(candidate(0, "FOO", "base"), candidate(1, "FOO", "modA")),
+            ResolverPolicy.MODERN,
+        ) { diags += it }
+        assertEquals(1, catalog.winnerIndexOf("FOO"), "last-wins：后装载者胜出不变")
+        assertEquals(1, diags.size, "告警一条: $diags")
+        assertTrue(diags[0].contains("FOO") && diags[0].contains("未声明覆盖"), diags[0])
     }
 
     @Test
@@ -78,61 +79,68 @@ class SymbolCatalogTest {
         assertEquals(1, catalog.winnerIndexOf("FOO"))
         assertEquals(0, catalog.superIndexOf(1))
         assertContentEquals(intArrayOf(1, 1), catalog.dispatch)
-        // 第三方未声明覆盖仍拒绝（报告列全部三个提供者）。
-        val ex = assertFailsWith<SymbolConflictException> {
-            SymbolCatalog.build(
-                listOf(
-                    candidate(0, "FOO", "base"),
-                    candidate(1, "FOO", "modA", override = true),
-                    candidate(2, "FOO", "modB"),
-                ),
-                ResolverPolicy.MODERN,
-            )
-        }
-        assertEquals(listOf("base", "modA", "modB"), ex.providers)
+        // 第三方未声明覆盖不再拒绝（KI 改判）：last-wins 放行 + 告警。
+        val diags = mutableListOf<String>()
+        val catalog2 = SymbolCatalog.build(
+            listOf(
+                candidate(0, "FOO", "base"),
+                candidate(1, "FOO", "modA", override = true),
+                candidate(2, "FOO", "modB"),
+            ),
+            ResolverPolicy.MODERN,
+        ) { diags += it }
+        assertEquals(2, catalog2.winnerIndexOf("FOO"), "三候选 last-wins：modB 胜出")
+        assertTrue(
+            diags.any { it.contains("未声明覆盖") && it.contains("modB") },
+            "未声明覆盖告警点名 modB: $diags",
+        )
     }
 
     @Test
-    fun modernOverrideRequiresCompleteSignature() {
-        // 被覆盖方缺指纹（erbcc 未导出完整签名）⇒ 拒绝，不拿 arity 猜。
-        assertFailsWith<OverrideSignatureException> {
-            SymbolCatalog.build(
-                listOf(
-                    candidate(0, "FOO", "base", signature = ""),
-                    candidate(1, "FOO", "modA", override = true),
-                ),
-                ResolverPolicy.MODERN,
-            )
-        }
-        // 覆盖方缺指纹同样拒绝。
-        val ex = assertFailsWith<OverrideSignatureException> {
-            SymbolCatalog.build(
-                listOf(
-                    candidate(0, "FOO", "base"),
-                    candidate(1, "FOO", "modA", override = true, signature = ""),
-                ),
-                ResolverPolicy.MODERN,
-            )
-        }
-        assertEquals("FOO", ex.key)
-        assertTrue(ex.reason.contains("签名信息不完整"), ex.reason)
+    fun modernOverrideIncompleteSignatureWarnsAndLastWins() {
+        // 被覆盖方缺指纹（erbcc 未导出完整签名）⇒ KI 改判告警放行，last-wins 不变。
+        val diags1 = mutableListOf<String>()
+        val c1 = SymbolCatalog.build(
+            listOf(
+                candidate(0, "FOO", "base", signature = ""),
+                candidate(1, "FOO", "modA", override = true),
+            ),
+            ResolverPolicy.MODERN,
+        ) { diags1 += it }
+        assertEquals(1, c1.winnerIndexOf("FOO"), "缺指纹覆盖照样 last-wins 胜出")
+        assertTrue(
+            diags1.any { it.contains("签名指纹缺失") && it.contains("ABI 未校验") },
+            "缺指纹告警: $diags1",
+        )
+        // 覆盖方缺指纹同样告警放行。
+        val diags2 = mutableListOf<String>()
+        val c2 = SymbolCatalog.build(
+            listOf(
+                candidate(0, "FOO", "base"),
+                candidate(1, "FOO", "modA", override = true, signature = ""),
+            ),
+            ResolverPolicy.MODERN,
+        ) { diags2 += it }
+        assertEquals(1, c2.winnerIndexOf("FOO"))
+        assertTrue(diags2.any { it.contains("ABI 未校验") }, "覆盖方缺指纹告警: $diags2")
     }
 
     @Test
-    fun modernOverrideRejectsSignatureMismatch() {
-        val ex = assertFailsWith<OverrideSignatureException> {
-            SymbolCatalog.build(
-                listOf(
-                    candidate(0, "FOO", "base", signature = "int,int"),
-                    candidate(1, "FOO", "modA", override = true, signature = "int,str"),
-                ),
-                ResolverPolicy.MODERN,
-            )
-        }
-        assertEquals("FOO", ex.key)
-        assertEquals("base", ex.previousPackageId)
-        assertEquals("modA", ex.overridingPackageId)
-        assertTrue(ex.reason.contains("签名不一致"), ex.reason)
+    fun modernOverrideSignatureMismatchWarnsAndLastWins() {
+        val diags = mutableListOf<String>()
+        val catalog = SymbolCatalog.build(
+            listOf(
+                candidate(0, "FOO", "base", signature = "int,int"),
+                candidate(1, "FOO", "modA", override = true, signature = "int,str"),
+            ),
+            ResolverPolicy.MODERN,
+        ) { diags += it }
+        assertEquals(1, catalog.winnerIndexOf("FOO"), "签名不符也 last-wins 胜出（KI 改判）")
+        assertEquals(0, catalog.superIndexOf(1), "SUPER 链照建（告警已明示 ABI 未校验）")
+        assertTrue(
+            diags.any { it.contains("签名不一致") && it.contains("ABI 未校验") },
+            "签名不符告警: $diags",
+        )
     }
 
     @Test

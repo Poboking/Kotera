@@ -1,11 +1,13 @@
 package com.eratw.port.modlivingworld
 
-import com.eratw.port.modapi.ArchetypeDecl
-import com.eratw.port.modapi.ComponentDecl
-import com.eratw.port.modapi.FieldDecl
-import com.eratw.port.modapi.FieldType
-import com.eratw.port.modapi.JobDecl
+import com.eratw.port.modapi.EraMod
+import com.eratw.port.modapi.JobKey
+import com.eratw.port.modapi.ModCarrier
+import com.eratw.port.modapi.ModCarrierDeclaration
 import com.eratw.port.modapi.ModManifest
+import com.eratw.port.modapi.StorageKey
+import com.eratw.port.modapi.modDeclarations
+import com.eratw.port.modlivingworld.generated.NpcKeys
 
 /**
  * 角色 Mod（eratw.lw.character）的**全部声明，只此一份真源**（§21.9 判据 1/2 的声明面，
@@ -14,14 +16,21 @@ import com.eratw.port.modapi.ModManifest
  *
  * ## 模型
  *
- * 一个 NPC = 一个 [ARCHETYPE_NPC] 实体，挂两个组件：
+ * 一个 NPC = 一个 [NpcKeys.archetype] 实体，挂两个组件：
  *
- * - [COMPONENT_PERSONA]（性格）：[FIELD_WARMTH]（温和度 0..100，>= 50 偏社交）、
- *   [FIELD_GRIT]（坚韧度 0..100）。性格是 Mod 数据不是引擎枚举（§21.9 Demo 内容策略）。
- * - [COMPONENT_SCHEDULE]（日程）：[FIELD_EVENING_SLOT]（0 = 工坊 / 1 = 散步，由
- *   [CharacterMod.advanceDay] 按性格确定性写入）、[FIELD_ACTIVITY]（今晚已解析的活动，
- *   "" = 未解析）、[FIELD_CRAFT_STAGE]（长活的原子段读数：0 未开始 / 1 开工 / 2 收工，
+ * - [NpcKeys.persona]（性格）：[NpcKeys.warmth]（温和度 0..100，>= 50 偏社交）、
+ *   [NpcKeys.grit]（坚韧度 0..100）。性格是 Mod 数据不是引擎枚举（§21.9 Demo 内容策略）。
+ * - [NpcKeys.schedule]（日程）：[NpcKeys.eveningSlot]（0 = 工坊 / 1 = 散步，由
+ *   [CharacterMod.advanceDay] 按性格确定性写入）、[NpcKeys.activity]（今晚已解析的活动，
+ *   "" = 未解析）、[NpcKeys.craftStage]（长活的原子段读数：0 未开始 / 1 开工 / 2 收工，
  *   判据 2 的中断不回滚证据）。
+ *
+ * ## 字段名不在这里
+ *
+ * 组件、原型与五个字段的名字由 [NpcKeys] 提供 —— 那是 `:tools:modgen-accessors` 生成的，
+ * 同时也是 [com.eratw.port.modlivingworld.generated.NpcView] 读写列时用的同一批键。于是
+ * 「同一个字段名手抄三遍」被压到只剩生成源一处：声明、业务代码、生成代码全指着同一个
+ * `FieldKey`，打错是编译错误而不是静默读回 0。
  *
  * ## 字段键命名空间
  *
@@ -29,28 +38,28 @@ import com.eratw.port.modapi.ModManifest
  * component-schemas 域跨包同名拒绝），全部 `lw` 前缀与 eratw.family（age/title/father）、
  * eratw.memory（subject/provenance 等）互不重名 —— 四包同装一个快照零冲突由
  * [LivingWorldDeclarationTest] 钉住。
+ *
+ * ## 声明序 = 线格式序
+ *
+ * 下面每一条的顺序都是已发布资产的字节序（manifest 逐字节落盘）：组件内字段序、组件序、
+ * 原型挂载序、任务序一律按原声明排，**不许由于「看起来更整齐」而重排**。
  */
-object CharacterDeclarations {
+@ModCarrier
+object CharacterDeclarations : ModCarrierDeclaration {
 
     const val PACKAGE_ID: String = "eratw.lw.character"
 
-    /** NPC 原型：挂 [COMPONENT_PERSONA] 与 [COMPONENT_SCHEDULE] 两个组件。 */
-    const val ARCHETYPE_NPC: String = "lw.char.npc"
+    /** [ModCarrierDeclaration] 的实现面；与 [PACKAGE_ID] 同值，保留常量给既有调用面。 */
+    override val packageId: String get() = PACKAGE_ID
 
-    const val COMPONENT_PERSONA: String = "lw.char.persona"
-    const val COMPONENT_SCHEDULE: String = "lw.char.schedule"
-
-    const val FIELD_WARMTH: String = "lwWarmth"
-    const val FIELD_GRIT: String = "lwGrit"
-    const val FIELD_EVENING_SLOT: String = "lwEveningSlot"
-    const val FIELD_ACTIVITY: String = "lwActivity"
-    const val FIELD_CRAFT_STAGE: String = "lwCraftStage"
+    /** 载体工厂：装配期逐会话新建实例（`onLoad` 会往里塞状态，不许复用）。 */
+    override fun newMod(): EraMod = CharacterMod()
 
     /** 每日日程推进任务槽（判据 1「经 JobApi 驱动各自日程」）：缺省相位 DAY_END，每游戏日一次。 */
-    const val JOB_DAY_TICK: String = "lw.char.dayTick"
+    val DAY_TICK: JobKey = JobKey("lw.char.dayTick")
 
     /** 存储键：日程推进过的天数（判据 6 禁用→重启用对账凭据）。 */
-    const val STORAGE_SCHEDULE_DAYS: String = "scheduleDays"
+    val SCHEDULE_DAYS: StorageKey = StorageKey("scheduleDays")
 
     /** 仲裁域：傍晚日程（provider/handler/约束都注册在此域下；引擎不解释域名含义）。 */
     const val DOMAIN_EVENING: String = "LW_EVENING"
@@ -64,16 +73,16 @@ object CharacterDeclarations {
     /** 仲裁域候选集选择键（事件 Mod 用；角色 Mod 不消费）。 */
     const val METADATA_SET: String = "lw.set"
 
-    /** [FIELD_EVENING_SLOT] 取值：工坊。 */
+    /** [NpcKeys.eveningSlot] 取值：工坊。 */
     const val SLOT_WORKSHOP: Long = 0L
 
-    /** [FIELD_EVENING_SLOT] 取值：散步。 */
+    /** [NpcKeys.eveningSlot] 取值：散步。 */
     const val SLOT_STROLL: Long = 1L
 
-    /** [FIELD_ACTIVITY] 取值：工坊手艺（判据 1 的互斥资源消费者）。 */
+    /** [NpcKeys.activity] 取值：工坊手艺（判据 1 的互斥资源消费者）。 */
     const val ACT_CRAFT: String = "craft"
 
-    /** [FIELD_ACTIVITY] 取值：散步（抢不到工坊时的回落）。 */
+    /** [NpcKeys.activity] 取值：散步（抢不到工坊时的回落）。 */
     const val ACT_STROLL: String = "stroll"
 
     /** 性格 → 日程的分界：warmth >= 50 偏社交（散步），否则偏手艺（工坊）。 */
@@ -93,32 +102,28 @@ object CharacterDeclarations {
     /** 互斥资源键值：工坊当晚只容一人（恰一成功一淘汰的证据键）。 */
     const val RESOURCE_WORKSHOP: String = "workshop"
 
-    val manifest: ModManifest = ModManifest(
-        packageId = PACKAGE_ID,
-        version = "0.1",
-        components = listOf(
-            ComponentDecl(
-                name = COMPONENT_PERSONA,
-                fields = listOf(
-                    FieldDecl(FIELD_WARMTH, FieldType.INT),
-                    FieldDecl(FIELD_GRIT, FieldType.INT),
-                ),
-            ),
-            ComponentDecl(
-                name = COMPONENT_SCHEDULE,
-                fields = listOf(
-                    FieldDecl(FIELD_EVENING_SLOT, FieldType.INT),
-                    FieldDecl(FIELD_ACTIVITY, FieldType.STR),
-                    FieldDecl(FIELD_CRAFT_STAGE, FieldType.INT),
-                ),
-            ),
-        ),
-        archetypes = listOf(
-            ArchetypeDecl(ARCHETYPE_NPC, listOf(COMPONENT_PERSONA, COMPONENT_SCHEDULE)),
-        ),
-        jobs = listOf(
-            // 每游戏日一次：判据 1 的日程驱动槽，语义见本 object 头 KDoc。
-            JobDecl(jobId = JOB_DAY_TICK, firstDay = 0L, everyDays = 1L),
-        ),
-    )
+    /**
+     * 本载体的全部声明。`override` 是 [ModCarrierDeclaration] 的实现面 —— 构建期注册表
+     * 从各声明 object 直接取这份 manifest 编资产，不再由 `BuiltinManifestBuild` 逐个点名。
+     */
+    override val manifest: ModManifest = modDeclarations(PACKAGE_ID, version = "0.1") {
+        displayName("生活世界 · 角色")
+        author("eratw-port")
+        description("NPC 温度与毅力、晚间行程与工坊活动")
+        component(NpcKeys.persona) {
+            int(NpcKeys.warmth)
+            int(NpcKeys.grit)
+        }
+        component(NpcKeys.schedule) {
+            int(NpcKeys.eveningSlot)
+            str(NpcKeys.activity)
+            int(NpcKeys.craftStage)
+        }
+        archetype(NpcKeys.archetype) {
+            uses(NpcKeys.persona)
+            uses(NpcKeys.schedule)
+        }
+        // 每游戏日一次：判据 1 的日程驱动槽，语义见本 object 头 KDoc。
+        job(DAY_TICK, firstDay = 0L, everyDays = 1L)
+    }
 }

@@ -1726,6 +1726,22 @@ private fun gdrawG(c: BuiltinContext, args: GdrawGArgs): Long {
 }
 
 /**
+ * 解码收口 Error 分支（OOM 等）的固定红字。刻意**零插值**：堆贴顶时在 catch 里再拼大字符串
+ * 可能当场二次 OOM，根因细节走 initCause 挂进因果链供取证面读取，不上屏。
+ * 文案按 core-vm 红字既有口径（自造中文直打串，与「函数 GCREATE：…」同族），不进三语表。
+ */
+private const val MES_IMAGE_DECODE_ERROR = "图片解码内存不足或虚拟机错误（Error）：该图未载入"
+
+/**
+ * 三处解码收口 Error 分支的唯一收敛出口：折成 [MES_IMAGE_DECODE_ERROR] 红字并挂因。
+ *
+ * 收敛动作走最小分配（静态常量消息 + initCause，无字符串拼接）；[Nothing] 返回值让
+ * catch 分支直接调用即可（不再写 throw，readImageFile 的 throw 计数不因本笔上涨）。
+ */
+private fun decodeErrorRedText(root: Throwable): Nothing =
+    throw CodeEE(MES_IMAGE_DECODE_ERROR).apply { initCause(root) }
+
+/**
  * GCREATEFROMFILE / GLOAD 的统一图片读取。
  *
  * 1. 先取字节（宿主 `BuiltinHost.readFileBytes`，生产实现 `RootedBuiltinHost` 已提供，
@@ -1740,6 +1756,17 @@ private fun gdrawG(c: BuiltinContext, args: GdrawGArgs): Long {
  * 失败口径照原版 `Utils.LoadImage`：文件不存在 / 解码抛异常 → null → 函数返回 0
  * （Utils.cs:502-525；FunctionMethodCreator.cs:6896-6925、:8168-8198）。因此
  * 「不是 PNG/webp 且文本载体不合法」也返回 0，不抛 CodeEE。
+ *
+ * OOM/Error 的例外口径（stab-b 条目 3）：下面三处解码收口在 `Exception` 之外加接
+ * `Throwable` 分支，把 `OutOfMemoryError` 等 Error 收敛成 [MES_IMAGE_DECODE_ERROR] 的
+ * CodeEE 红字（initCause 挂因）。依据：原版 `DoScript` 顶层 `catch (Exception)` 在 .NET
+ * 里**含 OutOfMemoryException**，收下后红字继续跑（Process.cs:462-477）；移植侧这条
+ * 逃逸面此前只有 `catch (Exception)`，宿主解码通道（platform BitmapFactory 无尺寸预算闸，
+ * 交叉面挂账）堆贴顶时 OOM 直接带走 VM 线程 = 闪退。收敛成红字是 ADR-005 的更好处置：
+ * 受控结局优于闪退。非 OOM 的 Exception 行为一字不动（null → 0）；延迟物化面
+ * （GraphicsBuffer.pixels 的 Throwable 收口）也不动——那条路上的 CodeEE 被折成透明降级，
+ * 与本笔改动之前一致。收敛动作走最小分配：消息是零插值的静态常量（catch 里再拼大字符串
+ * 可能当场二次 OOM），trace.reason 也是静态字面量，根因细节只走 initCause。
  *
  * webp 的未支持形态（`VP8 ` 有损位流，语料 1893 个：831 裸容器 + 1036 带 ALPH + 26 不带 ALPH）
  * 由 [WebpDecoder] 抛 [com.eratw.port.core.image.WebpDecodeException]，这里同样折成 null → 0；
@@ -1774,11 +1801,17 @@ private fun readImageFile(
     if (decoder == null) {
         if (bytes != null) trace.reason = "no-decoder"
     } else if (bytes != null) {
+        // @Suppress 理由同 FileSystemOps.loadData 的 applyTo 段：解码收口**刻意**接住 Throwable
+        // （含 OOM）——非 OOM 的 Exception 分支保持原样折 0，Error 分支收敛成 CodeEE 红字。
+        @Suppress("TooGenericExceptionCaught")
         val decoded = try {
             decoder.decode(path, bytes)
         } catch (e: Exception) {
             trace.reason = "decoder-throw:${e.javaClass.simpleName}"
             null
+        } catch (e: Throwable) {
+            trace.reason = "decode-error"
+            decodeErrorRedText(e)
         }
         if (decoded != null) {
             val px = decoded.pixels
@@ -1791,10 +1824,14 @@ private fun readImageFile(
         trace.reason = "decoder-null"
     }
     if (bytes != null && PngDecoder.isPng(bytes)) {
+        @Suppress("TooGenericExceptionCaught")
         val png = try {
             PngDecoder.decode(bytes)
         } catch (e: Exception) {
             return null
+        } catch (e: Throwable) {
+            trace.reason = "png-error"
+            decodeErrorRedText(e)
         }
         val px = png.pixels
         for (i in px.indices) {
@@ -1804,11 +1841,15 @@ private fun readImageFile(
     }
     if (bytes != null && WebpDecoder.isWebp(bytes)) {
         // 原版对 webp 只走 libwebp 一条路（Utils.cs:511-515），失败就是 null，不再试别的载体。
+        @Suppress("TooGenericExceptionCaught")
         val webp = try {
             WebpDecoder.decode(bytes)
         } catch (e: Exception) {
             trace.reason = "webp-fail:${e.javaClass.simpleName}"
             return null
+        } catch (e: Throwable) {
+            trace.reason = "webp-error"
+            decodeErrorRedText(e)
         }
         val px = webp.pixels
         for (i in px.indices) {
@@ -1941,7 +1982,9 @@ private fun BuiltinContext.pushCbgLayers() {
  * 可见语义 —— 返回值、异常、控制台输出一个都不改，只多留一个可读的现场。
  *
  * @property reason 最后一次取图的落点（`no-bytes` / `no-decoder` / `decoder-null` /
- *   `png-fail` / `webp-fail` / `no-carrier` / `already-created` / `ok=宽x高`）
+ *   `decoder-throw:类型名` / `decode-error` / `png-error` / `webp-error` / `webp-fail:类型名` /
+ *   `no-carrier` / `already-created` / `ok=宽x高`；三个 `-error` 是解码收口 Error 分支
+ *   转 CodeEE 红字前留下的静态落点，见 [readImageFile] 的 OOM/Error 口径段）
  * @property path 该次调用**加完 ContentDir 前缀之后**实际去取的路径
  */
 class ImageLoadTrace {

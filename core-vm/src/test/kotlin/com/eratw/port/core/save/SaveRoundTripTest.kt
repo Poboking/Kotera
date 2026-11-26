@@ -1,4 +1,4 @@
-﻿package com.eratw.port.core.save
+package com.eratw.port.core.save
 
 import com.eratw.port.boot.CorpusProfile
 import com.eratw.port.core.data.csv.GameData
@@ -340,12 +340,14 @@ class SaveRoundTripTest {
      * 两列读数。4.980 列 = savecorpus 波 2026-11-06 在 `ERATW_GAMEDIR=…/eratw-画蛇添足版eratw4.980`
      * 下**实读**（写回 save00.sav：`back.variables.size`=540、`diffBlocks` 原档侧空、
      * 角色块差异空、额外角色字段空；写回 global.sav：25→25 无差异、`GLOBAL_BONUS` 12→12）；
-     * 4.981 列 = **751 = 749 + 2**，两项依据如下（2026-11-14 L34 在 4.981 根实读 751）：
+     * 4.981 列 = **787 = 785 + 2**（2026-11-17 在 261111 出货根重采；此前钉的 751 是 261017 读数），
+     * 两项依据如下：
      *
-     * 1. `749`（save 族 2026-11-01 落 540→749 时的读数）= 540 − 3 + 212：样本档 540 条里
+     * 1. `785`（save 族口径）= 540 − 3 + 248：样本档 540 条里
      *    3 条在 4.981 全局面**缺**（`P_AdjList`/`P_AdjListDone` 的声明随
      *    `魔改内容/qol/qol_skipmove.ERH` 整文件移除；`MP_GRADE` 改 `CHARADATA`），
-     *    另 212 条是 4.981 新注册的全局 `SAVEDATA` 面（写侧按池面落格 ⇒ 写出面「多」）。
+     *    另 248 条是 4.981 新注册的全局 `SAVEDATA` 面（写侧按池面落格 ⇒ 写出面「多」；
+     *    261111 比 261017 又多 36 条 —— QOL 卡片/钓鱼等 DLC 的系统全局变量）。
      * 2. `+2` = L15 `RT2-UNCLAIMED-B1`（2026-11-14，ADR-005 例外，
      *    `specs/save-format.md` §7）：读侧把**未认领顶层键**捕获、段尾原样回写 ⇒
      *    `P_AdjList`/`P_AdjListDone` 由「缺」变「保留」；`MP_GRADE` 因名字仍注册
@@ -369,7 +371,7 @@ class SaveRoundTripTest {
         )
         // 4.981 列：池按新增 SAVEDATA 面重写样本 + L15 未认领键回写 ⇒ 下表逐条对账（751 = 749 + 2）。
         CorpusProfile.V4_981 -> CorpusColumns(
-            writtenGlobalCount = 751,
+            writtenGlobalCount = 787,
             // `SAVE_CORPUS_DRIFT` 冻结在 2026-11-06 的形态，仍列着两条已由 L15 回写覆盖的「缺」；
             // 这里把它们**扣掉**，使「回写回归 ⇒ 原档侧又出现缺」照旧落进下面的子集判定（红）。
             globalOrigSideDrift = SAVE_CORPUS_DRIFT - unclaimedPassthroughKeys.map { "缺 $it" }.toSet(),
@@ -382,7 +384,7 @@ class SaveRoundTripTest {
                 "全局 多 KOJO_PRESET_NAME",
             ),
             globalBonusTailZeros = 4,
-            note = "4.981 池面把 4.980 时代样本按新注册面重写，并回写未认领顶层键（751 = 749 + 2）",
+            note = "4.981（261111）池面把 4.980 时代样本按新注册面重写，并回写未认领顶层键（787 = 785 + 2）",
         )
     }
 

@@ -47,6 +47,9 @@ Kotera 起源于一个朴素的需求：想在 Android 上原生地玩 EraTW，�
 | `sqlite-adapter` | `SqlDriver` 端口的 AndroidX SQLite 适配器：随包 seed 库落成可写副本、原子刷新（SQLite 真实引擎的平台接线） |
 | `mod-api` | RT2 Mod SDK 的 API 面：实体 / 事件 / 函数 / Hook 等声明与宿主上下文 |
 | `mod-family` / `mod-memory` / `mod-livingworld` | 内置官方 Mod：家族谱系、记忆、生界（随包 manifest 的真源） |
+| `mod-registry` | 载体注册表：构建期扫各 `mod-*` 模块上打了 `@ModCarrier` 的声明 object，生成唯一 `ModRegistry`（宿主不再逐个点名载体模块） |
+| `mod-template` | mod 作者工具链：最小载体模板骨架（只供人抄，**不进**生产 `ModRegistry`） |
+| `mod-testing` | mod 作者工具链：`:mod-api` 能力面的内存实现 + `runMod` 装配，让作者不开引擎就能验 mod 业务逻辑 |
 | `tools/erbcc` | ERB / ERH → `erbc.v1` 字节码容器编译器；含语料编译、符号审计与 Rust 对拍接线 |
 | `tools/erbcc-rs` | erbcc 的 Rust 侧实现（Cargo 工程），用于与 Kotlin 编译器做逐字节对拍 |
 | `tools/modgen` | RT2 模块 / manifest 生成器（内置 mod 与 demo 模块的构建入口） |
@@ -71,12 +74,13 @@ Kotera 起源于一个朴素的需求：想在 Android 上原生地玩 EraTW，�
 ./gradlew :tools:vmdbg:installDist  # 调试 CLI
 ```
 
-CI 等价命令（十二个模块一起跑）：
+CI 等价命令（十五个模块一起跑）：
 
 ```bash
 ./gradlew --no-daemon \
   :core-vm:test :render:test :sqlite-adapter:test \
   :mod-api:test :mod-family:test :mod-memory:test :mod-livingworld:test \
+  :mod-registry:test :mod-testing:test :mod-template:test \
   :tools:erbcc:test :tools:modgen:test :tools:modgen-accessors:test \
   :tools:vmdbg:test :tools:uipreview:test
 ```

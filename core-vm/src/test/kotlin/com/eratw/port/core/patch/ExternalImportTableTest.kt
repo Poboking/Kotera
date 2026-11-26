@@ -11,8 +11,9 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * M2-1 外部导入解析钉：负哨兵槽位 = `externalCalls` 列表下标、绑定最终 LSC 胜者、
- * 缺提供者 / 事件误当函数 / 重复导入整组拒绝。
+ * M2-1 外部导入解析钉：负哨兵槽位 = `externalCalls` 列表下标、绑定最终 LSC 胜者；
+ * 缺提供者 / 事件误当函数 = **unresolved 记录不拒**（S9 改判，缺名残桩）+ 告警；
+ * 空白 / 重复导入 / packageId 重复维持整组拒绝（包形状病态）。
  */
 class ExternalImportTableTest {
 
@@ -61,21 +62,29 @@ class ExternalImportTableTest {
     }
 
     @Test
-    fun missingProviderRejectsWithPackageAndName() {
-        val e = assertFailsWith<ImportResolutionException> {
-            ExternalImportTable.resolve(listOf(mod("modA", "NOPE")), catalog)
-        }
-        assertEquals("modA", e.packageId)
-        assertEquals("NOPE", e.importedName)
-        assertTrue(e.reason.contains("没有任何非事件函数"), e.reason)
+    fun `S9改判_缺提供者记录unresolved不拒绝`() {
+        val diagnostics = mutableListOf<String>()
+        val table = ExternalImportTable.resolve(listOf(mod("modA", "NOPE")), catalog, diagnostics::add)
+        val unresolved = table.importsOf("modA")!!.unresolved
+        assertEquals(1, unresolved.size)
+        assertEquals("NOPE", unresolved[0].name)
+        assertEquals(0, unresolved[0].importIndex)
+        assertTrue(unresolved[0].reason.contains("没有任何非事件函数"), unresolved[0].reason)
+        // 已解析段为空；哨兵槽仍可按 extIdx 定位到未解析条目（CallRelocation 用）。
+        assertTrue(table.importsOf("modA")!!.imports.isEmpty())
+        assertEquals("NOPE", table.importsOf("modA")!!.entryAt(0)!!.name)
+        assertTrue(diagnostics.single().contains("NOPE"), diagnostics.toString())
     }
 
     @Test
-    fun eventNamesCannotBeImportedAsFunctions() {
-        val e = assertFailsWith<ImportResolutionException> {
-            ExternalImportTable.resolve(listOf(mod("modA", "EVENTFIRST")), catalog)
-        }
-        assertTrue(e.reason.contains("事件"), e.reason)
+    fun `S9改判_事件名导入记录unresolved不拒绝`() {
+        val table = ExternalImportTable.resolve(listOf(mod("modA", "EVENTFIRST")), catalog)
+        val unresolved = table.importsOf("modA")!!.unresolved
+        assertEquals(1, unresolved.size)
+        assertEquals("EVENTFIRST", unresolved[0].name)
+        assertTrue(unresolved[0].reason.contains("事件"), unresolved[0].reason)
+        // 物理下标查询仍为 null（未解析不进已解析段）。
+        assertNull(table.physicalIndexOf("modA", "EVENTFIRST"))
     }
 
     @Test

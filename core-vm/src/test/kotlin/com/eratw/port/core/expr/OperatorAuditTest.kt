@@ -12,15 +12,16 @@ import kotlin.test.assertFailsWith
  * 目录的 OperatorMethodManager.cs（下称 OperatorMethodManager）、OperatorCode.cs、
  * OperatorManager.cs，以及 Parser 目录的 LexicalAnalyzer.cs。
  *
- * 分歧编号（详见交付报告）：
+ * 分歧编号（历史；2026-11-20 溢出族按 4.981 收口）：
  * - EX-1 NAND/NOR 的短路：原版短路、移植侧两侧都求值。语料零真实用例 ⇒ 只钉现状、不改产品。
- * - EX-2 一元负的文案：移植侧自造文案，原版走 Lang.SystemLine.MinusWontWork。
- * - EX-3 一元负对操作数求值两次：原版 OperatorMethodManager.cs:561 与 :565 各一次，
- *   移植侧只求值一次 ⇒ 操作数含 RAND 时 RNG 取数次数不同。语料有用例
- *   （ERB/コマンド関連/COMF/日常系/COMF447 露店を開く.ERB:1305），修复点在
- *   core/expr/Expr.kt（非本路独占面）⇒ diff 写进「需组长接线」。
+ * - EX-2 一元负的文案：1.824 走 Lang.SystemLine.MinusWontWork；**4.981 已改成
+ *   SafeArithmetic.SafeNegate 的「整数溢出: -a」**（SafeArithmetic.cs:52-65），本文件按
+ *   4.981 改钉。
+ * - EX-3 一元负对操作数求值两次：那是 1.824 `OperatorMethodManager.cs:561`/`:565` 的口径；
+ *   4.981 `MinusInt`（OperatorMethod.cs:753-765）**只取一次**再交 SafeNegate ⇒ 副作用
+ *   只发动一次，旧「两次求值」判据作废（本文件按 4.981 改钉，RNG 序列随之前移）。
  *
- * 本文件不改任何产品代码：所有断言都锁「移植侧现读数」，与原版不一致处在注释里写明期望值。
+ * 本文件只锁「4.981 语义 + 移植侧读数」；不一致处仍写在注释里。
  */
 class OperatorAuditTest {
 
@@ -473,7 +474,7 @@ class OperatorAuditTest {
         assertEquals(0L, evi(listOf(op("~"), i(-1))))
         assertEquals(-7L, evi(listOf(op("-"), i(7))))
         assertEquals(7L, evi(listOf(op("-"), i(-7))))
-        // 一元 + 不产生节点 ⇒ 副作用只发动一次（对比 EX-3 的一元负两次求值）
+        // 一元 + 不产生节点 ⇒ 副作用只发动一次（4.981 的一元负也是单次求值，见下方 EX-3 用例）
         val c = sideCtx()
         assertEquals(3L, evalInt(parseOrThrow(listOf(op("+")) + call("SIDE")), c))
         assertEquals(1, c.funcCalls.size)
@@ -484,33 +485,31 @@ class OperatorAuditTest {
     }
 
     @Test
-    fun `一元负对最小值打印系统行并回绕`() {
-        // 原版：MinusInt :561-565 —— 等于 long.MinValue 时
-        //       exm.Console.PrintSystemLine(string.Format(Lang.SystemLine.MinusWontWork.Text, long.MinValue))，
-        //       文案见 lang.emuera-zhs.xml:1040「对整型最小值(-9223372036854775808)进行-操作其值也不对发生变化」；
-        //       随后 :565 `return -arguments[0].GetIntValue(exm)` —— 默认 unchecked ⇒ 仍是 MinValue。
-        // 移植侧：Expr.kt:168-172 判定与回绕一致，但**文案自造** ⇒ EX-2（文案对账，非语义分歧）。
+    fun `一元负对最小值饱和到最大整数并告警`() {
+        // 4.981：MinusInt（OperatorMethod.cs:753-765）→ SafeArithmetic.SafeNegate
+        // （SafeArithmetic.cs:52-65）—— `-long.MinValue` 走 checked 溢出分支：
+        //   PrintWarning($"整数溢出: -{a}")  （C# 插值把字面 `-` 与 a.ToString() 拼接 ⇒ 双负号）
+        //   return long.MaxValue;            （恒 MAX，不看符号）
+        // 1.824 的「打一行 MinusWontWork 系统提示、仍回绕成 MIN」已作废（EX-2 / EX-3 收口）。
         val ctx = TestContext()
-        assertEquals(Long.MIN_VALUE, evalInt(parseOrThrow(listOf(op("-"), i(Long.MIN_VALUE))), ctx))
-        assertEquals(1, ctx.systemLines.size)
+        assertEquals(Long.MAX_VALUE, evalInt(parseOrThrow(listOf(op("-"), i(Long.MIN_VALUE))), ctx))
+        assertEquals(listOf("整数溢出: --9223372036854775808"), ctx.systemLines)
         val ctx2 = TestContext()
         assertEquals(1L, evalInt(parseOrThrow(listOf(op("-"), i(-1L))), ctx2))
-        assertEquals(0, ctx2.systemLines.size)   // 非 MinValue 不打印
+        assertEquals(0, ctx2.systemLines.size)   // 非 MIN 不打印
     }
 
     @Test
-    fun `EX3已复刻一元负对操作数求值两次`() {
-        // EX-3（已采纳）：原版 MinusInt 无条件调用 arguments[0].GetIntValue(exm) **两次**
-        //   （OperatorMethodManager.cs:561 判 MinValue、:565 取负），而 FunctionMethodTerm.GetIntValue
-        //   （FunctionMethodTerm.cs:20-23）每次都重新递归求值、无记忆化
-        //   ⇒ 形如 `-MAX(RAND:10, 5)` 的写法在原版消耗**两次** RAND 取数。
-        //   语料点：ERB/コマンド関連/COMF/日常系/COMF447 露店を開く.ERB:1305（`增加来客数 = -MAX(RAND:10, 5)`）
-        //           ERB/fromEN/QOL/Map Travel/QoL_DANGEROUS_TRAVEL.ERB:30/34/124（`-MAX(...)`）
-        // 移植侧已由 origin/main 的 `fix(expr)` 落地双求值（Expr.kt:168-175：先判 MinValue 再二次求值取负）
-        // ⇒ 本用例从「现状钉桩」改为正向断言 2 次。
+    fun `EX3作废一元负按 4_981 只求值一次`() {
+        // 4.981 MinusInt（OperatorMethod.cs:753-765）是
+        //   `return SafeArithmetic.SafeNegate(arguments[0].GetIntValue(exm));`
+        // —— **单次**取实参。1.824 的「判 MinValue 取一次、取负再取一次」在 4.981 已不存在
+        // ⇒ 旧 EX-3 判据（`-MAX(RAND:10, 5)` 消耗两次 RAND）失效；语料
+        // ERB/コマンド関連/COMF/日常系/COMF447 露店を開く.ERB:1305 一类形态的 RNG 序列
+        // 因此前移一位，与 4.981 实跑一致。
         val ctx = sideCtx()
         assertEquals(-3L, evalInt(parseOrThrow(listOf(op("-")) + call("SIDE")), ctx))
-        assertEquals(2, ctx.funcCalls.size)
+        assertEquals(1, ctx.funcCalls.size, "SafeNegate 的单实参调用 ⇒ 只求值一次")
     }
 
     @Test
@@ -554,19 +553,32 @@ class OperatorAuditTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `长整型加减乘环绕除算溢出按原版报错`() {
-        // 原版：PlusIntInt :24 / MinusIntInt :57 / MultIntInt :71 直接对 System.Int64 运算；
-        //       C# 默认 unchecked ⇒ 加/减/乘环绕（spec: OperatorMethodManager.cs:24/:57/:71）。
-        // 移植侧：Expr.kt:276-278（Kotlin Long 天然环绕）。
-        assertEquals(Long.MIN_VALUE, evi(listOf(i(Long.MAX_VALUE), op("+"), i(1))))
-        assertEquals(Long.MAX_VALUE, evi(listOf(i(Long.MIN_VALUE), op("-"), i(1))))
-        assertEquals(-2L, evi(listOf(i(Long.MAX_VALUE), op("*"), i(2))))
+    fun `整型加减乘按 4_981 SafeArithmetic 饱和并告警`() {
+        // 4.981：PlusIntInt（OperatorMethod.cs:278）/ MinusIntInt（:307）/ MultIntInt（:321）
+        // 全部改走 SafeArithmetic（SafeArithmetic.cs:7-50）—— checked 越界 ⇒ PrintWarning
+        // 「整数溢出: a op b」+ 饱和，**不再 unchecked 回绕**（旧断言钉的是 1.824 口径）。
+        val addCtx = TestContext()
+        assertEquals(Long.MAX_VALUE, evalInt(parseOrThrow(listOf(i(Long.MAX_VALUE), op("+"), i(1))), addCtx))
+        assertEquals(listOf("整数溢出: 9223372036854775807 + 1"), addCtx.systemLines)
+
+        val subCtx = TestContext()
+        assertEquals(Long.MIN_VALUE, evalInt(parseOrThrow(listOf(i(Long.MIN_VALUE), op("-"), i(1))), subCtx))
+        assertEquals(listOf("整数溢出: -9223372036854775808 - 1"), subCtx.systemLines)
+
+        val mulCtx = TestContext()
+        assertEquals(Long.MAX_VALUE, evalInt(parseOrThrow(listOf(i(Long.MAX_VALUE), op("*"), i(2))), mulCtx))
+        assertEquals(listOf("整数溢出: 9223372036854775807 * 2"), mulCtx.systemLines)
+
         // MinValue / -1：C# 的 long 整除在 .NET 上抛 OverflowException，不是 unchecked 环绕；
-        // 移植侧 Expr.kt:255-256 按原版抛 ExprEvalException。
-        // spec: OperatorMethodManager.cs:136（arguments[0].GetIntValue(exm) / intValue）。
+        // 移植侧 Expr.kt 按原版抛 ExprEvalException（OperatorMethod.cs:374 → SafeDivide 的非零支
+        // 仍是裸 `a / b`，.NET 上 checked 抛）。
         assertFailsWith<ExprEvalException> { evi(listOf(i(Long.MIN_VALUE), op("/"), i(-1))) }
-        // 余数不触发该溢出：C# 与 JVM 都得 0（Expr.kt:259-261）。
+        // 余数不触发该溢出：C# 与 JVM 都得 0（SafeModulo 的 `a % b` 不抛）。
         assertEquals(0L, evi(listOf(i(Long.MIN_VALUE), op("%"), i(-1))))
+        // 正常值不告警。
+        val ok = TestContext()
+        assertEquals(3L, evalInt(parseOrThrow(listOf(i(1L), op("+"), i(2L))), ok))
+        assertEquals(0, ok.systemLines.size)
     }
 
     @Test

@@ -1,0 +1,6 @@
+schema	com.eratw.port.modlivingworld.generated	LwFact
+component	lw.mem.factData	component
+field	lwMemSubject	INT	true	subject
+field	lwMemPredicate	STR	false	predicate
+field	lwMemAt	INT	false	occurredAt
+archetype	lw.mem.fact

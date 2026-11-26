@@ -76,6 +76,11 @@ private class EmFakeProjector : ICharaSlotProjector {
     override fun onCharacterRowsPermuted(oldToNewIndexMap: IntArray) {}
 
     override fun onCharacterRowDeleted(deletedIndex: Int) {}
+
+    override fun onWorldReset() {
+        rows.clear()
+        generation++
+    }
 }
 
 /** EntityRuntime 假件：内核/注册表/声明查表真件注入，目录与激活判定按用例给。 */

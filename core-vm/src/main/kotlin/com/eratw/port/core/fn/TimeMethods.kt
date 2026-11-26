@@ -52,7 +52,8 @@ import java.time.ZoneId
  *    顺序/个数由 :3993 的格式串唯一决定（年/月/日/时/分/秒 六段，秒以下被格式串截掉）。
  *    「越界」在这条函数上只有一个含义：**参数个数**不对 → 原版 `ArgsCountNotMatches`
  *    （FunctionMethod.cs:302-335），移植侧由 `BuiltinMethod.checkArity`（Builtins.kt:565-573）承担，
- *    文案 `函数 GETTIMES 的参数个数不匹配（需要 0 个）：实际 1 个`。
+ *    文案 `GETTIMES函数: 不需要参数`（零形参表传实参 = 独立键 `ArgsNotNeeded`，
+ *    spec: FunctionMethod.cs:316；arity 文案族见 `specs/error-texts.yaml` 第十二节）。
  * 4. **GETMILLISECOND / GETSECOND 的值域**：正数、约 1.78e13（ms）/ 1.78e10（s）量级。
  *    `.NET` 的 `Ticks/N` 是整数除法（向零截断；值为正 ⇒ 等价 floor），本实现用 `Long` 除法同口径。
  *    0001-01-01 → 1970-01-01 的毫秒常数 = 719162 天 × 86_400_000 = 62_135_596_800_000

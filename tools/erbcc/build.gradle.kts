@@ -1,4 +1,6 @@
+import com.eratw.port.buildlogic.CORPUS_PATCHES_DIGEST_LINE
 import com.eratw.port.buildlogic.CORPUS_PATCHES_MARKER
+import com.eratw.port.buildlogic.corpusPatchesDigest
 import com.eratw.port.buildlogic.CorpusPatchPlan
 import com.eratw.port.buildlogic.corpus
 import com.eratw.port.buildlogic.corpusStagingDir
@@ -223,6 +225,25 @@ tasks.register<JavaExec>("compileCorpus") {
         // UP-TO-DATE 命中时 doFirst/doLast 都不跑，manifest 保持上一轮的追记原样。
         val corpus = corpusProvider.get()
         if (corpus.isBlank()) return@doLast
+        // erbcc 的产物目录 = <out>/erbc.v1（manifest 与 program.erbc 同层，stageGameAssets 的
+        // erbcDir 也指到这一层）；manifest 在那里，不在 out 根。
+        val manifest = File(outProvider.get(), "erbc.v1/manifest.txt")
+        if (!manifest.isFile) {
+            logger.warn("[corpus-patches] 产物 manifest 缺席（${manifest}）：补丁留痕与资产指纹都没落")
+            return@doLast
+        }
+        val existing = manifest.readText(Charsets.UTF_8)
+        // ① 补丁资产指纹：erbc 的第三个输入面（编译器源码 + 语料 + 补丁）。erbcc 每次重写
+        // manifest 之后这里才追记，所以正常只有一份；万一已在（手工拼接/上一轮残留）就不重复写，
+        // 免得新旧两行打架 —— 判据读到最后一行，重复行会让 CMP-66 与探针各取一份。
+        val patchesDigest = corpusPatchesDigest(rootProject.projectDir)
+        if (patchesDigest != null && !existing.contains("${CORPUS_PATCHES_DIGEST_LINE} ")) {
+            manifest.appendText("${CORPUS_PATCHES_DIGEST_LINE} ${patchesDigest.first}\n")
+            logger.lifecycle(
+                "[corpus-patches] manifest 追记补丁资产指纹 ${patchesDigest.first}（${patchesDigest.second} 个文件）",
+            )
+        }
+        // ② 已应用补丁的留痕行
         val marker = File(
             corpusStagingDir(
                 File(corpus).absoluteFile,
@@ -231,13 +252,6 @@ tasks.register<JavaExec>("compileCorpus") {
             CORPUS_PATCHES_MARKER,
         )
         if (!marker.isFile) return@doLast
-        // erbcc 的产物目录 = <out>/erbc.v1（manifest 与 program.erbc 同层，stageGameAssets 的
-        // erbcDir 也指到这一层）；manifest 在那里，不在 out 根。
-        val manifest = File(outProvider.get(), "erbc.v1/manifest.txt")
-        if (!manifest.isFile) {
-            logger.warn("[corpus-patches] marker 在（${marker}）而产物 manifest 缺席（${manifest}）：补丁留痕落空")
-            return@doLast
-        }
         val trace = marker.readText(Charsets.UTF_8)
         manifest.appendText(trace)
         logger.lifecycle(

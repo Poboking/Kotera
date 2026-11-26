@@ -82,12 +82,33 @@ class NativeMethodRegistry {
     /** 策略缺席名单（大写化键，与 [methods] 同口径）。 */
     private val policyAbsent = HashSet<String>()
 
-    /** 注册（宿主接线点）。重名报错，复刻原版 `Dictionary.Add` 的崩溃口径。 */
+    /** 被 [replace] 覆盖过的名字（大写化键；会话内累计，观测面用）。 */
+    private val overriddenKeys = HashSet<String>()
+
+    /** 注册（宿主接线点，**新增**）。重名报错，复刻原版 `Dictionary.Add` 的崩溃口径。 */
     fun register(name: String, method: NativeMethod) {
         val key = name.uppercase()
         if (methods.containsKey(key)) throw CodeEE("本地方法 $name 重复注册")
         methods[key] = method
     }
+
+    /**
+     * 显式替换一个**已存在**的注册（B3 覆盖通道，2026-11-26）：mod 覆盖宿主内建/先注册者的
+     * 唯一合法入口。与 [register] 的原版 `Dictionary.Add` 崩溃口径互补——register 只认新增、
+     * 本函数只认替换，名字未注册时抛 [IllegalArgumentException]（fail-closed 对称：
+     * 拼错的名字在替换口当场红，不静默变新增）。覆盖留痕（[overriddenNames]）。
+     */
+    fun replace(name: String, method: NativeMethod) {
+        val key = name.uppercase()
+        require(methods.containsKey(key)) {
+            "本地方法 $name 未注册，replace 只能替换已存在的注册（新增用 register）"
+        }
+        methods[key] = method
+        overriddenKeys.add(key)
+    }
+
+    /** 被 [replace] 覆盖过的名字（排序，便于测试与调试输出稳定；[clear] 后归零）。 */
+    fun overriddenNames(): List<String> = overriddenKeys.sorted()
 
     /**
      * 打策略缺席位（宿主接线点，装配段在装载趟预填**之前**调用）。键口径同 [register]。
@@ -113,8 +134,14 @@ class NativeMethodRegistry {
     /** 已注册名单（排序，便于测试与调试输出稳定）。 */
     fun names(): List<String> = methods.keys.sorted()
 
-    /** 清空（RESTART / 重载插件后用；同原版 `ClearMethods`，spec: `PluginManager.cs:545-548`）。策略缺席位不清，见类 KDoc。 */
-    fun clear() = methods.clear()
+    /**
+     * 清空（RESTART / 重载插件后用；同原版 `ClearMethods`，spec: `PluginManager.cs:545-548`）。
+     * 策略缺席位不清，见类 KDoc；覆盖留痕随表归零（表都空了留痕就是谎报）。
+     */
+    fun clear() {
+        methods.clear()
+        overriddenKeys.clear()
+    }
 }
 
 /** 注册表挂在每 VM 一份的 aux 槽名（AGENTS.md §2 铁律 4：禁静态可变全局）。 */
@@ -148,11 +175,13 @@ fun nativeMethods(aux: RuntimeAux): NativeMethodRegistry =
  * **晚于** GameSession 构造期的语料装配（GameSession.kt init）⇒ 注册表不可能早于会话构造
  * 就位，照抄原版相位
  * 会把已接桩的 ModelSet/Chat 全部误杀（0.2.39 上报簇的复发方向）。
- * CSHARP-WIRE（2026-11-06）把装配序收口成会话装配段内的三段严格序：
- * `wireCorpusNativeMethods`（注册终表）→ [prefillSharpLinks]（**装载趟裁决**：扫 CALLSHARP
- * 常量名、绑本表、未命中收警告统一上屏 = 原版 warningList 装载完一起显示的相位，
- * ParserMediator.cs:143-158）→ `drive()`。生产装配两段都跑，CALLSHARP 行在**任何执行之前**
- * 就已带裁决 —— 与原版「该行不执行也见警告」等值。
+ * CSHARP-WIRE（2026-11-06）把装配序收口成会话装配段内的严格序；2026-11-26 B3 起为**四段**：
+ * `wireCorpusNativeMethods`（宿主注册终表）→ `ModRuntimeAssembly.attach`（mod 生命周期：
+ * `FunctionApi.register` 新增 / `override` 显式覆盖宿主内建——mod 注册进终表，相位模型对齐
+ * 原版「插件 DLL 先于脚本联结」）→ [prefillSharpLinks]（**装载趟裁决**：扫 CALLSHARP
+ * 常量名、绑**终表**、未命中收警告统一上屏 = 原版 warningList 装载完一起显示的相位，
+ * ParserMediator.cs:143-158）→ `drive()`。生产装配三段注册段都跑完才裁决，CALLSHARP 行在
+ * **任何执行之前**就已带终态裁决 —— 与原版「该行不执行也见警告」等值。
  *
  * 首执行裁决（本类的历史语义）保留为**兜底通道**：没跑过预填的会话（core 装置 / 直接
  * `ProcessRuntime` 的测试）与非常量名（原版 `useCallForm`，联结期不裁决）的行，第一次
@@ -233,9 +262,11 @@ fun sharpLinks(aux: RuntimeAux): SharpLinkTable = aux.slot(SHARP_LINK_SLOT) { Sh
  * 水到渠成；移植侧的注册表挂 [nativeMethods]（`store.aux`），而 store 在 GameSession 构造
  * init 第 3 步才出生（GameSession.kt 变量池段），宿主注册（app `GameHost.wireCorpusNativeMethods`）
  * 又只能在会话建成后（构造喂参段被契约冻结，CONTRACT-CSHARP-WIRE §1）⇒ 「注册表先于容器
- * 解码」在物理上做不到。装配序挪动因此落地为会话装配段内的**三段严格序**：
- * `wireCorpusNativeMethods`（注册终表）→ **本函数**（装载趟裁决 + 警告收集）→ `drive()`
- * （任何脚本语句之前）—— 「本地方法表必须在装载趟扫描时已可用」（C1）由此保证。
+ * 解码」在物理上做不到。装配序挪动因此落地为会话装配段内的**严格序**（2026-11-26 B3 起
+ * 四段）：`wireCorpusNativeMethods`（宿主注册终表）→ `ModRuntimeAssembly.attach`（mod
+ * `FunctionApi.register`/`override` 进终表）→ **本函数**（装载趟裁决 + 警告收集）→ `drive()`
+ * （任何脚本语句之前）—— 「本地方法表必须在装载趟扫描时已可用」（C1）由此保证，
+ * 且裁决看到的是**终表**（mod 覆盖已生效）。
  *
  * 扫描本身不进容器装载趟（装载语义红线）：erbc 生产的侧车可信档**不解语句**
  * （StmtOffsetSidecar 直供记录偏移，ErbcStream 装载段），压扁趟只在 flatStatements=true

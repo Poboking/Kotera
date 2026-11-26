@@ -1,0 +1,84 @@
+; ============================================================================
+; PC-CMP-01-BUCKETS.ERB - M3-2-B event-bucket divergence fixture (synthetic)
+; ----------------------------------------------------------------------------
+; Purpose : ask the real PC engine how one @EVENTLOAD label carrying BOTH #PRI
+;           and #LATER is dispatched, and whether #SINGLE + RETURN 1 skips the
+;           rest of the CURRENT bucket only.
+; Evidence: - PC adds a label to EVERY bucket whose if() matches (parallel add):
+;             LabelDictionary.cs:90-105 (1.824) and
+;             reference/emuera-skia-4.981/Emuera/Runtime/Script/Data/LabelDictionary.cs:134-141,
+;             intent comment at :233 "laterlist.Add(list[i]);//#PRIかつ#LATERなら二重に登録する。eramakerの仕様"
+;           - port picks exactly ONE bucket (exclusive):
+;             core-vm/src/main/kotlin/com/eratw/port/core/proc/FuncMeta.kt:227-233
+;           - bucket walk order 0->1->2->3, duplicates run once per bucket:
+;             CalledFunction.cs:228-243 ShiftNext
+;           - #SINGLE only truncates its own bucket, #ONLY kills the dispatch:
+;             ProcessState.cs:326-337 (skia Process.State.cs:505-510)
+; Bucket map for this fixture (PC side), straight off the four parallel ifs:
+;           #PRI            -> {1}
+;           plain           -> {2}
+;           #LATER          -> {3}
+;           #PRI + #LATER   -> {1,3}     <-- NOT {1,2,3}: the bucket-2 add is guarded by
+;                                          !IsPri && !IsLater, so a double-tagged label is
+;                                          registered TWICE and PC prints PCMARK-1-PL twice,
+;                                          while the port (exclusive) prints it once
+;           #ONLY           -> {0,2}     (see PC-CMP-02B; parser clears PRI/LATER for #ONLY)
+; Rules   : ASCII only, no RAND, no game state reads, deterministic.
+;           Copy-root only - never place under a corpus root or eratw-sub-modding.
+; Expected (PC, EVENTLOAD members of this file only, in dispatch order):
+;           1-PL, 2-P, 3-N, 5-SINGLE0, 6-AFTER-SINGLE, 7-SINGLE1, 1-PL, 4-L
+;           (1-PL twice: bucket 1 pass then bucket 3 pass)
+;           PCMARK-8-AFTER-SINGLE1 must be ABSENT (RETURN 1 + #SINGLE jumps the
+;           remainder of bucket 2 via ShiftNextGroup).
+;           Port (exclusive buckets) would give:
+;           1-PL, 2-P, 3-N, 5-SINGLE0, 6-AFTER-SINGLE, 7-SINGLE1, 8-AFTER-SINGLE1, 4-L
+;           i.e. two diffs: PC repeats 1-PL, PC drops 8 (ShiftNextGroup).
+; Note    : corpus @EVENTLOAD members (SYSTEM.ERB:32/:99, DLC/*) interleave in
+;           the same buckets; only the relative order of PCMARK-* lines matters.
+; ============================================================================
+
+; --- 1) the divergence itself: #PRI and #LATER both true -------------------
+@EVENTLOAD
+#PRI
+#LATER
+	PRINTFORML PCMARK-1-PL
+	RETURN
+
+; --- 2) baseline: #PRI only, must land in bucket 1 -------------------------
+@EVENTLOAD
+#PRI
+	PRINTFORML PCMARK-2-P
+	RETURN
+
+; --- 3) baseline: plain label, must land in bucket 2 -----------------------
+@EVENTLOAD
+	PRINTFORML PCMARK-3-N
+	RETURN
+
+; --- 4) baseline: #LATER only, must land in bucket 3 -----------------------
+@EVENTLOAD
+#LATER
+	PRINTFORML PCMARK-4-L
+	RETURN
+
+; --- 5) #SINGLE with bare RETURN (ret = 0) -> ShiftNext, no truncation -----
+@EVENTLOAD
+#SINGLE
+	PRINTFORML PCMARK-5-SINGLE0
+	RETURN
+
+; --- 6) same bucket as 5, must still print (5 did not truncate) ------------
+@EVENTLOAD
+	PRINTFORML PCMARK-6-AFTER-SINGLE
+	RETURN
+
+; --- 7) #SINGLE with RETURN 1 -> ShiftNextGroup, truncates bucket 2 --------
+@EVENTLOAD
+#SINGLE
+	PRINTFORML PCMARK-7-SINGLE1
+	RETURN 1
+
+; --- 8) must NOT print: 7 truncated the tail of bucket 2 -------------------
+@EVENTLOAD
+	PRINTFORML PCMARK-8-AFTER-SINGLE1
+	RETURN

@@ -26,7 +26,14 @@ import com.eratw.port.modapi.GameTime
 import com.eratw.port.modapi.ModContext
 import com.eratw.port.modapi.ModManifest
 import com.eratw.port.modapi.RuntimeScheduler
+import com.eratw.port.modapi.add
+import com.eratw.port.modapi.get
+import com.eratw.port.modapi.has
 import com.eratw.port.modapi.queryPlan
+import com.eratw.port.modapi.setInt
+import com.eratw.port.modapi.setValue
+import com.eratw.port.modlivingworld.generated.LwEventKeys
+import com.eratw.port.modlivingworld.generated.NpcKeys
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -197,12 +204,12 @@ class LivingWorldCombinationTest {
         assertEquals(CharacterDeclarations.SLOT_WORKSHOP, session.character.queries.eveningSlotOf(a), "warmth=30 排工坊")
         assertEquals(CharacterDeclarations.SLOT_WORKSHOP, session.character.queries.eveningSlotOf(b))
         // 独立日程：改 B 自己的性格字段，下一日只有 B 的槽位变化（A 不动）。
-        session.characterContext.entities.setInt(b, CharacterDeclarations.FIELD_WARMTH, 70L)
+        session.characterContext.entities.setInt(b, NpcKeys.warmth, 70L)
         session.character.advanceDay()
         assertEquals(CharacterDeclarations.SLOT_STROLL, session.character.queries.eveningSlotOf(b))
         assertEquals(CharacterDeclarations.SLOT_WORKSHOP, session.character.queries.eveningSlotOf(a))
         // 复原：两人今晚都要工坊（同一互斥资源的两个候选）。
-        session.characterContext.entities.setInt(b, CharacterDeclarations.FIELD_WARMTH, 40L)
+        session.characterContext.entities.setInt(b, NpcKeys.warmth, 40L)
         session.character.advanceDay()
 
         val outer = session.pipeline.run(evening(10L))
@@ -231,6 +238,60 @@ class LivingWorldCombinationTest {
             session.character.queries.activityOf(loser),
             "被淘汰者回落到无预留的散步候选",
         )
+    }
+
+    // ------------------------------------------------------------------
+    // 根因回归：散步槽 NPC 在晚间仲裁后必须被解析（修复前永停在 ""）
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `判据1 混合槽位 散步槽NPC经晚间仲裁后活动被解析`() {
+        val session = start()
+        val a = session.npcA
+        val b = session.npcB
+        // 混合阵容：A 工坊槽、B 散步槽（warmth=70 >= 阈值）
+        session.character.advanceDay()
+        session.characterContext.entities.setInt(b, NpcKeys.warmth, 70L)
+        session.character.advanceDay()
+        assertEquals(CharacterDeclarations.SLOT_WORKSHOP, session.character.queries.eveningSlotOf(a))
+        assertEquals(CharacterDeclarations.SLOT_STROLL, session.character.queries.eveningSlotOf(b))
+        assertEquals("", session.character.queries.activityOf(b), "仲裁前 B 未解析")
+
+        val outer = session.pipeline.run(evening(10L))
+        assertEquals(ActionExecutionOutcome.COMPLETED, outer.outcome)
+        assertEquals(CharacterDeclarations.ACT_CRAFT, session.character.queries.activityOf(a))
+        // 钉子：修复前 next 过滤只挑工坊槽、STROLL handler 又不驱动嵌套 ⇒ B 永远停在 ""；
+        // 修复后胜者 handler 把未解析的 B 交给嵌套轮，B 的散步候选在该轮单独胜出。
+        assertEquals(
+            CharacterDeclarations.ACT_STROLL,
+            session.character.queries.activityOf(b),
+            "散步槽 NPC 必须在晚间仲裁后被解析为 stroll，不得停在未解析",
+        )
+        val nested = assertNotNull(nestedReports.lastOrNull(), "必须为散步槽 NPC 单独驱动一轮嵌套仲裁")
+        assertEquals(b, assertNotNull(nested.chosen).actor, "嵌套轮胜者应是被单独解析的散步槽 NPC")
+    }
+
+    @Test
+    fun `判据1 全散步槽 所有NPC经晚间仲裁后活动均被解析`() {
+        val session = start()
+        session.character.advanceDay()
+        session.characterContext.entities.setInt(session.npcA, NpcKeys.warmth, 70L)
+        session.characterContext.entities.setInt(session.npcB, NpcKeys.warmth, 70L)
+        session.character.advanceDay()
+        assertEquals(CharacterDeclarations.SLOT_STROLL, session.character.queries.eveningSlotOf(session.npcA))
+        assertEquals(CharacterDeclarations.SLOT_STROLL, session.character.queries.eveningSlotOf(session.npcB))
+
+        val outer = session.pipeline.run(evening(10L))
+        assertEquals(ActionExecutionOutcome.COMPLETED, outer.outcome)
+        // 钉子：修复前 STROLL handler 只写 activity 不驱动嵌套 ⇒ 外轮只解析一名，另一名停在 ""。
+        for (entity in session.character.queries.npcs()) {
+            assertEquals(
+                CharacterDeclarations.ACT_STROLL,
+                session.character.queries.activityOf(entity),
+                "全员散步槽时每个 NPC 都应被解析为 stroll（修复前有一名停在未解析）",
+            )
+        }
+        assertEquals(1, nestedReports.size, "仅首名胜者驱动一轮嵌套解析其余 NPC，不重复展开")
     }
 
     // ------------------------------------------------------------------
@@ -300,7 +361,7 @@ class LivingWorldCombinationTest {
         assertEquals(listOf(fact), session.memory.knowledgeOf(a), "A 的亲历知识经自己的 KNOWS 边可达")
         assertTrue(session.memory.knowledgeOf(b).isEmpty(), "B 不得自动知道 A 亲历的事实")
         assertFalse(
-            session.memoryContext.relationships.has(b, MemoryDeclarations.RELATION_KNOWS, fact),
+            session.memoryContext.relationships.has(b, MemoryDeclarations.KNOWS, fact),
             "引擎不做任何自动传播：B 的 KNOWS 边必须不存在",
         )
         assertEquals(Provenance.FIRSTHAND, session.memory.provenanceOf(a, fact))
@@ -328,9 +389,9 @@ class LivingWorldCombinationTest {
         assertTrue(session.relationship.recordBondNotes(a, "workshop mate"))
         // 事件包：自己的边型（紧张度）+ 自己的字段（事件读数），落在同一对实体上。
         val eventRelations = session.eventContext.relationships
-        assertTrue(eventRelations.add(a, EventDeclarations.RELATION_TENSION, b))
-        assertTrue(eventRelations.setValue(a, EventDeclarations.RELATION_TENSION, b, 42L))
-        assertTrue(session.eventContext.entities.setInt(a, EventDeclarations.FIELD_EVENT_SEEN, 1L))
+        assertTrue(eventRelations.add(a, EventDeclarations.TENSION, b))
+        assertTrue(eventRelations.setValue(a, EventDeclarations.TENSION, b, 42L))
+        assertTrue(session.eventContext.entities.setInt(a, LwEventKeys.seen, 1L))
 
         // 互不覆盖：各自 kind 的边值、各自字段的数据全部独立保留。
         assertEquals(5L, session.relationship.affinityOf(a, b), "关系包正向好感不被事件包写数波及")
@@ -462,12 +523,12 @@ class LivingWorldCombinationTest {
         offline.activate(EventDeclarations.PACKAGE_ID)
         assertEquals(
             eventRoundsAtShutdown.toString(),
-            offline.apiFor(EventDeclarations.PACKAGE_ID).get(EventDeclarations.STORAGE_EVENT_ROUNDS),
+            offline.apiFor(EventDeclarations.PACKAGE_ID).get(EventDeclarations.EVENT_ROUNDS),
             "重启用必须拿回原计数，不是 0",
         )
         assertEquals(
             "2",
-            offline.apiFor(CharacterDeclarations.PACKAGE_ID).get(CharacterDeclarations.STORAGE_SCHEDULE_DAYS),
+            offline.apiFor(CharacterDeclarations.PACKAGE_ID).get(CharacterDeclarations.SCHEDULE_DAYS),
             "未禁用包的计数同时在场（分域隔离）",
         )
     }
@@ -573,7 +634,7 @@ class LivingWorldCombinationTest {
         // 裸查询（无 KNOWS 过滤）会返回全部 fact —— 若 knowledgeOf 退成这个形状，
         // B 就「自动知道」A 的亲历（判据 3 红）。闸 = HasRelation 入边过滤，本例钉住差异。
         val bareQuery = session.characterContext.query.query(
-            queryPlan { archetype(MemoryDeclarations.ARCHETYPE_FACT) },
+            queryPlan { archetype(MemoryDeclarations.FACT) },
         )
         assertTrue(fact in bareQuery, "裸查询漏出全部 fact（失败形态可见）")
         assertTrue(session.memory.knowledgeOf(b).isEmpty(), "经 KNOWS 闸后 B 仍不知道（判据 3 保持）")

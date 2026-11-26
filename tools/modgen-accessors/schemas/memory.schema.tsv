@@ -1,0 +1,13 @@
+schema	com.eratw.port.modmemory.generated	Memory	memory.factData
+archetype	memory.fact
+field	subject	INT	true
+field	object	INT	true	obj
+field	source	INT	true
+field	predicate	STR	false
+field	tags	STR	false
+field	occurredAt	INT	false
+field	acquiredAt	INT	false
+field	provenance	INT	false
+field	confidence	INT	false
+field	visibility	INT	false
+field	importance	INT	false

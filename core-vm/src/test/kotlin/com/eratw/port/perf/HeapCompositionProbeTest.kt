@@ -217,7 +217,7 @@ class HeapCompositionProbeTest {
     /** 引用表的已物化条数。 */
     private fun slotNonNull(v: Any?): Int = when (v) {
         null -> 0
-        is BlockRefs<*> -> v.nonNullEntries()
+        is BlockRefs<*> -> v.countActiveEntries()
         else -> nonNullCount(v)
     }
 

@@ -38,8 +38,39 @@ interface SaveTransactionIo {
     /** 删除；文件本来不存在也算成功。 */
     fun delete(path: String)
 
-    /** 目标卷当前可用字节，空间预算门专用。 */
+    /**
+     * 目标卷当前可用字节（空间预算门专用），**探测不到时返回 [AVAILABLE_UNKNOWN]，不许抛**。
+     *
+     * 口径为什么是「不许抛」而不是「抛了让预算门兜住」：Android 侧的
+     * `java.nio.file.Files.getFileStore` 是个无条件抛 `SecurityException` 的桩 ——
+     * AOSP platform/libcore `ojluni/src/main/java/sun/nio/fs/UnixFileSystemProvider.java`
+     * 第 373 至 389 行把 JDK 实现整段注释掉、只留 throw（注释原文说 SELinux 策略不允许
+     * 普通应用拿到文件系统完整信息），**而 android.jar 里签名照旧在**——判据：
+     * `javap -classpath <android.jar> java.nio.file.Files` 的输出里有
+     * `public static java.nio.file.FileStore getFileStore(java.nio.file.Path) throws java.io.IOException`
+     * （android-35 与 android-36 两档逐字一致，2026-11-19 实测），所以「桌面单测全绿、
+     * 真机开局即失败」是这条路的默认结局：0.2.48 的
+     * SAVEGLOBAL 开局崩就是它——`NioSaveTransactionIo.availableBytes` 用到它，
+     * 异常穿透 `SaveTransaction.execute` 第 1 步，再被 SAVEGLOBAL 的收敛壳折成
+     * `FileSystemOps.MES_SAVE_GLOBAL` 那一句。
+     *
+     * 探测不到可用空间属**不知道**，不属**没有空间**：折成 0 或让异常冒泡，都会让一次
+     * 正常的存档在计量源这一层被误杀，而真写不下时落盘侧（write / rename）本来就会带着
+     * 路径抛 IO 错、由 `SaveTransaction.execute` 的第 3 步 fail-closed 收口。故端口契约是
+     * **fail-open + 留痕**，判据只有「确知不足」才允许被预算门拒绝。实现只该吞
+     * `SecurityException` 与 `IOException` 这两类已知形态；预算门对它们同样兜一层，是为了
+     * 容下尚未改口的实现（含测试替身），其余异常按违约冒泡——不许在端口层用
+     * `catch (Throwable)` 连 OOM 一起吞。
+     */
     fun availableBytes(): Long
+
+    companion object {
+        /**
+         * [availableBytes] 的「探测不到」哨兵（也兼容老实现直接返回 `Long.MAX_VALUE`）。
+         * 预算门见到它一律放行并留痕，不当作「空间不足」。
+         */
+        const val AVAILABLE_UNKNOWN: Long = Long.MAX_VALUE
+    }
 }
 
 /**
