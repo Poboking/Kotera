@@ -13,7 +13,8 @@ import kotlin.test.assertTrue
  *
  * 背景与判定：261111 语料大量使用 `RANDSF(...)`（日常指令、TRACHECK 好感/信赖结算、
  * 魔法 DLC 等 20+ 文件）。取证结论：它是**语料自带的 ERB 用户函数**（`#FUNCTION`，
- * 定义在 `ERB/魔改内容/Misc.ERB:320-343`，官方注释齐全：「带符号的随机偏移值生成」），
+ * 定义在 `ERB/魔改内容/Misc.ERB:340-363`（权威语料根 = Kotera 根 = 4.980 口径；
+ * 4.981 档 261111 根的同一函数在 320-343），官方注释齐全：「带符号的随机偏移值生成」），
  * **不是宿主内建** —— 三个反编译树（emuera-cs 1.824 / skia-4.981 / Emuera1824+v24）
  * 与本仓内建注册表均无此名，且 4.980 语料时代它就存在。因此引擎侧**无需**注册内建，
  * 只需用户函数表达式位重入通道正常工作。
@@ -27,7 +28,7 @@ import kotlin.test.assertTrue
  *
  * 取证口径：4.980 语料同函数已存在（`RandZeroArgChainAuditTest` 的排除说明「RANDSF /
  * RAND_ADVANTAGE 不算」即指此函数）；261111 换代波 strict 档 4307 文件编译失败 0，
- * 含定义文件 Misc.ERB。fixture 镜像段逐字来源 = Misc.ERB 320-343（1 基），
+ * 含定义文件 Misc.ERB。fixture 镜像段逐字来源 = Misc.ERB 340-363（1 基），
  * 第 2 段语料原文锚点（吃 `ERATW_CORPUS`）逐字核对后再真跑，证明「抄的是真话」。
  *
  * KDoc 纪律：正文不写通配星号对，避免 Kotlin 块注释嵌套吞掉闭合符。
@@ -79,18 +80,18 @@ class RandSfCorpusE2ETest {
 
         val corpusLines = file.readLines(Charsets.UTF_8)
         // 1 基行号核对（0 基下标 = 行号-1）：函数头 / #FUNCTION / 核心累加与概率行 / 收口
-        assertEquals("@RANDSF(ARG,ARG:1)", corpusLines[319].trim(), "1 基 320 = 函数头（原文锚点）")
-        assertEquals("#FUNCTION", corpusLines[323].trim(), "1 基 324 = #FUNCTION（表达式位调用的前提）")
-        assertEquals("LOCAL += RAND:(1+ARG)", corpusLines[333].trim(), "1 基 334 = 正幅度累加行")
-        assertEquals("SIF !RAND:(1-ARG)", corpusLines[338].trim(), "1 基 339 = 负幅度概率行")
-        assertEquals("RETURNF LOCAL * RESULT_SIGN", corpusLines[342].trim(), "1 基 343 = 收口行")
+        assertEquals("@RANDSF(ARG,ARG:1)", corpusLines[339].trim(), "1 基 340 = 函数头（原文锚点）")
+        assertEquals("#FUNCTION", corpusLines[343].trim(), "1 基 344 = #FUNCTION（表达式位调用的前提）")
+        assertEquals("LOCAL += RAND:(1+ARG)", corpusLines[353].trim(), "1 基 354 = 正幅度累加行")
+        assertEquals("SIF !RAND:(1-ARG)", corpusLines[358].trim(), "1 基 359 = 负幅度概率行")
+        assertEquals("RETURNF LOCAL * RESULT_SIGN", corpusLines[362].trim(), "1 基 363 = 收口行")
 
         // 现读原文行（1 基 320-343 = 0 基 319..343）替换镜像片段的同段，其余原样
         val mirror = ErbSnippetHarness.lines("rand_sf_corpus.erb")
         val iAt = mirror.indexOf("@RANDSF(ARG,ARG:1)")
         val iDrv = mirror.indexOf("@RANDSF_DRIVER")
         check(iAt >= 0 && iDrv > iAt) { "镜像片段结构异常：@RANDSF=$iAt @RANDSF_DRIVER=$iDrv" }
-        val spliced = mirror.subList(0, iAt) + corpusLines.subList(319, 343) + mirror.subList(iDrv, mirror.size)
+        val spliced = mirror.subList(0, iAt) + corpusLines.subList(339, 363) + mirror.subList(iDrv, mirror.size)
 
         assertWitness(runDriver(spliced))
     }

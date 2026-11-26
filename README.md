@@ -101,6 +101,12 @@ CI 等价命令（十五个模块一起跑）：
 `ERATW_CORPUS` 未设置时，`compileCorpus` 等需要语料的任务也会直接给出明确报错，
 不会静默产出空包。
 
+**权威语料根 = Kotera 根**（`eratw-画蛇添足版eratw4.980`，NOW_VERSION 20260326）。
+语料相关的冻结读数（`ErbccCorpusProfile` 的标签数、`WebpDecoderTest` 的 `.webp` 清单、
+`AliasLoaderTest` 的 `.als` 别名、`RandSfCorpusE2ETest` 的原文锚点等）全部按这棵根冻结，
+两个公开仓共用同一口径 —— 换根跑会与冻结值对不上，那是**语料换代**不是回归。
+`RealCorpus` 的缺省探测也指向这棵根（`GAME_DIR_NAME`）。
+
 ### erbcc-rs 对拍
 
 Rust 侧需要 Cargo；先构建，再走 Gradle 接线：
