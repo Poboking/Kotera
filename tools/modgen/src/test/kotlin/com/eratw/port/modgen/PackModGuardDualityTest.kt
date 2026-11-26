@@ -21,7 +21,7 @@ import org.junit.jupiter.api.io.TempDir
  *   压缩比 / 重名，对照从 `app/src/main/kotlin/com/eratw/port/android/ModZipGuard.kt` 源码里
  *   **现场解析**出的 `MAX_*` 常量（不是复制数值）；guard 一侧收紧 ⇒ 本类先红；
  * - `ModImportPackModGuardDualityTest`（app 侧）：把本类产出的**同一份字节**（sha256 常量
- *   [PACKED_FIXTURE_SHA256] 互相点名）喂真 `ModZipGuard`/`ModImportController` 走通导入。
+ *   [PACKED_FIXTURE_CONTENT_SHA] 互相点名）喂真 `ModZipGuard`/`ModImportController` 走通导入。
  *
  * 两侧都绿 = 「pack-mod 产出的正常包必被 guard 接受」这条对偶契约成立。
  */
@@ -65,10 +65,13 @@ class PackModGuardDualityTest {
         val module = patchableModule(tempDir)
         val zip = outZip(tempDir)
         val run = packOk(module, zip)
+        // 比**包内容摘要**（条目名 + 未压缩字节），不比 zip 原始字节：压缩流随 JDK 自带的
+        // zlib 版本而变，同一份内容在不同 JDK 上压出来的字节可能不同（2026-11-27 在 Linux CI
+        // 上实测判红，而解包后的条目内容逐字节相同）。要冻的是包内容这条合同。
         assertEquals(
-            PACKED_FIXTURE_SHA256,
-            sha256Of(run),
-            "pack-mod 产出的字节漂移了：app 侧夹具（sha256=$PACKED_FIXTURE_SHA256）必须与本类产出逐字节相同；" +
+            PACKED_FIXTURE_CONTENT_SHA,
+            zipContentDigest(Files.readAllBytes(zip)),
+            "pack-mod 产出的**包内容**漂移了：内容摘要（$PACKED_FIXTURE_CONTENT_SHA）必须与冻结夹具一致；" +
                 "若确实是 pack-mod 合同的有意变更，请用 dumpFixture 重新生成 app 侧夹具并同步两侧常量",
         )
         assertTrue(
@@ -226,7 +229,8 @@ class PackModGuardDualityTest {
         const val GUARD_SOURCE = "app/src/main/kotlin/com/eratw/port/android/ModZipGuard.kt"
 
         /** app 侧测试内嵌的同一份字节的 sha256（两段接力焊点，改夹具必须两侧同步改）。 */
-        const val PACKED_FIXTURE_SHA256 = "542a1ca69a64311e6056c95b4d2ce52184b24ba2b1918ff9e74003c0727410f6"
+        const val PACKED_FIXTURE_CONTENT_SHA =
+            "aff02e06425a394ff7876c504c659e8bb2de8857b7631134824202243b5b5af4"
 
         /** 任务书口径的条目数边界。 */
         const val ENTRY_BOUNDARY = 500
