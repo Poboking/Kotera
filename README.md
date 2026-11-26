@@ -89,6 +89,12 @@ CI 等价命令（十五个模块一起跑）：
 变量未设置时这些用例走 JUnit assumption **跳过**，其余用例自足；公开仓 CI
 跑的就是这一档。
 
+CI 还会把姐妹仓 [eratw-pocket](https://github.com/Poboking/eratw-pocket) **同级检出**
+（读对方 `main`）：`tools/modgen` 的打包侧闸要读壳层真源、壳层侧的入库资产要与
+引擎声明真源逐字节一致，两道跨仓守卫都在这道互检下才真跑。跨仓契约（源码闸归属、
+合并次序、冻结夹具比什么、权威语料根）在
+[specs/cross-repo-contract.md](specs/cross-repo-contract.md)。
+
 | 环境变量 / 属性 | 作用 |
 |---|---|
 | `ERATW_CORPUS` | 游戏 `ERB/` 目录；真实语料编译与语料审计用例 |
