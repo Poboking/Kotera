@@ -17,6 +17,7 @@
 | `patch-format.yaml` | 可链接补丁容器：头、模块描述、重定位、外部导入、链接顺序 |
 | `error-texts.yaml` | 错误文案表：键、语言列、Emuera 出处与「不改-同形」判词 |
 | `corpus-bugs.md` | 语料缺陷台账与内容补丁机制（CB-xxx） |
+| `cross-repo-contract.md` | 跨仓契约：两仓拓扑与依赖方向、源码闸归属、CI 互检与合并次序、冻结夹具口径、权威语料根 |
 | `verify-notes.md` | 开发期验证记录（历史日志，不是规范正文） |
 
 ## 证据口径
@@ -34,6 +35,13 @@
   未设置时按公开仓口径跳过，详见根 README 的「构建与测试」。
 - `tools/erbcc` 的 `compileCorpus` / `symbolAudit` / `gate981Corpus`，以及
   `core-vm` 的 L3 哈希链、E2E golden、装载审计，都是规格的可执行对拍装置。
+
+## 与壳层仓的关系
+
+壳层仓 [eratw-pocket](https://github.com/Poboking/eratw-pocket) 通过 composite build
+依赖本仓（`includeBuild("../Kotera")`），方向单向。跨仓的源码闸归属、CI 互检与
+合并次序、冻结夹具比什么、权威语料根是哪棵，都在
+[cross-repo-contract.md](cross-repo-contract.md)。
 
 ## 内部工具说明
 

@@ -96,6 +96,15 @@ compile surface. They are gated by environment variables; when a variable is
 unset the case is **skipped** via a JUnit assumption, while everything else stays
 self-contained. That is exactly the tier public CI runs.
 
+CI also checks out the sibling repo
+[eratw-pocket](https://github.com/Poboking/eratw-pocket) (reading its `main`):
+the pack-side gates in `tools/modgen` read the shell's real sources, and the
+shell's packaged assets must match the engine's declaration truth byte for byte
+— both cross-repo guards only actually run under that cross-check. The
+cross-repo contract (which repo owns which source guard, the merge order, what
+a frozen fixture compares, and which corpus root is authoritative) lives in
+[specs/cross-repo-contract.md](specs/cross-repo-contract.md).
+
 | Environment variable / property | Purpose |
 |---|---|
 | `ERATW_CORPUS` | Game `ERB/` directory; real-corpus compilation and corpus-audit cases |
