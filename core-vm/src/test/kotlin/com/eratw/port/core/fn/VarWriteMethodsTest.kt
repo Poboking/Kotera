@@ -248,7 +248,10 @@ class VarWriteMethodsTest {
         val e = assertFailsWith<CodeEE> {
             ctx.callFunctionRef("VARSETEX", listOf(StrLiteral("D5")))
         }
-        assertTrue(e.message!!.contains("参数个数"), "实际：${e.message}")
+        // minArgs=2 由个数闸（error-texts.yaml 的 ArgsCountNotMatches，
+        // LangKey.ArgsCountNotMatches「需要{1}个参数，但传入了{2}个」）拦下；
+        // needle 逐字对齐现网，判据（抛 CodeEE）与「值位不被折成空位文案」不变。
+        assertTrue(e.message!!.contains("需要2个参数，但传入了1个"), "实际：${e.message}")
         assertEquals(listOf(1L, 2L, 3L, 4L, 5L), store.vwInt1("D5", 5))
     }
 

@@ -211,6 +211,24 @@ object SystemVariableBootstrap {
             "全局用户变量只从 ERH 装载（Process.cs:309/:313）"
 
     /**
+     * 通用 InvalidSharp 诊断文案（单源）：**任意**无归属 `#` 行（`#PRI` / `#FUNCTION` /
+     * `#DIMS` / `#LOCALSIZE` 等）被原版丢弃时的 level-1 留痕，不带任何指令专属字样。
+     *
+     * 原版锚 `reference/emuera-cs`：`ErbLoader.cs:413-423` —— `logicalLine2` 不是
+     * `FunctionLabelLine` 时 `ParserMediator.Warn(Lang.Error.InvalidSharp.Text, …, 1)` 后
+     * `continue` 丢弃该行；文案 `Lang.cs:2430` 日原文「関数宣言の直後以外で#行が使われています」、
+     * zhs 译文 `lang.emuera-zhs.xml:562`「#行只能在函数声明后立刻使用」。
+     *
+     * 与 [ERB_FUNCTION_DIM_REASON] 分工：后者是 CMP-89 收集点的 **#DIM 专用**丢弃理由
+     * （含「全局用户变量只从 ERH 装载」判据），只服务 ERB 函数外 `#DIM/#DIMS` 的收集闸；
+     * 本常量服务装载期标签扫描的通用 `#` 行告警，两者不得互相顶替。
+     *
+     * 诊断留痕面（message 全仓零生产消费者），不进三语文案表，但必须单源、不得内联字面量。
+     */
+    const val INVALID_SHARP_REASON: String =
+        "# 行只能在函数声明后立刻使用（原版 InvalidSharp，ErbLoader.cs:413-423，warn 1 丢弃该行）"
+
+    /**
      * 全局 `REF` 声明的拒绝文案（单源）。
      *
      * 原版 `ErhLoader.analyzeSharpDimLines`：`UserDefinedVariableData.Reference` 为真时

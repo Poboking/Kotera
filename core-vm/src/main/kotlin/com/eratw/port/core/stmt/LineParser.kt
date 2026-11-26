@@ -2,13 +2,13 @@ package com.eratw.port.core.stmt
 
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.ExprParser
+import com.eratw.port.core.expr.FloatLiteral
 import com.eratw.port.core.expr.IntLiteral
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.OperatorCode
 import com.eratw.port.core.expr.ParserConfig
 import com.eratw.port.core.expr.StrLiteral
 import com.eratw.port.core.expr.TermEndWith
-import com.eratw.port.core.expr.Unary
 import com.eratw.port.core.lexer.CharStream
 import com.eratw.port.core.lexer.ErbLexer
 import com.eratw.port.core.lexer.LangKey
@@ -104,15 +104,16 @@ class LineParser(
      */
     private val lexerConfig: LexerConfig = LexerConfig(),
     /**
-     * `#LOCALSIZE` / `#LOCALSSIZE` 的常量表（T5）：ERH `#DIM CONST` 名与 `#DEFINE` 宏常量
-     * 的「名（大写归一）→ 值」表，由调用方（erbcc 桥）从符号层注入
-     * —— 与 [com.eratw.port.core.frontend.LabelTable.evalSharpInt] 吃的
-     * `SymbolConfig.constValues` 同一份。
+     * 形参默认值 / `#LOCALSIZE` 可引用的编译期常量表（按值类型分三张，见 [ParamConsts]）。
      *
-     * 默认空表 = 只有字面量与纯算术表达式能折；常量名形态会落进
-     * [parseSharpLine] 的「无法求值为整数常量」告警支，**不再静默折成 0**。
+     * 调用方（erbcc 桥 / 装载装置）从 ERH 符号层预扫注入 —— 与
+     * `com.eratw.port.core.frontend.LabelTable.evalSharpInt` 吃的 `SymbolConfig.constValues`
+     * 同一份 ERH 常量来源。缺省 [ParamConsts.EMPTY] = 常量名一律不折：只有字面量与纯算术
+     * 表达式能折，常量名形态会落进 `parseSharpLine` 的「无法求值为整数常量」告警支
+     * （**不再静默折成 0**），非字面量默认值由 [CallDefaultsCollector.unsupported]
+     * 带进装载报告。
      */
-    private val dimConsts: Map<String, Long> = emptyMap(),
+    private val consts: ParamConsts = ParamConsts.EMPTY,
 ) {
     private val lexer = ErbLexer(lexerConfig)
 
@@ -126,7 +127,7 @@ class LineParser(
     val resolver: StmtResolver = resolver
 
     /** 常量表达式求值器（与 `#DIM` 尺寸 / 符号层 `#LOCALSIZE` 同一真源，specs/loader.md D.8.1）。 */
-    private val dimSizeEvaluator = com.eratw.port.core.compile.DimSizeEvaluator(dimConsts)
+    private val dimSizeEvaluator = com.eratw.port.core.compile.DimSizeEvaluator(consts.ints)
 
     /** 解析期告警（原版 level 0/1 的非致命诊断）。 */
     val warnings = mutableListOf<StmtWarning>()
@@ -700,9 +701,10 @@ class LineParser(
     /**
      * 一个形参默认值的解析（spec: ErbLoader.cs:646-760 的 `list2[i * 2 + 1]` 一侧）。
      *
-     * 只收**字面量**常量（整型/十六进制/字符串，含一元 `-`/`+`/`~` 折叠）：
-     * 原版要求 `Restructure` 后是 `SingleTerm`（:764-767 `ArgCanOnlyConst`），本遍对
-     * 常量名（如 `C_YELLOW`）与任意表达式**不注入也不报错**——返回 `expr = null`，
+     * 收装载期能定值的常量：字面量（整型/十六进制/字符串，含一元 `-`/`+`/`~` 折叠）与
+     * `#DIM CONST` 常量名（含其算术式，经 [foldConstDefault]）。
+     * 原版要求 `Restructure` 后是 `SingleTerm`（:764-767 `ArgCanOnlyConst`）；折不出的
+     * 任意表达式**不注入也不报错**——返回 `expr = null`，
      * 由装载装置按 [ParamDefault.raw] 登记（省略位保持既有「不写」行为，spec: ProcessState.cs:437）。
      *
      * `= ` 后无表达式的形态在原版是 `NullTerm`，按形参类型折成 `0` / `""`
@@ -717,12 +719,14 @@ class LineParser(
             return ParamDefault(zero, "")
         }
         val raw = tokenText(tokens)
-        val parsed = try {
+        // 字面量支先走表达式层（`-1` / `0x10` / `"x"`）；折不开（常量名、或表达式层
+        // 拿不到该标识符的解析失败）再走 [ParamConsts.ints] 表 —— 默认值的定值依据只有这张表，
+        // 不许因为语句解析器不认识这个名字就退化成「省略位停在 0」。
+        val parsed = runCatching {
             ExprParser(toExprTokens(tokens), resolver, config).reduceExpressionTerm(TermEndWith.EoL)
-        } catch (_: Exception) {
-            return ParamDefault(null, raw)
-        }
-        val folded = parsed?.let(::foldLiteralDefault) ?: return ParamDefault(null, raw)
+        }.getOrNull()
+        val folded = parsed?.let(::foldLiteralDefault) ?: foldConstDefault(raw, paramType)
+            ?: return ParamDefault(null, raw)
         // 类型必须与形参一致（spec: ErbLoader.cs:770-773 NotMatchTypeArgAndInitialValue）。
         // 不一致就不注入：补进去只会让运行期按位绑定跳过该位，反而不如保持「省略即不写」。
         if (folded.operandType != paramType) return ParamDefault(null, raw)
@@ -730,25 +734,54 @@ class LineParser(
     }
 
     /**
-     * 字面量默认值的常量折叠（口径 = 原版 `Restructure` 把 `-1` 折成 `SingleLongTerm(-1)`，
-     * spec: ErbLoader.cs:746-752）。
+     * 常量名形态的默认值折叠（`@材料设定D(ARG:2 = MATD_空)`）—— 走 [dimSizeEvaluator]，
+     * 与 `#DIM` 尺寸 / `#LOCALSIZE` 的 `#DIM CONST` 折叠同一份 [ParamConsts.ints] 表、同一个求值器。
      *
-     * 返回 null = 不是本遍支持的字面量常量（调用方登记 [ParamDefault.raw]，不注入）。
+     * 原版口径 = `def = term.Restructure(exm) as SingleTerm`（spec: ErbLoader.cs:724-727）：
+     * `#DIM CONST` 名在装载期就折成它的值，调用点省略实参时按 `Def[i]` 顶替
+     * （spec: CalledFunction.cs:167）。**折不出值不许退化成 0**：原版折不出是
+     * `ArgCanOnlyConst` 判错（:726-727），本侧保持「不注入」，省略位停在帧槽默认
+     * （spec: ProcessState.cs:437），原文由 [CallDefaultsCollector.unsupported] 带进装载报告。
+     *
+     * 整型形参走 [com.eratw.port.core.compile.DimSizeEvaluator.eval]（返回 `Long`）；
+     * 字符串形参走 [ParamConsts.strs] 表（由调用方从 ERH `#DIMS CONST` 预扫注入）；
+     * 浮点形参（`#DIMF` 形参 / `ARGF` 位）走 [ParamConsts.floats] 表（由调用方从 ERH
+     * `#DIMF CONST` 预扫注入，PC 判词见 [ParamConsts.floats] 的 KDoc）。
+     *
+     * 字符串常量名默认值（`#DIMS CONST MYSTR = "abc"` 被形参项当默认值）原版会折：
+     * PC 实测 `@F(ARGS:1 = MYSTR)` + `CALL F("x")` ⇒ `defaultStr=[abc]`（探针宿主
+     * `1824+v24+EMv18+EEv56+Skiav16`）。本侧由调用方在构造本解析器前先从符号表的
+     * `erhDimConsts` 折出 [ParamConsts.strs] 表（解析前即在册，无时序倒置），这里按名查表折成
+     * [StrLiteral]；表里没有（未声明 / 非字面量初值）就不折，由
+     * [CallDefaultsCollector.unsupported] 带进装载报告。
+     *
+     * 语料现场（2026-11-16 玩家上报 1794793143585「做菜报错」）：
+     * `ERB/Headers/MATERIAL_TAGS.ERH` 的 `#DIM CONST MATD_空 = -1` 是 `@材料设定D`
+     * ARG:2..10 的默认值。不折 ⇒ 省略位停在 0，而 0 在 ITEM 语义里是**真实道具号（跳蛋）**，
+     * `DISH_ING` 的空槽哨兵被写成道具号 ⇒ 料理材料判定按「持有跳蛋」成立 ⇒
+     * `SELECT_ING` 被复位成 -1（COM413 的「0 番はローターなので」修整）⇒ `ITEM[-1]` 越界。
      */
-    private fun foldLiteralDefault(e: Expr): Expr? = when (e) {
-        is IntLiteral, is StrLiteral -> e
-        is Unary -> {
-            val v = (e.operand as? IntLiteral)?.value
-            when {
-                v == null -> null
-                e.op == OperatorCode.PLUS -> e.operand
-                e.op == OperatorCode.MINUS -> IntLiteral(-v)
-                e.op == OperatorCode.BIT_NOT -> IntLiteral(v.inv())
-                else -> null
-            }
-        }
+    private fun foldConstDefault(raw: String, paramType: OperandType): Expr? = when (paramType) {
+        OperandType.STR -> consts.strs[raw.trim().uppercase(Locale.ROOT)]?.let(::StrLiteral)
+        OperandType.INT -> dimSizeEvaluator.eval(raw)?.let(::IntLiteral)
+        OperandType.FLOAT -> consts.floats[raw.trim().uppercase(Locale.ROOT)]?.let(::FloatLiteral)
         else -> null
     }
+
+    /**
+     * 字面量默认值的常量折叠（口径 = 原版 `Restructure` 把 `-1` 折成 `SingleLongTerm(-1)`，
+     * spec: ErbLoader.cs:746-752）。折叠本体在 [paramDefaultLiteral]（负数、浮点四则、`~`）。
+     *
+     * 返回 null = 不是本遍支持的字面量常量（调用方登记 [ParamDefault.raw]，不注入）。
+     *
+     * 浮点字面量（`@F(ARGF:1 = 2.5)`）**也折**：原版同一遍 `Restructure` 折成
+     * `SingleFloatTerm`（PC 实测 `@SHOW_FLT(ARGF:1 = 2.5)` + `CALL SHOW_FLT()` ⇒
+     * `defaultF=2.5`）。运行期由 [com.eratw.port.core.proc.ProcessRuntime.bindOmittedArgDefault]
+     * 的 `ARGF` / `#DIMF` 分支用 [VariableWriter.writeFloat] 写浮点槽；静态调用点的
+     * [com.eratw.port.core.compile.ErbProgramCompiler.padOmittedArgs] 对浮点位保持
+     * `present=false`（帧槽没有浮点列，折出的浮点常量不进 int/str 两桶），统一由运行期补位。
+     */
+    private fun foldLiteralDefault(e: Expr): Expr? = paramDefaultLiteral(e)
 
     /**
      * 形参项的**完整**原文（`:` 之后到形参项结束，含全部下标 token）。

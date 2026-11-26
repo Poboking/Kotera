@@ -15,6 +15,9 @@ import com.eratw.port.core.host.RuntimeAux
  * * **整数四则**（`SafeArithmetic.cs:67-84` 的 `SafeDivide` / `SafeModulo`，由
  *   `OperatorMethod.cs:374` / `:388` 的 `DivIntInt` / `ModIntInt` 调用）：
  *   `b == 0` 时 `Console.PrintWarning("零除: …")` 并返回 `0`，**每次都警告**（不去重）。
+ * * **整数溢出**（`SafeArithmetic.cs:7-65` 的 `SafeAdd` / `SafeSubtract` /
+ *   `SafeMultiply` / `SafeNegate`，接线点见 [SafeArithmetic] 的 KDoc）：越界时
+ *   `Console.PrintWarning("整数溢出: …")` 并饱和，同样**每次都警告**（不去重）。
  *
  * **不在此列的反向证明**：`SafeArithmetic.cs:91-100` 虽定义了 `SafeFloatDivide`，但全仓
  * **无任何调用点**；`OperatorMethod.cs:987` / `:1137` 的 `DivFloatFloat` / `DivMixedFloat`
@@ -46,6 +49,17 @@ class ClampWarnings {
     private val messages = ArrayList<String>()
     private var suppressed = 0
 
+    /**
+     * 整数溢出告警（4.981 `SafeArithmetic.cs:7-65`）的**独立桶**。
+     *
+     * 为什么不并进 [messages]：溢出与零除都是「每次上屏不去重」，脚本在循环里踩一次
+     * `MAX + 1` 就能连刷几千条；同桶会把 RAND 的两条首次告警（诊断价值最高）挤出
+     * [MAX_RETAINED_LINES] 的留痕窗口。分桶后两族各自有界，取证时也分得开。
+     */
+    private val overflowMessages = ArrayList<String>()
+    private var overflowSuppressed = 0
+    private var overflowTotal = 0
+
     /** 同一 [kind] 只留一次告警文本；已警告过返回 null（调用方据此跳过上屏）。 */
     fun once(kind: String, message: String): String? {
         if (!warnedKinds.add(kind)) return null
@@ -59,6 +73,20 @@ class ClampWarnings {
         return message
     }
 
+    /**
+     * 整数溢出告警：**每次都**原样返回供上屏（4.981 `PrintWarning` 不去重），
+     * 留痕落独立 overflow 桶且同样有界。
+     */
+    fun overflow(message: String): String {
+        overflowTotal++
+        if (overflowMessages.size < MAX_RETAINED_LINES) {
+            overflowMessages.add(message)
+        } else {
+            overflowSuppressed++
+        }
+        return message
+    }
+
     private fun retain(message: String) {
         if (messages.size < MAX_RETAINED_LINES) messages.add(message) else suppressed++
     }
@@ -67,6 +95,15 @@ class ClampWarnings {
 
     /** 超出留痕上限、只上屏未留痕的条数。 */
     fun suppressedCount(): Int = suppressed
+
+    /** overflow 桶里已留痕的告警（按触发序）。 */
+    fun overflowLines(): List<String> = overflowMessages.toList()
+
+    /** overflow 桶累计触发次数（含未留痕的）。 */
+    fun overflowCount(): Int = overflowTotal
+
+    /** overflow 桶超出留痕上限、只上屏未留痕的条数。 */
+    fun overflowSuppressedCount(): Int = overflowSuppressed
 }
 
 private const val MAX_RETAINED_LINES = 64
@@ -121,3 +158,24 @@ internal fun randMethodClampMessage(name: String, max: Long): String =
  */
 internal fun zeroDivideWarning(a: Long, isModulo: Boolean): String =
     if (isModulo) "零除: $a \\ 0" else "零除: $a / 0"
+
+// ------------------------------------------------------------------
+// 整数溢出文案（`SafeArithmetic.cs:7-65` 的 `PrintWarning`，逐字对齐）
+// ------------------------------------------------------------------
+
+/** `SafeArithmetic.cs:17`：`整数溢出: {a} + {b}`。 */
+internal fun integerOverflowAddWarning(a: Long, b: Long): String = "整数溢出: $a + $b"
+
+/** `SafeArithmetic.cs:32`：`整数溢出: {a} - {b}`。 */
+internal fun integerOverflowSubtractWarning(a: Long, b: Long): String = "整数溢出: $a - $b"
+
+/** `SafeArithmetic.cs:47`：`整数溢出: {a} * {b}`。 */
+internal fun integerOverflowMultiplyWarning(a: Long, b: Long): String = "整数溢出: $a * $b"
+
+/**
+ * `SafeArithmetic.cs:62`：`整数溢出: -{a}`。
+ *
+ * 注意 C# 插值把字面 `-` 与 `a.ToString()` 直接拼接：`a = long.MinValue` 时上屏是
+ * **两个负号**（`整数溢出: --9223372036854775808`），这里 `"整数溢出: -$a"` 逐字同形。
+ */
+internal fun integerOverflowNegateWarning(a: Long): String = "整数溢出: -$a"

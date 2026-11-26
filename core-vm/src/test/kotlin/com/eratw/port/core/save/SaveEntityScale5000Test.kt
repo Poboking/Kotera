@@ -56,6 +56,7 @@ class SaveEntityScale5000Test {
         override fun syncFromCharaSlot(entityId: Long) = Unit
         override fun onCharacterRowsPermuted(oldToNewIndexMap: IntArray) = Unit
         override fun onCharacterRowDeleted(deletedIndex: Int) = Unit
+        override fun onWorldReset() = Unit
     }
 
     private class ScaleFixture(

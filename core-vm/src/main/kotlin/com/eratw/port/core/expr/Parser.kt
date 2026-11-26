@@ -500,6 +500,17 @@ class ExprParser(
             // 本层 VarInfo 无局部/全局之分，无法同口径分流，暂维持「命中即接受 subKey」。
             throw ExprParseException(atLine, atCol, "@符号的非法用法")
         }
+        // C# 的回落顺序（spec: ExpressionParser.cs:404-443）：裸标识符的零参函数引用
+        // （:404-408）只查 refmethodDic（REF/#DIM 引用方法，IdentifierDictionary.cs:538-547），
+        // 用户 #FUNCTIONS 不命中，标识符落到 :409-412 的 ConstantData.isDefined → SingleStrTerm。
+        // 移植侧 resolveFunction 会把用户 #FUNCTIONS 一并命中；若函数引用先判，
+        // `EQUIP:ARG:COSPLAY`（EQUIP.CSV:27 的索引名 9,COSPLAY 与 @COSPLAY 同名）会编成
+        // 零参调用 @COSPLAY → 函数体内再求值同一式 → 无限自调
+        // （2026-11-20 eratohoReverse 真机「调用栈超过上限(10000)」，栈全 COSPLAY 帧）。
+        // 故关键字三态提前求值：true 先返回 StrLiteral；false / null 保持既有顺序。
+        val indexKeyword =
+            if (inVariableArg) indexOwner?.let { resolver?.resolveIndexKeyword(it.name, it.dimension, idStr) } else null
+        if (indexKeyword == true) return StrLiteral(idStr)
         // 零参函数引用。spec: ExpressionParser.cs:404-408
         val funcType = resolver?.resolveFunction(idStr)
         if (funcType != null) {
@@ -512,16 +523,10 @@ class ExprParser(
             return FuncCall(idStr, emptyList(), funcType, line = ident.line, col = ident.col)
         }
         if (inVariableArg) {
-            // C# 的回落顺序（spec: ExpressionParser.cs:409-443）：
-            //   ① ConstantData.isDefined(varCode, idStr) → SingleStrTerm；
-            //   ② varId 是 VAR*/CVAR* 系列时 ConstantData.isUserDefined(...) → SingleStrTerm；
-            //   ③ 都没有 → IdentifierDictionary.ThrowException(idStr, isFunc: false)（:444-445）。
-            // 解析期没有 CSV/ERD 表，两级的「是否命中」由 resolver 注入：
-            // true = 命中、false = 确定未命中（抛）、null = 无表（保守放行，等价严格化前）。
-            val verdict = indexOwner?.let { owner ->
-                resolver?.resolveIndexKeyword(owner.name, owner.dimension, idStr)
-            }
-            when (verdict) {
+            // 三态口径（spec: ExpressionParser.cs:409-445）：true = 关键字命中（上方已返回）；
+            // false = 确定未命中（解析期抛）；null = 解析期无 CSV/ERD 表（保守放行，
+            // 等价严格化前——运行期 keywordToInteger 报错）。
+            when (indexKeyword) {
                 true, null -> return StrLiteral(idStr)
                 false -> throw ExprParseException(
                     ident.line,

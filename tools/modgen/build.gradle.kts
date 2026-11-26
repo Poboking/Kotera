@@ -8,8 +8,12 @@ kotlin {
 
 dependencies {
     implementation(project(":core-vm"))
-    // RT2-B③：内置 manifest 的唯一真源在 :mod-family（EraMod 声明），构建期工具可读它。
+    // RT2-B③：内置 manifest 的唯一真源在各载体模块的声明 object。2026-11-16 起不再逐个点名
+    // 载体模块 —— 名单由 :mod-registry 扫 @ModCarrier 生成（ModRegistry.carriers），
+    // 本模块只读它；于是「新增载体要在这里加一行」这条双登记义务消失了。
     // 方向仍是 mod 侧只依赖 :mod-api；引擎内部只由 :tools:modgen 这个构建期工具看见。
+    implementation(project(":mod-registry"))
+    // 兼容入口（assetFileName / bytes()）仍以 family 为载体样板，源码里显式引用它。
     implementation(project(":mod-family"))
     // RT2-M91：记忆 Mod 声明真源（M9-1），同上——构建期工具读声明，方向闸不破。
     implementation(project(":mod-memory"))
@@ -22,10 +26,23 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
+    // 生成物「真跑」面：新设置/服务/耗时三面示范要有运行时断言（TestWorld 发 context、
+    // 手动 fire 每日任务、录制 settings/log），所以测试源集依赖台架模块（只进 test，不进产物）。
+    testImplementation(project(":mod-testing"))
+    // check-mod 与 new-mod 对齐用例直接复用 accessor 生成器的解析/校验/渲染（modgen-accessors
+    // 不依赖 modgen，无环；生成器口径只有一份真源，免得 check 里再抄一套校验规则）。
+    implementation(project(":tools:modgen-accessors"))
 }
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    // RT2 闭环夹具自刷新旋钮：`.\gradlew.bat -Deratw.refreshPackFixture=true :tools:modgen:test`
+    // 直接生效。命令行 -D 进不了 fork 出来的 test worker JVM，必须在这里显式转发；
+    // 缺省 "false" ⇒ 未指定时行为与未接线前逐位一致（照旧逐字节比对冻结夹具）。
+    systemProperty(
+        "eratw.refreshPackFixture",
+        System.getProperty("eratw.refreshPackFixture") ?: "false",
+    )
 }
 
 tasks.register<JavaExec>("generateSampleManifest") {
@@ -85,6 +102,34 @@ tasks.register<JavaExec>("generateDemoErbModule") {
     doFirst {
         args(outputDir.get().absolutePath)
     }
+}
+
+// RT2-SCAFFOLD：`new-mod` 的冒烟面。真跑一次 CLI 生成骨架，再把生成物挂进 test 源集 ——
+// 模板一旦写出语法错/路径越界/引用缺失，:tools:modgen:compileTestKotlin 立刻红；生成的
+// SmokeModTest 也会被 JUnit 真跑。「生成物能编译」不靠人工目测，靠这条构建依赖兜底。
+val scaffoldSmokeModule = layout.buildDirectory.dir("scaffold-smoke/mod-smoke")
+val generateScaffoldSmoke by tasks.registering(JavaExec::class) {
+    group = "verification"
+    description = "Generate a mod skeleton via new-mod for test-source compilation smoke."
+    // 入口是 object 内的 @JvmStatic main（同 BuiltinManifestBuild 的先例）。
+    mainClass.set("com.eratw.port.modgen.NewModScaffold")
+    classpath = sourceSets["main"].runtimeClasspath
+    inputs.files(sourceSets["main"].output)
+    outputs.dir(scaffoldSmokeModule)
+    args(
+        "new-mod",
+        "--package", "eratw.smoke",
+        "--name", "Smoke",
+        "--out", scaffoldSmokeModule.get().asFile.absolutePath,
+        "--force",
+    )
+}
+
+kotlin.sourceSets.named("test") {
+    kotlin.srcDir(generateScaffoldSmoke)
+}
+tasks.named("compileTestKotlin") {
+    mustRunAfter(generateScaffoldSmoke)
 }
 
 tasks.named("processTestResources") {

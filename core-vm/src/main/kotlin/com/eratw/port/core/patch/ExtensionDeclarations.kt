@@ -35,6 +35,9 @@ object BuiltinPhases {
  * 函数 hook 槽声明（§20.1，ABI-9）。
  *
  * [targetKey] 是函数键（查表时按大写归一）；[priority] 升序 + 声明序 = 确定性执行序。
+ * [continueOnHandlerFailure] 是**本槽自己的处理器**抛异常后的处置：`true`（缺省，与新增字段前
+ * 逐位一致）继续保持绑定；`false` 首次抛异常后撤销该槽。它不写进 manifest 文本格式（旧 manifest
+ * 解析取缺省），也不是 [runOnFailure]（后者管被 hook 的函数抛错时本 hook 仍执行）。
  */
 data class HookDeclaration(
     val targetKey: String,
@@ -43,6 +46,7 @@ data class HookDeclaration(
     val mayMutateArgs: Boolean = false,
     val mayMutateReturn: Boolean = false,
     val runOnFailure: Boolean = false,
+    val continueOnHandlerFailure: Boolean = true,
 ) {
     init {
         require(targetKey.isNotBlank()) { "hook 目标函数键不能为空" }

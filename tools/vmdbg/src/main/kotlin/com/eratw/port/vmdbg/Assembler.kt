@@ -193,6 +193,7 @@ object Assembler {
     ): Assembled {
         val erbcDir = Wiring.resolveErbcDir(a)
         val (programPath, metaPath) = Wiring.artifactFiles(erbcDir)
+        ArtifactFreshnessGate.check(erbcDir, a)
         val ctx = resolvePaths(a)
         val gameRoot = ctx.gameRoot
         val sandboxDir = ctx.sandboxDir
@@ -603,6 +604,46 @@ class ImmediateInputSink : InputSink {
                 if (request.hasDef) InputOutcome(intValue = request.defInt) else InputOutcome(intValue = 0L)
             InputRequest.InputType.STR ->
                 InputOutcome(strValue = if (request.hasDef) request.defStr else "")
+        }
+    }
+}
+
+/**
+ * 脚本化输入 sink（call/trace --inputs "768,0"，2026-11-26）：按序把脚本项交给
+ * INPUT/INPUTS 的取值面，**脚本耗尽后回落到 [ImmediateInputSink] 的既有口径**
+ * （INT 取默认/0，STR 取默认/空串，任意键直接放行）。
+ *
+ * 存在的理由：[ImmediateInputSink] 只回 0/默认值，凡是「取值决定分支」的真实流程
+ * （如 SHOP 系菜单用玩家输入号选详情）在桌面都走不到目标分支，只能伪造实参直调，
+ * 取证强度差一档。带脚本后同一条命令即可复现「玩家输入 768」这种真实入口，
+ * 做改前崩溃 / 改后放行的同机对拍。
+ *
+ * 约束：INT 请求的脚本项必须能解析成整数（否则抛 [CliError]，不静默回 0 ——
+ * 那会让脚本形同虚设还看起来跑绿了）；STR 请求原样交付；任意键等待不消费脚本。
+ * --pre 前置函数与目标函数共用同一份消费序列（前置的等待会先吃掉脚本）。
+ */
+class ScriptedInputSink(private val script: List<String>) : InputSink {
+
+    private var cursor = 0
+    private val fallback = ImmediateInputSink()
+
+    /** 已消费的脚本项数（取证「脚本真的被吃到了」）。 */
+    val consumed: Int get() = cursor
+
+    override fun readAnyKey(anyKey: Boolean, stopMesSkip: Boolean) =
+        fallback.readAnyKey(anyKey, stopMesSkip)
+
+    override fun waitInput(request: InputRequest): InputOutcome {
+        if (cursor >= script.size) return fallback.waitInput(request)
+        val raw = script[cursor++]
+        return when (request.type) {
+            InputRequest.InputType.INT -> {
+                val v = raw.trim().toLongOrNull() ?: throw CliError(
+                    "--inputs 第 " + cursor + " 项 " + raw + " 不是整数：该等待点是 INT 取值面"
+                )
+                InputOutcome(intValue = v)
+            }
+            InputRequest.InputType.STR -> InputOutcome(strValue = raw)
         }
     }
 }

@@ -63,12 +63,19 @@ class LoadDataHandoffTest {
         var constUnloads = 0
         var graphicsUnloads = 0
 
+        /** `BeginHost.onSaveLoaded`（mod 侧读档通知）被调到的次数。 */
+        var saveLoadedCount = 0
+
         override fun unloadTempLoadedConstImageNames() {
             constUnloads++
         }
 
         override fun unloadTempLoadedGraphicsImageNames() {
             graphicsUnloads++
+        }
+
+        override fun onSaveLoaded() {
+            saveLoadedCount++
         }
     }
 
@@ -256,6 +263,8 @@ class LoadDataHandoffTest {
         assertEquals(StepOutcome.CALLED, systemLoad.outcome)
         assertEquals(1, host.constUnloads, "AppContents.UnloadTempLoadedConstImageNames（:2671）")
         assertEquals(1, host.graphicsUnloads, "AppContents.UnloadTempLoadedGraphicsImageNames（:2672）")
+        // EVENTLOAD 刚跑完、endEventLoad 还没到：此刻 mod 的读档通知**不许**提前发。
+        assertEquals(0, host.saveLoadedCount, "onSaveLoaded 必须在 endEventLoad 里、SHOW_SHOP 之前发")
 
         val eventLoad = rt.resumeSystem()
         assertEquals("endEventLoad", eventLoad.handler)
@@ -263,6 +272,7 @@ class LoadDataHandoffTest {
         assertEquals(SystemStateCode.Shop_CallShowShop, eventLoad.to, "endAutoSave（Process.cs:2599）")
         assertEquals("SHOW_SHOP", eventLoad.calledFunction, "Process.cs:2600")
         assertEquals(StepOutcome.CALLED, eventLoad.outcome)
+        assertEquals(1, host.saveLoadedCount, "读档走到末尾恰好发一次 mod 通知")
 
         // 交接位已清：宿主再次选择入口时不被劫持。
         assertEquals(SystemStateCode.Shop_CallShowShop, rt.systemState, "读档链终点")

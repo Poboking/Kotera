@@ -30,6 +30,26 @@ class StringTable {
     private var ids = HashMap<String, Int>(256)
     private var values = ArrayList<String>(256)
 
+    /**
+     * 池内**串载荷字符总数**（`sum(values[i].length)`，UTF-16 code unit 计数；空串贡献 0）。
+     *
+     * 口径与维护成本：
+     * - **O(1) 维护**：入池（[intern] 真的新增一条时）+`s.length`，[clear] 归零，[compact] 在
+     *   挑选存活项的同一次扫描里累加——三条写入路径各一行加法，**不在查询时全扫**，
+     *   也没有额外遍历（[compact] 的循环本来就要逐条走一遍）。
+     * - **热路径可取**：读 [charsTotal] 只是一次字段载入（与 [distinctCount] 的
+     *   `ArrayList.size` 同为 O(1)），每局约 9.6 万次入池 ⇒ 每局约 9.6 万次 Long 加法，
+     *   相对 `HashMap` 插入可忽略。因此**不分档**（不像装载期整份扫描那样有 `fullScan` 开关），
+     *   页中钉发也能拿到这一枚。
+     * - **并发口径**：写者是 VM 线程，读者是对局外的报告线程（`LiveSetCensus` 在崩溃/心跳
+     *   路径上取）。这里**不加锁**（[distinctCount] 与池内容本身也一直是这个口径：报告是
+     *   近似读数，不是在一致性快照上做支配树），但用 `@Volatile` 保证 64 位读不撕裂——
+     *   否则可能读到「新值高半 + 旧值低半」这种跨亿级的天文数字，把账面误导成另一个结论。
+     *   一次入池付一条 volatile 写，代价远小于一个假读数。
+     */
+    @Volatile
+    private var chars = 0L
+
     init {
         values.add("")
         ids[""] = 0
@@ -38,12 +58,16 @@ class StringTable {
     /** 池中不同的字符串个数（含下标 0）。用于测试与内存观测。 */
     val distinctCount: Int get() = values.size
 
+    /** 池内串载荷字符总数（口径与成本见 [chars]；UTF-16 code unit）。 */
+    val charsTotal: Long get() = chars
+
     /** 驻留并返回索引；相同内容永远得到同一索引。 */
     fun intern(s: String): Int {
         ids[s]?.let { return it }
         val id = values.size
         values.add(s)
         ids[s] = id
+        chars += s.length.toLong()
         return id
     }
 
@@ -72,6 +96,7 @@ class StringTable {
         values.clear()
         values.add("")
         ids[""] = 0
+        chars = 0L
     }
 
     /**
@@ -104,18 +129,27 @@ class StringTable {
         val kept = ArrayList<String>(old.size)
         kept.add("")
         remap[0] = 0
+        // 存活项的字符数在同一次挑选里累加：全存活捷径直接 return 时 chars 已是对的，
+        // 换表分支也不用再扫一遍（口径 = 新池里各条 length 之和）。
+        var keptChars = 0L
         for (i in 1 until old.size) {
             if (i >= live.size || !live[i]) continue
             remap[i] = kept.size
-            kept.add(old[i])
+            val s = old[i]
+            kept.add(s)
+            keptChars += s.length.toLong()
         }
-        // 全存活 ⇒ kept 与 old 同长且逐项同位（升序重编号 = 恒等），不换表、不建哈希：
-        // 零收益的压实不付重建成本。
-        if (kept.size == old.size) return remap
+        if (kept.size == old.size) {
+            // 零收益的压实不付重建成本；但 chars 仍要与「新池 = 老池」这一事实对齐
+            // （调用方可能在上面直接改过池？不会——写入路径只有本类的 intern/clear）。
+            chars = keptChars
+            return remap
+        }
         val newIds = HashMap<String, Int>(kept.size + (kept.size shr 1) + 1)
         for (k in kept.indices) newIds[kept[k]] = k
         values = kept
         ids = newIds
+        chars = keptChars
         return remap
     }
 

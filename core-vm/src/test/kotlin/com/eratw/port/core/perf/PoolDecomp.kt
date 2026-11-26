@@ -7,6 +7,7 @@ import com.eratw.port.core.proc.ProcessRuntime
 import com.eratw.port.core.vars.VariableStore
 import com.eratw.port.perf.CensusRow
 import com.eratw.port.perf.HeapMeter
+import com.eratw.port.perf.SINGLE_STMT_RESIDENT_BYTES
 import com.eratw.port.perf.SizeModel
 
 /** 语句原文账单（编译后、运行期 raw 释放前采样一次；只数 `String.length`，O(1)/条）。 */
@@ -166,6 +167,15 @@ internal class PoolDecompResult(
  * 由 `:core-vm:perfBaseline`（JavaExec，6g 堆）在 `S3` 读数之后调用；`ERATW_CORPUS`
  * 指到语料的 `ERB` 子树。报告落 `core-vm/build/perf-report.md` §2b。
  *
+ * ## 惰性供给档（2026-11-18 起）
+ * `ProgramLoader.loadMapped` 装载出来的 `Program` 是**惰性**的：段 3 的语句与段 2 的表达式
+ * 只在被取用时解码（`LazyStatementPool` / `LazyExprSource`），运行期由块级 LRU 上界
+ * 兜住（`RUNTIME_STMT_ENTRY_BUDGET` / `RUNTIME_NODE_ENTRY_BUDGET`）。对这类 `Program`，
+ * [programRows] **不物化**任何条目，语句池报「条目缓存块容量 × 277 B」的上界、表达式池报
+ * 「节点块容量 × 64 B」的上界（读数取 [Program.codeCacheCensus]）。整池遍历会把这层
+ * 按需解码变回全量解码：实测语句 +309.7 MiB、表达式 +66.5 MiB 的虚增，残差被拖到 -315.9 MiB。
+ * eager 档（编译期 `CodeBuilder`、`loadMappedEager`）仍逐条计入，口径逐字不变。
+ *
  * ## 全量实测结论（2026-10-20，4,800,579 指令 / 3,971 文件，S3 ≈ 708.5–709.2 MiB）
  *
  * | 桶 | MiB | 占已归属 668.7 |
@@ -206,6 +216,15 @@ internal object PoolDecomp {
     const val G_OTHER = "⑧ 其他"
 
     private const val ARRAY_HEADER = 16L
+
+    /** 运行期代码缓存一块的槽数（`BlockRefs.BLOCK`；语句条目表与节点表同口径）。 */
+    private const val CACHE_BLOCK_ENTRIES = 4_096L
+
+    /**
+     * 结点槽的模型成本：`RUNTIME_NODE_ENTRY_BUDGET = 1 shl 19` 条 ≈ 32 MiB
+     * （`ErbcStream.kt:240-266` 的容量算式），折 64 B/槽。
+     */
+    private const val NODE_ENTRY_BYTES = 64L
 
     /** 程序侧分解结果（语句池先于表达式池遍历，共享实例归语句池）。 */
     internal class ProgramPart(
@@ -405,12 +424,37 @@ internal object PoolDecomp {
             )
         }
 
+        // ---- 惰性供给档（M10-MEM / M12-EXPRLAZY；`loadMapped` 的缺省形态）----
+        // 段 2/段 3 的条目只在被取用时解码，装载后**不整池常驻**。这里必须读缓存水位，
+        // 绝不能 `for (i in 0 until statementCount) p.statement(i)` / `p.expr(i)` ——
+        // 那会把 194 万条语句与 35.8 万个表达式根全部解码回堆、再把它们计进「已归属」，
+        // 读数比 S3 高出一整个池（2026-11-18 实测：语句 +309.7 MiB、表达式 +66.5 MiB，
+        // 于是残差 -315.9 MiB，触发「残差为大负数」）。eager 档（CodeBuilder /
+        // `loadMappedEager` / `poolDecompTest` 的合成 Program）行为逐字不变。
+        val lazyStmts = p.holdsLazyStatementPool
+        // 表达式池的惰性接缝只挂在 ConstantPool 上（`Program` 只暴露「任一池惰性」），
+        // 两池分档读池内字段；`field` 已在文件内用于取池句柄。
+        val lazyExprs = field(poolObj, "lazyExprs") != null
+        val cacheCensus = if (lazyStmts || lazyExprs) p.codeCacheCensus else null
+
         // ---- ② 语句池（先于表达式池，共享 Expr 归此处）----
         val stmts = field(poolObj, "statements") as? List<*>
         var stmtOwn = 0L
         var stmtSub = 0L
         var stmtArgObjects = 0L
-        if (stmts != null) {
+        if (lazyStmts) {
+            val blocks = cacheCensus?.stmtBlocks ?: 0
+            val pins = cacheCensus?.stmtPins ?: 0
+            val evictions = cacheCensus?.stmtEvictions ?: 0
+            val entries = blocks * CACHE_BLOCK_ENTRIES
+            rows += CensusRow(
+                G_STMT, "语句池条目缓存（惰性供给，块级 LRU 上界）",
+                "${p.statementCount} 条声明 / 缓存上界 $entries 条（$blocks 块，钉住 $pins）",
+                entries * SINGLE_STMT_RESIDENT_BYTES,
+                "段 3 按需解码 + `RUNTIME_STMT_ENTRY_BUDGET` 块级 LRU（`ErbcStream.kt:279`）；" +
+                    "上界 = 块容量 × 单条 277 B，实际填充 ≤ 块容量；累计逐出 $evictions 块（逐出不代表常驻）",
+            )
+        } else if (stmts != null) {
             w.markVisited(stmts)
             rows += CensusRow(
                 G_STMT, "statements 池 ArrayList + 背衬", "${stmts.size} 条",
@@ -442,7 +486,14 @@ internal object PoolDecomp {
         var exprBytes = 0L
         var exprShared = 0
         var exprObjects = 0L
-        if (exprs != null) {
+        if (lazyExprs) {
+            rows += CensusRow(
+                G_EXPR, "表达式池（惰性供给，未整池物化）",
+                "${p.exprCount} 根声明", 0L,
+                "段 2 按需解码；物化出来的节点全部落在下面「惰性池节点块」这一行，" +
+                    "整池遍历本身会把它们全部解码（实测虚增 66.5 MiB）",
+            )
+        } else if (exprs != null) {
             w.markVisited(exprs)
             exprBytes += w.listOwnBytes(exprs)
             for (i in 0 until p.exprCount) {
@@ -458,6 +509,18 @@ internal object PoolDecomp {
             rows += CensusRow(
                 G_EXPR, "exprs 根 + 子树（独占）", "${p.exprCount} 根 / $exprObjects 对象", exprBytes,
                 "结构去重后的表达式池；$exprShared 个根与语句 args 是同一实例（已在上一桶计）",
+            )
+        }
+
+        // ---- 惰性档的结点 arena（段 2 表达式 + 段 3 语句共用，census 只给合计）----
+        if (lazyStmts || lazyExprs) {
+            val nodeBlocks = cacheCensus?.nodeBlocks ?: 0
+            rows += CensusRow(
+                G_EXPR, "惰性池节点块（段2/段3 共用 arena）",
+                "$nodeBlocks 块 × $CACHE_BLOCK_ENTRIES 槽",
+                nodeBlocks * CACHE_BLOCK_ENTRIES * NODE_ENTRY_BYTES,
+                "结点缓存上界 `RUNTIME_NODE_ENTRY_BUDGET = 1 shl 19` 条 ≈ 32 MiB" +
+                    "（`ErbcStream.kt:240`）；按块容量折算是**上界**（实际填充 ≤ 块容量）",
             )
         }
 

@@ -6,6 +6,7 @@ import com.eratw.port.core.config.ConfigChainSource
 import com.eratw.port.core.config.ConfigDebugLoad
 import com.eratw.port.core.config.ConfigStore
 import com.eratw.port.core.err.CodeEE
+import com.eratw.port.core.err.clampWarnings
 import com.eratw.port.core.expr.EvalContext
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.OperandType
@@ -21,6 +22,7 @@ import com.eratw.port.core.host.LineBufferConsoleSink
 import com.eratw.port.core.host.RuntimeAux
 import com.eratw.port.core.host.SPRITE_SLOT
 import com.eratw.port.core.host.SpritePool
+import com.eratw.port.core.lexer.LangKey
 import com.eratw.port.core.lexer.lexerMacroNamesOf
 import com.eratw.port.core.lexer.lexerMacrosOf
 import com.eratw.port.core.sql.SqlDriver
@@ -877,20 +879,28 @@ class BuiltinMethod(
         }
     }
 
-    /** 调用路径上的个数检查。spec: FunctionMethod.cs:174-293（CheckArgumentTypeEx 的个数/省略位分支） */
+    /**
+     * 调用路径上的个数检查。四支文案 = arity 文案族四枚键（键与触发支的官方行号见
+     * `specs/error-texts.yaml` 第十二节；移植侧此前只有前两支走原文，后两支是自造串）。
+     * spec: FunctionMethod.cs:174-293（CheckArgumentTypeEx 的个数/省略位分支，
+     * 上界 `:279` TooManyFuncArgs、下界 `:283` NotEnoughArgs）与
+     * `:289-318`（非 Ex 的定长形参表分支：`:314` ArgsCountNotMatches、
+     * `:316` ArgsNotNeeded —— 形参表长度为 0 时官方用的是另一枚独立键，不与「个数不匹配」合并）。
+     */
     fun checkArity(args: Int) {
         if (omitStart >= 0) {
             // 有省略位：个数下界 = OmitStart，上界 = 槽位数（spec: FunctionMethod.cs:182-283）
-            if (maxArgs >= 0 && args > maxArgs) throw CodeEE("${name}函数: 参数过多")
-            if (args < omitStart) throw CodeEE("${name}函数: 至少需要${omitStart}个参数")
+            if (maxArgs >= 0 && args > maxArgs) throw CodeEE.keyed(LangKey.TooManyFuncArgs, name)
+            if (args < omitStart) throw CodeEE.keyed(LangKey.NotEnoughArgs, name, omitStart)
             return
         }
         if (maxArgs >= 0) {
             if (args !in minArgs..maxArgs) {
-                throw CodeEE("函数 $name 的参数个数不匹配（需要 $minArgs 个）：实际 $args 个")
+                if (minArgs == 0 && maxArgs == 0) throw CodeEE.keyed(LangKey.ArgsNotNeeded, name)
+                throw CodeEE.keyed(LangKey.ArgsCountNotMatches, name, minArgs, args)
             }
         } else if (args < minArgs) {
-            throw CodeEE("函数 $name 的参数个数不足（至少 $minArgs 个）：实际 $args 个")
+            throw CodeEE.keyed(LangKey.NotEnoughArgs, name, minArgs)
         }
     }
 }
@@ -1169,6 +1179,17 @@ open class BuiltinEvalContext(
         get() = surface?.builtinNames() ?: Builtins.registry.names()
 
     override fun printSystemLine(message: String) = base.printSystemLine(message)
+
+    /**
+     * 4.981 `SafeArithmetic` 的 `PrintWarning`（`SafeArithmetic.cs:7-65`，2026-11-20 溢出族）：
+     * 上屏照走 [printSystemLine]，同时落 `ClampWarnings.overflow` 桶 —— 表达式池通道
+     * （`_EVAL_INT` / 语句层 `x = a + b`）的溢出因此和变量层（`++`/`+=`）一样能在错误
+     * 报告里查到，而不再只是控制台一闪而过。
+     */
+    override fun reportArithmeticOverflow(message: String) {
+        store.aux.clampWarnings().overflow(message)
+        printSystemLine(message)
+    }
 
     /**
      * 用户函数名大写记忆（PERF 2026-10-26）。

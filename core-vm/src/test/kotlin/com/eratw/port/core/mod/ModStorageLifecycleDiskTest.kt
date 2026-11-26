@@ -64,6 +64,7 @@ class ModStorageLifecycleDiskTest {
         override fun syncFromCharaSlot(entityId: Long) = Unit
         override fun onCharacterRowsPermuted(oldToNewIndexMap: IntArray) = Unit
         override fun onCharacterRowDeleted(deletedIndex: Int) = Unit
+        override fun onWorldReset() = Unit
     }
 
     /** 存储容器持有者：adopt 回调把恢复出的新容器接进来（读档后 current 换新实例）。 */

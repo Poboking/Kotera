@@ -200,7 +200,7 @@ object ErbcReader {
                 0,
                 "操作码 $op 越出 0..${ErbcFormat.OPCODE_MAX}" +
                     "（VM 内部 0..28 / isa 语句 29..197 / 编译器扩展 198..201 / 栈码 202..243 /" +
-                    " 浮点返回 244 / 运行期字符串调用 245 / 条件融合 246 / 循环条件融合 247..248）：字节码损坏",
+                    " 浮点返回 244 / 运行期字符串调用 245 / 条件融合 246 / 循环条件融合 247..248 / 浮点实参 249）：字节码损坏",
             )
         }
         return op in ErbcFormat.MARKER_OPCODE_MIN..ErbcFormat.MARKER_OPCODE_MAX
@@ -703,7 +703,7 @@ object ErbcReader {
                     Opcode._SET_INT -> requirePool(op, b, program.constantCount, pc, "常量池")
                     Opcode._SET_STR -> requirePool(op, b, program.stringCount, pc, "字符串池")
                     Opcode._PRINT_LITERAL -> requirePool(op, a, program.stringCount, pc, "字符串池")
-                    Opcode._EVAL_INT, Opcode._EVAL_STR, Opcode._EVAL_INT_JZ -> {
+                    Opcode._EVAL_INT, Opcode._EVAL_STR, Opcode._EVAL_INT_JZ, Opcode._EVAL_FLOAT -> {
                         if (!hasExpr) {
                             throw ErbcDecodeException(
                                 0,
@@ -885,6 +885,7 @@ private fun readCallArgs(
                     isStr = (flags and ErbcFormat.CallArgFlags.IS_STR) != 0,
                     name = name,
                     present = (flags and ErbcFormat.CallArgFlags.PRESENT) != 0,
+                    isFloat = (flags and ErbcFormat.CallArgFlags.IS_FLOAT) != 0,
                 ),
             )
         }

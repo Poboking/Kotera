@@ -114,21 +114,19 @@ class ConsoleBeginHost(
     private val titleMenuString0: String = "最初からはじめる",
     private val titleMenuString1: String = "ロードしてはじめる",
     /**
-     * 指令链收尾那次按键等待（[BeginHost.readAnyKey]）的适用指令集，见
+     * 指令链收尾那次按键等待（[BeginHost.readAnyKey]）总闸，见
      * [BeginHost.shouldWaitAfterCommand]。
      *
-     * **缺省只清掃（[BeginFlow.COM_CLEANING]）且只在被拒时**（`RESULT < 0`）—— 这是产品取舍，
-     * 不是原版口径（原版是「每条指令都等一次」）：
-     * - 保留的理由：清掃被拒时语料只打一行提示就返回，不收尾等待的话那行在手机上会被下个回合
-     *   整帧刷掉（BOARD 2026-11-01「点清扫看着没反应」）。
-     * - 收窄的理由（2026-11-02 玩家反馈「点击移动卡顿」）：移动 = 训练码 400，
-     *   `QOL_COM400` 每走一步就 `RETURN 1` 回训练链（`魔改内容/qol/qol_MAP.ERB:59-66`），
-     *   于是收尾等待落在**每一次移动之后**；地图还在屏上，玩家下一次点目的地会被这次等待吃掉
-     *   ⇒ 观感就是「点了没反应」。其余指令同理，一律不给额外点击。
+     * 缺省 **true = 原版口径**：「每条返回非 0 的指令，回指令菜单前都等一次回车」
+     * （`Process.cs:2413-2422` 无条件置位、`:2449-2455` 消费）。玩家侧要的就是这一下 ——
+     * 指令打出的口上停在屏上，点一下才继续，而不是被下一次整帧重绘直接刷掉。
      *
-     * 传 null = 恢复原版「每条指令都等一次」；传空集 = 永不等。
+     * false = 移植侧旧的产品取舍（2026-11-02「点击移动卡顿」）：移动 = 训练码 400，
+     * `QOL_COM400` 每走一步就 `RETURN 1` 回训练链（`魔改内容/qol/qol_MAP.ERB:59-66`），
+     * 原地图恒在屏上，收尾等待会让下一次点目的地被吃掉。该行为现在由设置项
+     * 「指令后等一次按键」（缺省开）逐会话选择，引擎侧不再二次收窄。
      */
-    private val commandEndWaitComCodes: Set<Int>? = setOf(BeginFlow.COM_CLEANING),
+    private val waitAfterCommand: Boolean = true,
 ) : BeginHost {
 
     /**
@@ -140,13 +138,32 @@ class ConsoleBeginHost(
     override val systemResultIsComAbleIndex: Boolean get() = false
 
     /**
-     * 收尾等待只给「被语料拒掉」的那几条指令（[commandEndWaitComCodes] 且 `RESULT < 0`）：
-     * 成功的指令（含 移動 每走一步的 `RETURN 1`）不给额外点击。取值理由见构造参数。
+     * 新局收尾通知的后端（`GameHost` 装配期接 mod 运行时；缺省 null = 无 mod / 总闸关）。
+     *
+     * 用可变字段而非构造参数：本类有两处位置参构造点（生产 1 处 + 测试约 20 处），
+     * 加形参会把全部调用点拖下水；而这条通知天然是「装配完 mod 运行时之后才接」的。
      */
-    override fun shouldWaitAfterCommand(comCode: Int, result: Long): Boolean {
-        val codes = commandEndWaitComCodes ?: return true
-        return result < 0L && comCode in codes
+    var onNewGameStartedHook: (() -> Unit)? = null
+
+    /** 读档末尾通知的后端，口径同 [onNewGameStartedHook]。 */
+    var onSaveLoadedHook: (() -> Unit)? = null
+
+    /** 转发新局通知；后端抛错一律吞在本层（BEGIN 状态机在 `pumpUntilTerminal` 里只 catch `CodeEE`）。 */
+    override fun onNewGameStarted() {
+        runCatching { onNewGameStartedHook?.invoke() }
     }
+
+    /** 转发读档通知，隔离口径同 [onNewGameStarted]。 */
+    override fun onSaveLoaded() {
+        runCatching { onSaveLoadedHook?.invoke() }
+    }
+
+    /**
+     * 原版口径的收尾等待：只要 [waitAfterCommand] 开着就等，不看指令码也不看 `RESULT`
+     * （`Process.cs:2403-2410` 只把 `RESULT == 0` 摘出去，`:2417` 置位无条件）。
+     * 关掉 = 整条链都不等（设置项口径），取值理由见构造参数。
+     */
+    override fun shouldWaitAfterCommand(comCode: Int, result: Long): Boolean = waitAfterCommand
 
     /**
      * `beginTitle` 的样式复位（`Process.cs:2112 console.ResetStyle()`，调用点

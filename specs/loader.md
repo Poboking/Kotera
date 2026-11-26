@@ -409,7 +409,7 @@ enum class CollatorOption { JA_JP, ORDINAL }
 data class LabelDef(name, key, file, lineNo, fileIndex, defIndex,
                     isEvent, isSystem, isMethod, isOnly, isPri, isLater, isSingle,
                     argCount, localSize, localsSize) {
-    val eventBucket: EventBucket   // ONLY(0)/PRI(1)/NORMAL(2)/LATER(3)
+    val eventBuckets: List<EventBucket>   // 四个平行 if 派生的**集合**：ONLY(0)/PRI(1)/NORMAL(2)/LATER(3)
 }
 data class DuplicateGroup(key, defs) { val winner: LabelDef; val firstLoaded: LabelDef; val isEvent }
 

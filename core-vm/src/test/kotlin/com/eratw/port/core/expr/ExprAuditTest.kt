@@ -459,12 +459,16 @@ class ExprAuditTest {
         val unaryStr = assertFailsWith<ExprEvalException> { parseOrThrow(listOf(op("!"), s("a"))) }
         assertEquals("一元运算符 ! 不能作用于字符串型", unaryStr.message)
 
-        // TODO(verify): 系统行文案同样是硬编码；C# 用 SystemLine.MinusWontWork
-        //   （zhs.xml:1040「对整型最小值({0})进行-操作其值也不对发生变化」，
-        //   OperatorMethodManager.cs:561-564），与这里的「警告：对 -9223372036854775808 取负不生效」不一致。
+        // 4.981（2026-11-20 溢出族改钉）：内层 `0 - MIN` 走 SafeSubtract，溢出告警并饱和成
+        // MIN（a = 0 不 > 0）；外层一元负再走 SafeNegate，告警并饱和成 MAX。1.824 的
+        // SystemLine.MinusWontWork 文案与「回绕成 MIN」都随 1.824 一起退役（EX-2/EX-3 收口）。
         val ctx = TestContext()
-        assertEquals(Long.MIN_VALUE, evalInt(parseOrThrow(listOf(op("-"), lp(), i(0), op("-"), i(Long.MIN_VALUE), rp())), ctx))
-        assertEquals(listOf("警告：对 -9223372036854775808 取负不生效"), ctx.systemLines)
+        val negated = parseOrThrow(listOf(op("-"), lp(), i(0), op("-"), i(Long.MIN_VALUE), rp()))
+        assertEquals(Long.MAX_VALUE, evalInt(negated, ctx))
+        assertEquals(
+            listOf("整数溢出: 0 - -9223372036854775808", "整数溢出: --9223372036854775808"),
+            ctx.systemLines,
+        )
     }
 
     @Test
@@ -605,23 +609,24 @@ class ExprAuditTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `一元负号双求值-副作用随双倍`() {
-        // spec: OperatorMethodManager.cs:559-566 —— MinusInt.GetIntValue 里
-        // arguments[0].GetIntValue(exm) 调了两次（判 MIN_VALUE 一次、取负又一次），
-        // 操作数的副作用（RAND 抽号 / 函数调用）随之双倍，原样复刻。
+    fun `一元负号按 4_981 单次求值且最小值饱和`() {
+        // 4.981 MinusInt（OperatorMethod.cs:753-765）是
+        //   `return SafeArithmetic.SafeNegate(arguments[0].GetIntValue(exm));`
+        // —— 实参只求值**一次**。1.824（OperatorMethodManager.cs:559-566）的「判 MIN 一次、
+        // 取负再一次」已作废（2026-11-20 溢出族按 4.981 改钉，见 OperatorAuditTest 的 EX-3 说明）。
         val ctx = TestContext()
         ctx.funcs["F"] = { Value.IntV(3L) }
         val e = parseOrThrow(listOf(op("-"), lp(), id("F"), lp(), rp(), rp()))
         assertEquals(-3L, evalInt(e, ctx))
-        assertEquals(2, ctx.funcCalls.size, "负号应把操作数求值两次")
+        assertEquals(1, ctx.funcCalls.size, "SafeNegate 的单实参调用 ⇒ 只求值一次")
 
-        // MIN_VALUE 路径：第一次求值触发系统行，第二次取负回绕；函数同样被调两次。
+        // MIN_VALUE：SafeNegate 告警并饱和到 MAX（不再回绕成 MIN），同样只调一次。
         val ctx2 = TestContext()
         ctx2.funcs["G"] = { Value.IntV(Long.MIN_VALUE) }
         val e2 = parseOrThrow(listOf(op("-"), lp(), id("G"), lp(), rp(), rp()))
-        assertEquals(Long.MIN_VALUE, evalInt(e2, ctx2))
-        assertEquals(2, ctx2.funcCalls.size)
-        assertEquals(1, ctx2.systemLines.size)
+        assertEquals(Long.MAX_VALUE, evalInt(e2, ctx2))
+        assertEquals(1, ctx2.funcCalls.size)
+        assertEquals(listOf("整数溢出: --9223372036854775808"), ctx2.systemLines)
     }
 
     @Test

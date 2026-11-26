@@ -16,10 +16,10 @@ import kotlin.test.assertTrue
  * ENGFIX-3 · 官方死循环保护（**墙钟 + 问玩家**）的移植侧真值表。
  *
  * ## oracle（本文件每条断言都对着这两处，行号是复核过的）
- * * skia `unpacked/skia-decompiled/MinorShift.Emuera.GameProc/Process.cs:470-489`
- *   （`checkInfiniteLoop`）与 `:989-992`（采样频率），复位对 `:464-468`
+ * * skia `Emuera/Runtime/Script/Process.cs:481-515`
+ *   （`checkInfiniteLoop`）与采样 `Process.ScriptProc.cs:34-36`，复位对 `:475-479`
  *   （`UpdateCheckInfiniteLoopState`，全工程唯一调用点 `EmueraConsole.cs:849` 的 `Await`）
- *   与 `:415-418`（`DoScript` 入口）；官方同文写法在
+ *   与 `:349-350`（`DoScript` 入口）；官方同文写法在
  *   `reference/emuera-cs/MinorShift.Emuera.GameProc/Process.cs:493-512` 与 `:1012-1014`。
  * * 配置项：skia/官方 `ConfigData.cs:75` 注册缺省 5000 ms（`> 0` 是开关，0 = 完全关闭），
  *   本仓唯一登记处 `core/config/ConfigSpec.kt:132`。
@@ -50,10 +50,10 @@ import kotlin.test.assertTrue
 class InfiniteLoopGuardTest {
 
     private companion object {
-        /** 原版采样频率（`Process.cs:990` 的 `state.lineCount % 10000 == 0`）。 */
+        /** 原版采样频率（`Process.ScriptProc.cs:35`（官方 `Process.cs:1012`）的 `state.lineCount % 10000 == 0`）。 */
         const val CHECK_LINES = 10_000
 
-        /** 本文件统一用的墙钟阈值：1 ms（> 0 即开关打开，口径同 `Process.cs:989`）。 */
+        /** 本文件统一用的墙钟阈值：1 ms（> 0 即开关打开，口径同 `Process.ScriptProc.cs:35`）。 */
         const val ALERT_MS = 1L
 
         /** 段落里真实睡一次，保证该段落的墙钟读数必过 [ALERT_MS]。 */
@@ -161,7 +161,7 @@ class InfiniteLoopGuardTest {
     /**
      * 原版结论 1 的直接锁：**没有告警通道**（缺省实现 = [InfiniteLoopAnswer.NoUi]）时，
      * 重负载跑满 5 个「10000 行 + 墙钟越限」的段落也一次都不中止 ——
-     * skia `Process.cs:478` 的 `view.Enabled == false` 分支连告警都不发。
+     * skia `Process.cs:500-501` 的 `console.Enabled == false` 分支连告警都不发。
      */
     @Test
     fun `没有告警通道的宿主跑满重负载也不中止`() {
@@ -189,7 +189,7 @@ class InfiniteLoopGuardTest {
         assertTrue(vm.executedSteps > 5L * CHECK_LINES, "正常返回：executedSteps=${vm.executedSteps}")
     }
 
-    /** 阈值 0 = 整条保护关闭（`Process.cs:989` 的 `Config.InfiniteLoopAlertTime > 0` 开关位）。 */
+    /** 阈值 0 = 整条保护关闭（`Process.ScriptProc.cs:35`、官方 `Process.cs:1012` 的 `Config.InfiniteLoopAlertTime > 0` 开关位）。 */
     @Test
     fun `阈值 0 时完全关闭：一次都不问`() {
         val program = markerLoop(3 * CHECK_LINES)
@@ -246,7 +246,7 @@ class InfiniteLoopGuardTest {
      * 2026-11-10 调整：答「继续」后生效阈值**翻倍**（180→360→720…，见
      * `escalatedLoopAlertMs` 的取舍），所以段落睡多久必须压得住翻倍后的阈值 ——
      * 这里用 40 ms，覆盖五段里最大的一档（1→2→4→8→16 ms）且留足机器抖动余量。
-     * 本用例要钉的东西没变：**行数与计时成对归零**（`Process.cs:486-487`），
+     * 本用例要钉的东西没变：**行数与计时成对归零**（skia `:512-513`、1.824 `:509-510`），
      * 只是不再兼任「阈值不翻倍」这件事（那是 `InfiniteLoopWallClockTest` 的判据）。
      */
     @Test
@@ -262,7 +262,7 @@ class InfiniteLoopGuardTest {
             assertEquals(
                 CHECK_LINES.toLong(),
                 alert.linesExecuted,
-                "第 ${i + 1} 次的行数必须从 0 重算（skia Process.cs:486-487 的成对归零），" +
+                "第 ${i + 1} 次的行数必须从 0 重算（skia Process.cs:512-513 的成对归零），" +
                     "实际 ${alert.linesExecuted}",
             )
             assertTrue(
@@ -276,7 +276,7 @@ class InfiniteLoopGuardTest {
 
     /**
      * skia 与「只归零继续」的差别锁在这里：`view.Enabled == false` 那条分支
-     * **一个字段都不改**（`Process.cs:478` 的 if 块整体跳过），所以行数继续累加、
+     * **一个字段都不改**（skia `Process.cs:500-501` 的 if 块整体跳过），所以行数继续累加、
      * 下一问落在 20000 行而不是再一个 10000 行。
      */
     @Test
@@ -320,7 +320,7 @@ class InfiniteLoopGuardTest {
             InfiniteLoopTexts.EXIT_ZHS,
             e.message,
             "玩家退出路径的 message 必须是官方 Lang.Error.SelectExitInfiniteLoopMB 原文，" +
-                "一个字都不许加（skia Process.cs:484）",
+                "一个字都不许加（skia Process.cs:508）",
         )
         assertNotNull(e.alert, "现场随异常带回：宿主事后要能说出为什么问、答了什么")
         assertEquals(CHECK_LINES.toLong(), e.alert!!.linesExecuted)
@@ -357,7 +357,7 @@ class InfiniteLoopGuardTest {
     // 4. 告警现场的三件来源
     // ------------------------------------------------------------------
 
-    /** 正文第 0 位是**源文件名**（原版 `currentLine.Position.Value.Filename`，`Process.cs:481`）。 */
+    /** 正文第 0 位是**源文件名**（原版 `currentLine.Position.Value.Filename`，`Process.cs:503`）。 */
     @Test
     fun `宿主给得出源文件名时现场用它`() {
         val host = AlertHost(answer = InfiniteLoopAnswer.Continue, sourceName = "test/loop.erb")
@@ -414,8 +414,8 @@ class InfiniteLoopGuardTest {
 
     /**
      * 让出边界（输入等待返回 / `AWAIT` 逐帧让出）之后，行数与墙钟**成对归零**：
-     * ≙ skia `Process.cs:464-468` 的 `UpdateCheckInfiniteLoopState()`
-     * （`EmueraConsole.cs:849` 的 `Await` 里调）与 `:415-418` 的 `DoScript` 入口。
+     * ≙ skia `Process.cs:475-479` 的 `UpdateCheckInfiniteLoopState()`
+     * （`EmueraConsole.cs:849` 的 `Await` 里调）与 `:349-350` 的 `DoScript` 入口。
      * 于是「每次只跑几千行、总共跑几万次」的正常游戏节奏一次都不会被告警。
      */
     @Test

@@ -2,6 +2,7 @@ package com.eratw.port.erbcc.compile
 
 import com.eratw.port.core.expr.FuncCall
 import com.eratw.port.core.fn.Builtins
+import com.eratw.port.core.lexer.LangKey
 import com.eratw.port.core.stmt.MethodArgument
 import com.eratw.port.core.stmt.MethodStmt
 import com.eratw.port.core.stmt.Statement
@@ -60,7 +61,10 @@ internal fun pairedArgLoadWarning(
     return LoadWarning(
         file,
         stmt.line + 1,
-        "函数 $name 的「列名, 值」参数个数不成对（装载期：实参 $n 个，" +
-            "需要 ${spec.fixedPrefix}+${spec.groupSize}n 或数组形态 ${spec.exactFormArgs} 个）",
+        // 基串 = 官方 arity 键 `ArgsNotFitExpr`（实参表与 `FunctionMethod.cs:191` 同序：
+        // 函数名 / 传入个数 / 组起点 / 组长）。数组形态是移植侧的第二条合法签名，
+        // 官方无对应物 ⇒ 只作取证后缀留在括号里，不进基串。
+        LangKey.ArgsNotFitExpr.renderZhs(name, n, spec.fixedPrefix, spec.groupSize) +
+            "（装载期：数组形态另可给 ${spec.exactFormArgs} 个）",
     )
 }

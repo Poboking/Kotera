@@ -186,11 +186,14 @@ class SpriteAnimeFrameMethodTest {
         val h = FrameHarness()
         val tooFew = assertFailsWith<CodeEE> { h.call("SPRITEANIMEFRAME") }
         assertTrue(
-            tooFew.message!!.contains("参数个数不匹配"),
-            "既有文案（BuiltinMethod.checkArity）：${tooFew.message}",
+            tooFew.message!!.contains("SPRITEANIMEFRAME函数: 需要1个参数，但传入了0个"),
+            "官方定长形参表分支 ArgsCountNotMatches（BuiltinMethod.checkArity）：${tooFew.message}",
         )
         val tooMany = assertFailsWith<CodeEE> { h.call("SPRITEANIMEFRAME", "A", "B") }
-        assertTrue(tooMany.message!!.contains("参数个数不匹配"), "实际：${tooMany.message}")
+        assertTrue(
+            tooMany.message!!.contains("SPRITEANIMEFRAME函数: 需要1个参数，但传入了2个"),
+            "实际：${tooMany.message}",
+        )
         // 类型错：偏函数家族的口径（fn/HtmlMethods.kt 同句式），不做隐式转串
         val wrongType = assertFailsWith<CodeEE> { h.call("SPRITEANIMEFRAME", 3) }
         assertTrue(

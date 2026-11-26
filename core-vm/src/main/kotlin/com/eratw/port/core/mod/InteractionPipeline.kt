@@ -68,6 +68,13 @@ class InteractionPipeline private constructor(
     fun current(): InteractionContext? = stack.lastOrNull()
 
     /**
+     * 会话级单次耗时预算（§18.5 阈值诊断）：装配侧装上后，每次作者处理器调用按
+     * interactionId 计时，越 [ModHandlerBudget.thresholdNanos] 记一条 INTERACTION 诊断并计数；
+     * 不中断、不改返回值。为 null（缺省）时零开销直调 —— 与既有调用逐位不变。
+     */
+    internal var handlerBudget: ModHandlerBudget? = null
+
+    /**
      * 订阅一个交互阶段钩子（须在 Manifest 声明过该阶段）。同一包同阶段可注册多个，
      * 按注册序执行。
      *
@@ -91,6 +98,22 @@ class InteractionPipeline private constructor(
             }
         }
     }
+
+    /** 诊断只读：本包在全部交互阶段的处理器数（遍历累加，不构造快照；未知包 0）。 */
+    internal fun handlerCountOf(packageId: String): Int {
+        var count = 0
+        for ((key, list) in handlers) {
+            if (key.packageId == packageId) count += list.size
+        }
+        return count
+    }
+
+    /**
+     * 只读查询：是否存在任何已注册处理器（ModDX-4 M4：宿主回合级触发据此零成本旁路——
+     * 无注册 = 不建上下文、不跑管线、零日志）。注册与声明一一对应（[registerHook]
+     * 对未声明阶段强拒），故本查询亦等价「无 mod 声明并注册 interaction hook」。
+     */
+    fun hasRegisteredHandlers(): Boolean = handlers.isNotEmpty()
 
     /**
      * 运行一次多目标互动。[main] 是主流程；返回最终结果与失败包列表。
@@ -163,7 +186,7 @@ class InteractionPipeline private constructor(
         packageId: String,
         failures: MutableList<String>,
     ): InteractionResult = try {
-        val result = handler.onInteraction(context)
+        val result = invokeMeasured(handler, context, packageId)
         when (result) {
             InteractionResult.CONTINUE ->
                 recordInteraction(context, packageId, DiagnosticOutcome.OK, "OK")
@@ -180,6 +203,27 @@ class InteractionPipeline private constructor(
         failures += packageId
         recordInteraction(context, packageId, DiagnosticOutcome.FAILED, "HANDLER_THREW", t)
         InteractionResult.CONTINUE
+    }
+
+    /**
+     * 调一次作者处理器：装了单次耗时预算才计时（key = interactionId），否则零开销直调。
+     *
+     * 不吞异常：处理器抛出的异常照原样穿出（外层 [invoke] 的既有失败隔离接住），
+     * 耗时在预算的 finally 里照记。
+     */
+    private fun invokeMeasured(
+        handler: InteractionHandler,
+        context: InteractionHookContext,
+        packageId: String,
+    ): InteractionResult {
+        val budget = handlerBudget
+        return if (budget == null) {
+            handler.onInteraction(context)
+        } else {
+            budget.run(packageId, DiagnosticDomain.INTERACTION, context.interaction.interactionId) {
+                handler.onInteraction(context)
+            }
+        }
     }
 
     /** 写一条 INTERACTION 诊断；null diagnostics 直接旁路。 */

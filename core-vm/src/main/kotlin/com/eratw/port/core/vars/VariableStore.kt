@@ -4,6 +4,7 @@ import com.eratw.port.core.compat.RelationMasternamePolicy
 import com.eratw.port.core.entity.ICharaSlotProjector
 import com.eratw.port.core.entity.VirtualCharaIndexResolver
 import com.eratw.port.core.err.RAND_TOKEN_CLAMP_KIND
+import com.eratw.port.core.err.SafeArithmetic
 import com.eratw.port.core.err.clampWarnings
 import com.eratw.port.core.err.randTokenClampMessage
 import com.eratw.port.core.expr.OperandType
@@ -53,6 +54,20 @@ private const val LOCAL_SLOT_INITIAL = 4
  * 于是**跨函数调用恒命中**。
  */
 private val SCOPE_ANY: Any = Any()
+
+/**
+ * 稀疏 1 维覆盖层（[VariableStore.readSparseIntOor] 一族）的条数上限。
+ *
+ * PC 端的 `SparseArray` 字典没有上限，但那是桌面 PC 的 C# 实现；本引擎跑在手机上，
+ * 一条脚本 bug（`ITEM:RANDOM(...)` 一类）往越界下标写几百万格会把 HashMap 撑成 OOM
+ * —— 那正好是上报端点里「堆贴顶」那一簇。正常语料不会走到这条分支（见
+ * [VariableStore] 稀疏段的 KDoc），真的写到 6.5 万格说明是脚本侧 runaway，
+ * 此时**丢弃新写入**比撑爆堆更接近可玩。
+ *
+ * TODO(verify)：原版保存档是否会把 SparseArray 里越界的键落盘（`EraBinaryDataWriter`
+ * 只按逻辑长度写 1D 数组，本实现据此判定「覆盖层不参与存档」，需真机存读档反证）。
+ */
+private const val SPARSE_OVERFLOW_LIMIT = 1 shl 16
 
 /**
  * 内建浮点标量列（fork-src `dataFloat`）的槽数。
@@ -158,6 +173,35 @@ class VariableStore(
      */
     fun unbindCharaIndexResolver(resolver: VirtualCharaIndexResolver) {
         if (charaIndexResolver === resolver) charaIndexResolver = null
+    }
+
+    /**
+     * [withCharacterReplacement] 的作用域深度（配对计数，可重入）。
+     * 0 = 缺省 = 整表清空按**世界重置**语义回收投射身份面（见 [deleteAllCharacters]）。
+     */
+    private var characterReplacementDepth: Int = 0
+
+    /**
+     * 整表替换作用域：期间 [deleteAllCharacters] **不**回收投射身份面。
+     *
+     * 目前唯一生产用法 = [com.eratw.port.core.save.FileSystemOps.loadData] 包住
+     * `SaveData.applyTo`（读档前清空，core/data/save/SaveData.kt:325）：读档是「同一世界
+     * 的存档替换」，角色表被 .sav 重建，但虚拟 NO / 关系身份归 .rt2 侧车在同一个读档流程
+     * 里并入（[com.eratw.port.core.save.SaveService.restoreBundle]），在这里回收会把刚并入
+     * 的身份表清掉。
+     *
+     * 用作用域而不是给 [deleteAllCharacters] 加形参：整表清空发生在 `SaveData.applyTo`
+     * 内部（不在本层，形参传不进去），而调用方语义必须在读档入口**一处**声明清楚。
+     * 作用域外（纯单测 / 旧宿主 / 脚本指令）调用仍是世界重置语义，行为不变。
+     * 可重入（配对计数），异常路径经 finally 恢复深度。
+     */
+    internal fun <T> withCharacterReplacement(block: () -> T): T {
+        characterReplacementDepth++
+        try {
+            return block()
+        } finally {
+            characterReplacementDepth--
+        }
     }
 
     /**
@@ -702,6 +746,14 @@ class VariableStore(
     var debugFunction: String = ""
     var debugLine: Long = -1
 
+    /**
+     * 4.981 稀疏 1 维背板的越界覆盖层（见 [readSparseIntOor] 一族）。
+     *
+     * 声明位置必须在 [init] 的 `resetValues()` 之前：构造函数里就会清一次。
+     */
+    private val sparseIntOverflow = HashMap<SparseKey, Long>()
+    private val sparseStrOverflow = HashMap<SparseKey, String>()
+
     init {
         resetValues()
     }
@@ -1143,13 +1195,30 @@ class VariableStore(
         }
     }
 
-    /** `++`/`--` 的**唯一**函数体（按名入口与 [plusIntH] 共用）。 */
+    /**
+     * `++`/`--`/`+=` 的**唯一**函数体（按名入口与 [plusIntH] 共用）。
+     *
+     * ## 4.981 溢出语义（2026-11-20 溢出族）
+     *
+     * `PlusValue` 在 4.981 全部改走 `SafeArithmetic.SafeAdd`（`VariableToken.cs:752`
+     * 的 1 维数组、`:818` 的 2 维、`:888` 的 3 维、`:1062` 的角色标量等），越界时
+     * `PrintWarning("整数溢出: {旧值} + {增量}")` 并**返回饱和值**（`SafeArithmetic.cs:7-20`）。
+     *
+     * `OperatorMethod.cs:807-817`（前置 `++`）/:830-840（前置 `--`）/:853-863（后置 `++`）
+     * /:877-887（后置 `--`）那圈 `catch (OverflowException)` **不可达**：`PlusValue` 内部
+     * 的 SafeAdd 已经把溢出吞成饱和值，不会再抛。所以上屏的文案是 SafeAdd 那一句
+     * （`整数溢出: X + 1`），不是 catch 里的 `整数溢出: ++操作` —— 移植侧照此实现，
+     * 既不漏告警也不重复打第二条。
+     *
+     * 后置形态的旧值 = 饱和后的新值 ∓ 1（MAX-1 / MIN+1，都在域内），与 4.981 catch 分支
+     * 的返回值同值，见 `Expr.UnaryAfter` 的 KDoc。
+     */
     private fun plusIntEntry(e: Any, name: String, indices: LongArray, delta: Long): Long {
         if (e is UserVar) {
             val slot = checkAndSlot(e, indices)
             val charPos = (slot ushr 32).toInt()
             val elem = slot.toInt()
-            val nv = e.readInt(charPos, elem) + delta
+            val nv = SafeArithmetic.add(e.readInt(charPos, elem), delta) { warnArithmeticOverflow(it) }
             e.writeInt(charPos, elem, nv)
             return nv
         }
@@ -1159,8 +1228,144 @@ class VariableStore(
         }
         if (!def.isWritable) throw CodeEE("变量 ${def.name} 是常量，不能赋值")
         val cur = readIntEntry(e, indices)
-        writeIntEntry(e, name, indices, cur + delta)
-        return cur + delta
+        val nv = SafeArithmetic.add(cur, delta) { warnArithmeticOverflow(it) }
+        writeIntEntry(e, name, indices, nv)
+        return nv
+    }
+
+    /**
+     * 整数溢出的唯一告警出口：4.981 是 `Console.PrintWarning`（**每次都打、不去重**），
+     * 移植侧照上屏并落 `ClampWarnings` 的 overflow 桶（错误报告 / 定向单读取证）。
+     *
+     * 上屏走 [systemLineSink]（生产由 `ProcessRuntime` 接到
+     * `evalContext.printSystemLine`）；直接改 `ClampWarnings` 而不上屏会让玩家看不见，
+     * 只上屏而不留痕则崩溃报告里查不到 —— 两件都要。
+     */
+    private fun warnArithmeticOverflow(message: String) {
+        val text = aux.clampWarnings().overflow(message)
+        systemLineSink?.invoke(text)
+    }
+
+    // ==================================================================
+    // 4.981 稀疏 1 维背板（VariableReader.readSparseIntOor 一族）
+    //
+    // 4.981 fork 把**只有 1 维**的内置数组换成字典背板：全局 `SparseArray<long>[]`
+    // （VariableData.cs:44；1D 字符串同理）与角色 1 维（CharacterData.cs:25）都是，
+    // 其下标器对任意 long 取键——缺席读返回默认值、写直接落字典（SparseArray.cs:25-40）
+    // ⇒ **运行期下标越界不再报错**。解析期常量下标仍由 VariableTerm.Restructure →
+    // VariableToken.CheckBounds 拦下（VariableTerm.cs:316-347），那条路继续走上面的严格
+    // 函数体（readIntEntry 一族），本段只负责「越界那半场」。
+    //
+    // 入口只有一处：`VarRef` 先走严格通道，严格通道抛 CodeEE 且最后一位下标是运行期值
+    // 时才转来这里（见 VarRef.lastIndexIsDynamic）。公共 API（readInt / writeInt /
+    // plusInt）保持严格：既有单测钉的就是严格口径（VariablePoolTest 的 `DAY:-1` 必抛）。
+    //
+    // 覆盖层（overflow）是「写后读回」的必然后果：PC 实测 `ITEM:X = 7`（X = -1）之后
+    // `{ITEM:X}` 读回 7、`ITEM:X += 5` 读回 5、`STR:X = "ab"` 读回 "ab"，落 no-op 会产生
+    // 可观察差异。还真空语义：写**默认值**（0 / ""）等价于删键，与 SparseArray 的 setter 一致。
+    // ==================================================================
+
+    /** 覆盖层键：数组序号 + 角色行（非角色变量恒 0）+ 元素下标。 */
+    private data class SparseKey(val array: Int, val pos: Int, val elem: Long)
+
+    /**
+     * 稀疏维度长度；-1 = 稠密。
+     *
+     * 只认「恰好 1 维」的内置 int/str 变量（全局或角色）：这与 4.981 里
+     * `SparseArray<long>[]` / `SparseArray<string>[]` 的覆盖面一一对应。2D/3D 仍是
+     * `long[][,]` 稠密数组（VariableData.cs:47,50）、CSV 常量表是稠密表、用户 `#DIM`
+     * 在 fork 里也没换成字典背板 ⇒ 一律 -1（越界照旧抛，PC 同样）。
+     */
+    private fun sparseDimLength(def: VarDef): Int {
+        if (def.dims.size != 1) return -1
+        return when (def.storage) {
+            Storage.G_INT1, Storage.G_STR1, Storage.C_INT1, Storage.C_STR1 -> def.dims[0]
+            else -> -1
+        }
+    }
+
+    /** 稠密部分的前置校验（IsForbid、下标个数）；判定顺序与文案逐字对齐 [checkFlat] 前两段。 */
+    private fun requireSparseShape(def: VarDef, indices: LongArray) {
+        if (def.isForbid) throw CodeEE("变量 ${def.name} 的尺寸为 0（IsForbid），不可使用")
+        if (indices.size != def.argCount) {
+            throw CodeEE("变量 ${def.name} 需要 ${def.argCount} 个下标（实际 ${indices.size}）")
+        }
+    }
+
+    /** 角色行校验（越界抛 OoRCharaVarArg、B5 半死闸），返回合法行号。 */
+    private fun requireSparseCharaRow(def: VarDef, pos: Long): Int {
+        if (pos < 0 || pos >= characters.count) throw oorCharaVarArg(def.name, 1, pos)
+        characters.requireSystemRowAlive(pos.toInt())
+        return pos.toInt()
+    }
+
+    /**
+     * 越界访问的前置校验 + 覆盖层键。
+     *
+     * 只校验**稠密**部分：IsForbid、下标个数、角色行（含 B5 半死闸）—— 稀疏维度本身恰好
+     * 因为「越界」才走到这里，不再判界。判定顺序与文案逐字对齐 [checkFlat] 的前两段。
+     */
+    private fun sparseKeyOf(def: VarDef, indices: LongArray): SparseKey {
+        requireSparseShape(def, indices)
+        if (!def.isCharacterData) return SparseKey(def.index, 0, indices[0])
+        return SparseKey(def.index, requireSparseCharaRow(def, resolveCharaPos(indices[0])), indices[1])
+    }
+
+    override fun readSparseIntOor(name: String, indices: LongArray): Long {
+        val e = resolveEntry(name) ?: throw CodeEE("未定义的变量 $name")
+        val def = e as? VarDef
+        if (def == null || sparseDimLength(def) < 0) return readIntEntry(e, indices)
+        if (def.type != VarType.INT) throw wrongTypeError(def, "当整数读取")
+        return sparseIntOverflow[sparseKeyOf(def, indices)] ?: 0L
+    }
+
+    override fun readSparseStrOor(name: String, indices: LongArray): String {
+        val e = resolveEntry(name) ?: throw CodeEE("未定义的变量 $name")
+        val def = e as? VarDef
+        if (def == null || sparseDimLength(def) < 0) return readStrEntry(e, indices)
+        if (def.type != VarType.STR) throw wrongTypeError(def, "当字符串读取")
+        return sparseStrOverflow[sparseKeyOf(def, indices)] ?: ""
+    }
+
+    override fun writeSparseIntOor(name: String, indices: LongArray, value: Long) {
+        val e = resolveEntry(name) ?: throw CodeEE("未定义的变量 $name")
+        val def = e as? VarDef
+        if (def == null || sparseDimLength(def) < 0) return writeIntEntry(e, name, indices, value)
+        // DBG4 P3 观察口：与 writeIntEntry 同位置（校验前、miss 短路），断点行为一致。
+        val probe = writeProbe
+        if (probe != null && probe.watches(name)) runCatching { probe.onWriteInt(name, indices, value) }
+        if (def.type != VarType.INT) throw wrongTypeError(def, "写入整数")
+        if (!def.isWritable) throw CodeEE("变量 ${def.name} 是常量，不能赋值")
+        val key = sparseKeyOf(def, indices)
+        if (value == 0L) {
+            sparseIntOverflow.remove(key)
+        } else if (sparseIntOverflow.size < SPARSE_OVERFLOW_LIMIT) {
+            sparseIntOverflow[key] = value
+        }
+    }
+
+    override fun writeSparseStrOor(name: String, indices: LongArray, value: String) {
+        val e = resolveEntry(name) ?: throw CodeEE("未定义的变量 $name")
+        val def = e as? VarDef
+        if (def == null || sparseDimLength(def) < 0) return writeStrEntry(e, name, indices, value)
+        val probe = writeProbe
+        if (probe != null && probe.watches(name)) runCatching { probe.onWriteStr(name, indices, value) }
+        if (def.type != VarType.STR) throw wrongTypeError(def, "写入字符串")
+        if (!def.isWritable) throw CodeEE("变量 ${def.name} 是常量，不能赋值")
+        val key = sparseKeyOf(def, indices)
+        if (value.isEmpty()) {
+            sparseStrOverflow.remove(key)
+        } else if (sparseStrOverflow.size < SPARSE_OVERFLOW_LIMIT) {
+            sparseStrOverflow[key] = value
+        }
+    }
+
+    override fun plusSparseIntOor(name: String, indices: LongArray, delta: Long): Long {
+        // 稀疏背板同样走 SafeAdd（4.981 的 SparseArray 写回也经由 PlusValue →
+        // VariableToken.cs:752 的钳制）：`ITEM:-1 += 5` 这类形态不得在溢出时回绕。
+        val nv = SafeArithmetic.add(readSparseIntOor(name, indices), delta) { warnArithmeticOverflow(it) }
+        writeSparseIntOor(name, indices, nv)
+        return nv
     }
 
     override fun keywordToInteger(varName: String, dim: Int, keyword: String): Long {
@@ -2301,11 +2506,26 @@ class VariableStore(
     }
 
     /**
-     * DELCHARA-ALL / RESETDATA / 读档前的角色清空。
+     * 整表清空：**世界重置语义**（DELCHARA-ALL / RESETDATA / 回标题）。
      * spec: VariableEvaluator.cs:1275-1285（DelAllCharacter：逐角色 Dispose 再 Clear）——
      * 复位归还列容量的对拍与安全性论证见 [CharacterTable.clear] 的 KDoc。
+     *
+     * 行全没了 ⇒ 投射身份面必须整体作废（[ICharaSlotProjector.onWorldReset]）：清表本身
+     * **不发逐行删除钩子**，虚拟 NO 与行映射会留下指向已不存在行的残影，下次投射按旧号
+     * 解析会命中原实体（§16「永不复用」不变量被破坏）。这是本层必须补整表钩子的原因。
+     *
+     * 调用方按语义分两类（**改调用方不改 clear 语义本身**）：
+     * - 世界重置：DELALLCHARA（core/sem/StatementExecutor.kt:913、:3556）、RESETDATA
+     *   （[resetData]）、回标题 `GotoTitle`（core/proc/ProcessRuntime.kt:5078 → [resetData]）
+     *   ⇒ 缺省路径，清表后即调 [ICharaSlotProjector.onWorldReset]；
+     * - 整表替换：读档前清空（core/data/save/SaveData.kt:325，宿主入口
+     *   [com.eratw.port.core.save.FileSystemOps.loadData]）⇒ 包在
+     *   [withCharacterReplacement] 里，**什么都不做**（保留 .rt2 并入的身份表）。
      */
-    fun deleteAllCharacters() = characters.clear()
+    fun deleteAllCharacters() {
+        characters.clear()
+        if (characterReplacementDepth == 0) charaSlotProjector?.onWorldReset()
+    }
 
     /**
      * COPYCHARA。spec: VariableEvaluator.cs:1355-1366 —— `CopyChara(x, y)` 是
@@ -2946,37 +3166,84 @@ class VariableStore(
              * 个数 ≥ 下标上界时两者一致（稠密形参 = 语料常态），故该下界只影响「有私有形参
              * 混在 ARG 里」这类退化写法，不会掩掉稀疏下标的扩张。
              */
+            /** 十进制基数：下标累算 `v = v * 10 + d` 的 10（B2 常量化消 MagicNumber，语义不变）。 */
+            private const val DEC_RADIX = 10
+
+            /** 十进制最大数字：溢出护栏 `(Int.MAX_VALUE - 9) / 10` 的 9，保证 `v * 10 + d` 不溢出。 */
+            private const val DEC_MAX_DIGIT = 9
+
             fun declaredLength(paramRefs: List<String>, code: String, count: Int): Int {
                 var max = count
                 for (ref in paramRefs) {
-                    if (ref.length < code.length) continue
-                    if (!ref.regionMatches(0, code, 0, code.length, ignoreCase = true)) continue
-                    // 整名匹配：ARG 不能吃掉 ARGS/ARGF。
-                    var i = code.length
-                    if (i < ref.length && ref[i] == '$') i++
-                    var sub = 0
-                    if (i < ref.length) {
-                        if (ref[i] != ':') continue
-                        i++
-                        var v = 0
-                        var ok = i < ref.length
-                        while (i < ref.length) {
-                            val c = ref[i]
-                            if (c < '0' || c > '9' || v > (Int.MAX_VALUE - 9) / 10) {
-                                ok = false
-                                break
-                            }
-                            v = v * 10 + (c - '0')
-                            i++
-                        }
-                        // 非十进制形态不该出现（装载期已把下标折成规范化十进制，
-                        // spec: LineParser.constSubscripts）；出现就不猜，按无此形参处理。
-                        if (!ok) continue
-                        sub = v
-                    }
+                    val sub = subscriptAfterCode(ref, code) ?: continue
                     if (sub + 1 > max) max = sub + 1
                 }
                 return max
+            }
+
+            /**
+             * 单条形参引用 [ref] 中 [code] 变量（`ARG` / `ARGS` / `ARGF`）的十进制下标。
+             *
+             * 返回 `null` = 按无此形参处理（与原地实现逐字同语义）：前缀不匹配 [code]；
+             * [code] 后跟非 `:` 后缀（整名匹配：ARG 不能吃掉 ARGS/ARGF）；下标段非十进制
+             * 形态——不该出现（装载期已把下标折成规范化十进制，spec: LineParser.constSubscripts），
+             * 出现就不猜。裸名（`ARG` / `ARG$`）无下标段 ⇒ `0`。
+             *
+             * 从 [declaredLength] 原地循环体**逐行搬出**（2026-11-19/20 detekt 存量债 B2 结构修）：
+             * 纯读取、无副作用，判断次序与短路链逐条保持，求值顺序不变。前缀匹配与十进制
+             * 解析再拆两段私有函数（[argSubscriptStart] / [decimalSubscriptFrom]）同样是
+             * detekt 结构修——ReturnCount 上限 2，原地 6 个出口收进三段各 ≤2 个 return，
+             * 不含任何逻辑改动。
+             * 语义锚：fork-src `ErbLoader.cs:696-710`（ARG/ARGS/ARGF 声明长 = max(下标+1)）、
+             * `:785-786` 落 `label.ArgLength` / `label.ArgsLength`；1.824 基线同口径
+             * `ErbLoader.cs:703-712`。
+             */
+            private fun subscriptAfterCode(ref: String, code: String): Int? {
+                val start = argSubscriptStart(ref, code) ?: return null
+                return when {
+                    // 裸名：前缀（含可选 $）即整串 ⇒ 无下标段，按 0 处理。
+                    start >= ref.length -> 0
+                    // 整名匹配：ARG 不能吃掉 ARGS/ARGF。
+                    ref[start] != ':' -> null
+                    else -> decimalSubscriptFrom(ref, start + 1)
+                }
+            }
+
+            /**
+             * [ref] 是否以 [code] 变量前缀（大小写不敏感）开头，并跳过紧随的可选 `$`
+             * 分隔；返回下标段起始位置，不匹配返回 `null`。
+             *
+             * 判断序：长度 → 前缀 → `$`，`||` 短路与原地两条独立 if 逐字同序同语义。
+             */
+            private fun argSubscriptStart(ref: String, code: String): Int? {
+                if (ref.length < code.length ||
+                    !ref.regionMatches(0, code, 0, code.length, ignoreCase = true)
+                ) {
+                    return null
+                }
+                var i = code.length
+                if (i < ref.length && ref[i] == '$') i++
+                return i
+            }
+
+            /**
+             * [ref] 从 [from] 起的十进制下标解析：空段或非十进制形态返回 `null`（按无此
+             * 形参处理，不猜），溢出护栏与累算式逐字同原地实现（[DEC_MAX_DIGIT] / [DEC_RADIX]）。
+             */
+            private fun decimalSubscriptFrom(ref: String, from: Int): Int? {
+                var i = from
+                var v = 0
+                var ok = i < ref.length
+                while (i < ref.length) {
+                    val c = ref[i]
+                    if (c < '0' || c > '9' || v > (Int.MAX_VALUE - DEC_MAX_DIGIT) / DEC_RADIX) {
+                        ok = false
+                        break
+                    }
+                    v = v * DEC_RADIX + (c - '0')
+                    i++
+                }
+                return if (ok) v else null
             }
         }
     }
@@ -3823,6 +4090,10 @@ class VariableStore(
      * （见 [resetLocalValues] 的 KDoc）。
      */
     fun resetValues() {
+        // 稀疏 1 维背板的越界覆盖层也是「系统数组状态」的一部分：新局/复位后必须清空，
+        // 否则上一局 `ITEM:-1` 里写过的值会穿越到下一局（PC 的 SparseArray 随池重建）。
+        sparseIntOverflow.clear()
+        sparseStrOverflow.clear()
         val globalIndex = VariableCode.lowIndex(VariableCode.GLOBAL_VAR)
         val priceIndex = VariableCode.lowIndex(VariableCode.ITEMPRICE)
         for (i in gInt1.indices) {
@@ -4034,9 +4305,10 @@ class VariableStore(
      * 成本 O(全部串列格数 + 池条数)，无 IO、无两两比较：复位链本来就已经对每张串列做
      * 整列 `fill`（[resetValues] :2831-2834），这一趟与它同量级。
      */
-    private fun compactStringPool() {
+    private fun compactStringPool(): StringPoolReclaim? {
         val oldSize = pool.distinctCount
-        if (oldSize <= 1) return // 只有空串：没有可回收的条目
+        val charsBefore = pool.charsTotal
+        if (oldSize <= 1) return null // 只有空串：没有可回收的条目
         val carriers = strIdCarriers()
         val live = pool.newLiveMask()
         for (c in carriers) {
@@ -4062,6 +4334,13 @@ class VariableStore(
                 i++
             }
         }
+        // 迟滞（只对运行期上界有意义，复位链收完就走）：把下次触发点抬到「收后字符 +25%」，
+        // 池里本来就有成规模真活串时不至于每回合白扫一遍载体。
+        val charsAfter = pool.charsTotal
+        val entriesAfter = pool.distinctCount
+        strPoolNextTriggerChars = charsAfter + (charsAfter shr 2)
+        strPoolNextTriggerEntries = entriesAfter + (entriesAfter shr 2)
+        return StringPoolReclaim(oldSize, pool.distinctCount, charsBefore, charsAfter)
     }
 
     /**
@@ -4107,6 +4386,80 @@ class VariableStore(
         }
         return out
     }
+
+    /**
+     * 运行期串表上界：复位链的 [compactStringPool] 只在 RESETDATA 上跑，中后局**一直写 STR**
+     * 的会话拿不到它 —— 2026-11-25 真机 OOM 报告里驻留串表 63,636 条 / 43,685,878 字符
+     * （账面 ≈83 MiB），而池只进不出（[StringTable.intern] 无预算无驱逐）。
+     *
+     * ## 为什么漏在这里（原版对照）
+     * 原版槽里是 C# `string` 引用：覆盖写只换引用，旧串由 GC 归还（`VariableData.cs` 的串列
+     * 就是 `List<string>` / `string[]`）。本层槽里是**池下标** ⇒ 覆盖写只改下标，串本体留在池里
+     * ⇒ 必须显式收池才拿得到同一份内存。复位链已经按这个口径写了（[resetData] 的 KDoc），
+     * 只是把「收池」绑在了复位上，中后局那条路一直是敞开的。
+     *
+     * ## 为什么只能在安全点调（调用契约，最要紧的一条）
+     * [compactStringPool] 会**就地改写**全部载体里的下标。调它时如果 Kotlin 局部变量里还攥着
+     * 一个「待写回的下标」（语句/表达式执行中途就会），改写后那个下标指向的是另一条串 ——
+     * 静默错值，比响更坏。所以只许在两类安全点上调：
+     * - **页/回合边界**：VM 线程停在输入等待（WAIT 语句内，调用方是输入通道的 onTurnReady
+     *   回调）。此时 ERB 调用帧仍在，但语义层只经 readStr/writeStr 交换 String、不持下标；
+     * - **页中检查点**：VM 指令循环取指之前（[com.eratw.port.core.code.Vm] 的
+     *   pressureCheckpoint 挂点，缺省每 65536 条指令 / 宿主侧 250 ms 一次）。两条指令之间不会
+     *   截断语句体：每条指令的处理在取指与下一次取指之间跑完，语义层的中间下标只活在处理器的
+     *   Kotlin 栈帧里，回到循环顶部时已经写回载体或丢弃。
+     * 两处共同的前提是同一条：池下标**不活在** store 之外的任何地方 —— 下标的全部持有面就是
+     * [strIdCarriers] 的清单（新增持有面必须先在那里登记）。
+     *
+     * ## 迟滞
+     * 收完把下次触发点抬到「收后字符 +25%」，池里真有成规模的活串时不会每回合白扫载体。
+     *
+     * @param charBudget 字符上界（UTF-16 code unit 数）。策略值由调用方给，本层不内置。
+     * @param entryBudget 条目上界（池里不同串的条数）。缺省 = 只看字符上界；压实峰值与条数成正比，
+     *   条目多、串短的形态要由调用方给一个小值让回收提前发生。
+     * @return 真收了 ⇒ 读数；两道上界都没到 / 池里只有空串 ⇒ null（调用方不必记账）
+     */
+    fun reclaimStringPoolIfOver(charBudget: Long, entryBudget: Int = Int.MAX_VALUE): StringPoolReclaim? {
+        val chars = pool.charsTotal
+        val entries = pool.distinctCount
+        val overChars = chars >= maxOf(charBudget, strPoolNextTriggerChars)
+        val overEntries = entries >= maxOf(entryBudget, strPoolNextTriggerEntries)
+        if (!overChars && !overEntries) return null
+        return compactStringPool()
+    }
+
+    /** 一次串表回收的读数（[reclaimStringPoolIfOver] / 复位链共用）。 */
+    data class StringPoolReclaim(
+        val distinctBefore: Int,
+        val distinctAfter: Int,
+        val charsBefore: Long,
+        val charsAfter: Long,
+    ) {
+        /** 归还的条数（无主串的条数）。 */
+        val freedEntries: Int get() = distinctBefore - distinctAfter
+
+        /** 归还的串载荷字符数（UTF-16 code unit）。 */
+        val freedChars: Long get() = charsBefore - charsAfter
+
+        /** 一行台账（进日志/报告，不在热路径拼）。 */
+        val line: String
+            get() = "条 $distinctBefore→$distinctAfter / 字 $charsBefore→$charsAfter（归还 $freedChars）"
+    }
+
+    /**
+     * 运行期串表回收的**迟滞触发点**（[reclaimStringPoolIfOver]）：0 = 只看调用方给的上界。
+     * 实例字段而非静态量 —— core 层禁静态可变全局（AGENTS.md 铁律 4）。
+     */
+    private var strPoolNextTriggerChars = 0L
+
+    /**
+     * 条目数的迟滞触发点（与 [strPoolNextTriggerChars] 同形）：0 = 只看调用方给的条目上界。
+     *
+     * 为什么字符上界之外还要一条条目上界：压实本身要按**条数**重建反查表
+     * （StringTable.compact），池里条目多、串短的形态下按字符上界触发，会在堆最紧的时刻
+     * 再付一份「老表 + 新表」的峰值。条目上界让这类形态提前收，峰值随条数线性可控。
+     */
+    private var strPoolNextTriggerEntries = 0
 
     /** 角色列里「前 [rows] 行」占用的格子数（Long 预乘防溢出，再夹到数组实际长度）。 */
     private fun reachableCells(dataSize: Int, rows: Int, blockSize: Int): Int {

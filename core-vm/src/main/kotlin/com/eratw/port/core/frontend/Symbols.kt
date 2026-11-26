@@ -2,6 +2,7 @@ package com.eratw.port.core.frontend
 
 import com.eratw.port.core.lexer.LangKey
 import com.eratw.port.core.lexer.LogicalLineReader
+import com.eratw.port.core.proc.SystemVariableBootstrap
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 import java.nio.file.Files
@@ -304,6 +305,14 @@ data class DimSpec(
     val keywords: Set<DimKeyword>,
     /** `=` 之后的原文（含引号与逗号）；无初值 → null（spec: UserDefinedVariableData.cs:344-427） */
     val initializer: String?,
+    /**
+     * 4.981 fork 的 `#DIMF`（浮点声明，spec: variables.yaml:99-100）。`#DIM` / `#DIMS` 恒 false。
+     *
+     * fork 的 `#DIMF` 与 `#DIM` 同构，只换 `dimtype = FLOAT`；ERH 里的 `#DIMF CONST X = 1.5`
+     * 在 PC 侧合法（实测 `#DIMF CONST MYFLT = 1.5` + `@F(ARG, PFLT = MYFLT)` ⇒ 1.5）
+     * ⇒ 前端符号层必须认这条声明，否则 ERH 扫描会把它当未知指令、按 level 2 中止整条 ERH 链。
+     */
+    val isFloat: Boolean = false,
 )
 
 /** 单个 @标签行（尚未进入符号表） */
@@ -428,16 +437,23 @@ data class LabelDef(
     val floatLocalSize: Int = 0,
     val dimSpecs: List<DimSpec> = emptyList(),
 ) {
-    /** spec: LabelDictionary.cs:90-105 分桶条件（ONLY 优先于 PRI/LATER，ONLY 会清掉二者） */
-    val eventBucket: EventBucket
-        get() = when {
-            isOnly -> EventBucket.ONLY
-            isPri -> EventBucket.PRI
-            isLater -> EventBucket.LATER
-            else -> EventBucket.NORMAL
+    /**
+     * 事件执行桶**集合**：spec LabelDictionary.cs:134-141 / :228-235 是四个**平行** if
+     * （IsOnly→ONLY、IsPri→PRI、IsLater→LATER、!IsPri && !IsLater→NORMAL），命中几条进几条：
+     * `#PRI`+`#LATER` → `[PRI, LATER]`（守卫使它**不**进 NORMAL）、`#ONLY` → `[ONLY, NORMAL]`
+     * （解析期 #ONLY 清掉 PRI/LATER，LogicalLineParser.cs:131-145）。与
+     * [com.eratw.port.core.proc.FuncMeta.eventBuckets] 同口径（在册 B23，2026-11-26 结案）。
+     */
+    val eventBuckets: List<EventBucket>
+        get() = buildList {
+            if (isOnly) add(EventBucket.ONLY)
+            if (isPri) add(EventBucket.PRI)
+            if (!isPri && !isLater) add(EventBucket.NORMAL)
+            if (isLater) add(EventBucket.LATER)
         }
 
-    val eventGroupIndex: Int get() = eventBucket.index
+    /** [eventBuckets] 的桶号视图，供 [SymbolTable.eventBuckets] 投桶。 */
+    val eventGroupIndexes: List<Int> get() = eventBuckets.map { it.index }
 }
 
 /** 重名组（同名全部定义 + 生效者）。事件组 winner 仅为 CALL 语义占位，实际全部执行。 */
@@ -587,12 +603,16 @@ class LabelTable(val config: SymbolConfig) {
      */
     fun resolve(name: String): LabelDef? = defsOf(name).lastOrNull()
 
-    /** 事件函数的 4 桶（每桶内按装载序）。spec: CalledFunction.cs:228-243 桶序 0→1→2→3 */
+    /**
+     * 事件函数的 4 桶（每桶内按装载序）。spec: CalledFunction.cs:228-243 桶序 0→1→2→3；
+     * 投桶按 LabelDictionary.cs:228-235 的四个平行 if —— 双旗标成员在两个桶里各出现一次，
+     * 故 flatten 后的 [eventCallOrder] 含重复项（= 该函数被派发两次）。
+     */
     fun eventBuckets(name: String): List<List<LabelDef>>? {
         val defs = defsOf(name)
         if (defs.isEmpty() || !defs.first().isEvent) return null
         val buckets = List(4) { ArrayList<LabelDef>() }
-        for (d in defs) buckets[d.eventGroupIndex].add(d)
+        for (d in defs) for (g in d.eventGroupIndexes) buckets[g].add(d)
         return buckets
     }
 
@@ -922,14 +942,29 @@ class LabelTable(val config: SymbolConfig) {
             // 单空格并入首行，行号 = 闭合 `}` 行，P6）；`{`/`}` 行不再到达本循环。
             // 必须消费惰性核而非 List 物化版：`disabled` 谓词在扫到 `{` 时才求值，
             // 与本循环推进的预处理状态机同步（List 版会把谓词全部提前求值）。
+            // STAB-A2：消费惰性序列时记录最后一条逻辑行的 1 基物理行号，供收尾 fileEnd 定位
+            // （序列的 lineNo 口径见 [Symbols.erhLogicalLinesWithLines] KDoc：普通行=自身、
+            // 续行块=闭合行；EOF 取最后消费到的那一行，即文件末行）。
+            var lastLineNo = 0
             for ((lineNo, rest) in erhLogicalLineSequence(text) { pp.disabled }) {
+                lastLineNo = lineNo
                 if (rest.isEmpty()) continue
                 // 2) 预处理器（Disabled 时仍处理，spec: ErbLoader.cs:390-406）
                 if (pp.process(rest, lineNo)) continue
                 if (pp.disabled) continue
                 // 3) '#' 行：只取归属当前标签的属性（spec: LogicalLineParser.cs:20-307）
                 if (rest.startsWith("#")) {
-                    if (curPos < 0) continue
+                    if (curPos < 0) {
+                        // 原版 ErbLoader.cs:413-423：logicalLine2 不是 FunctionLabelLine 时
+                        // ParserMediator.Warn(Lang.Error.InvalidSharp.Text, scriptPosition, 1) 后仍
+                        // continue 丢弃该行。此前移植侧只丢弃、不告警 —— 补这一条 level 1 留痕，
+                        // 文案复用 SystemVariableBootstrap 的**通用** InvalidSharp 单源常量：
+                        // 无归属 # 行可为 #PRI/#FUNCTION/#DIMS 等任意指令，不能套 #DIM 专用文案。
+                        warnings?.add(
+                            LoadWarning(file, lineNo, SystemVariableBootstrap.INVALID_SHARP_REASON),
+                        )
+                        continue
+                    }
                     val c = out[curPos]
                     val parts = rest.substring(1).trim().split(SHARP_ARG_SPLIT, 2)
                     val kw = parts.firstOrNull()?.uppercase(Locale.ROOT) ?: ""
@@ -1074,7 +1109,9 @@ class LabelTable(val config: SymbolConfig) {
                 curPos = -1
             }
             // 未闭合区间（spec: ErbLoader.cs:513 + PPState.FileEnd :169-180）
-            pp.fileEnd(0)
+            // STAB-A2：收尾行号取上面消费序列记录的最后行号（= 文件末行），不再硬编码 0；
+            // 对齐 erbcc 侧同仓正确实现 CorpusScan.kt:292 的 pp.fileEnd(lines.size) 口径。
+            pp.fileEnd(lastLineNo)
             warnings?.addAll(pp.warnings)
             return out
         }
@@ -1220,7 +1257,10 @@ class LabelTable(val config: SymbolConfig) {
                         // FUNCTIONF 落 default → UnknownPreprocessorInSharpLine（level 2、中止）。
                         fatal(lineNo, "ERH 里的 #FUNCTIONF（fork 的 ERH # 分派不认该关键字 → level 2 并中止 ERH 装载）")
                     }
-                    "DIM", "DIMS" -> {
+                    "DIM", "DIMS", "DIMF" -> {
+                        // `#DIMF` = 4.981 fork 的浮点声明（与 `#DIM` 同构，只换 dimtype）。
+                        // PC 实测 ERH `#DIMF CONST MYFLT = 1.5` 合法；不认它会被下面的
+                        // `else` 当未知指令按 level 2 中止整条 ERH 链（装载相位缺陷）。
                         var rejectMsg: String? = null
                         val spec = parseDimSpec(kw, parts.getOrNull(1) ?: "", isPrivate = false) {
                             rejectMsg = it
@@ -1447,6 +1487,8 @@ class LabelTable(val config: SymbolConfig) {
             onReject: ((String) -> Unit)? = null,
         ): DimSpec? {
             val isStr = keyword.equals("DIMS", ignoreCase = true)
+            // 4.981 fork：`#DIMF` 与 `#DIM` 同构，只换 dimtype = FLOAT（spec: variables.yaml:99-100）。
+            val isFloat = keyword.equals("DIMF", ignoreCase = true)
             var i = 0
             val n = body.length
             fun skipBlanks() {
@@ -1529,7 +1571,7 @@ class LabelTable(val config: SymbolConfig) {
             if (rest.isBlank()) {
                 // cs:291-299 —— EOL：无尺寸（默认 1 维）；CONST 缺初值 → CodeEE（cs:294-297）
                 if (DimKeyword.CONST in kws) return null
-                return DimSpec(name, isStr, emptyList(), kws, null)
+                return DimSpec(name, isStr, emptyList(), kws, null, isFloat)
             }
             val eq = topLevelIndexOf(rest, '=')
             val dimsPart: String
@@ -1576,7 +1618,7 @@ class LabelTable(val config: SymbolConfig) {
             if (DimKeyword.CONST in kws && dims.size > 1) return null   // cs:438-441
             if (DimKeyword.CHARADATA in kws && dims.size > 2) return null // cs:442-445
             if (dims.size > 3) return null                              // cs:446-449
-            return DimSpec(name, isStr, dims, kws, init)
+            return DimSpec(name, isStr, dims, kws, init, isFloat)
         }
 
         /**

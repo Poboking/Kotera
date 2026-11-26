@@ -15,21 +15,23 @@ import java.util.Locale
  * ```
  *
  * - **单一真源**：成员集合与顺序只由 [SymbolCatalog.events]（链接序全成员）与
- *   [FuncMeta.eventBucket]（桶位）派生 —— base-only 装载路径的
- *   [com.eratw.port.core.proc.FunctionTable.eventCallOrder] 是同一对
- *   （桶位，defIndex 序）语义的另一视图，两者对同一批元数据必同序（测试对拍钉）；
+ *   [FuncMeta.eventBuckets]（桶集合）派生 —— base-only 装载路径的
+ *   [com.eratw.port.core.proc.FunctionTable.eventDispatchOrder] 是同一对
+ *   （桶集合，defIndex 序）语义的另一视图，两者对同一批元数据必逐行同序（测试对拍钉）；
  * - **事件不参与覆盖**：同名事件的全部物理定义按链接序保留（events 一对多基数，
  *   ABI-7 Gate 的「事件一对多基数证明」落点）——base 与多 Mod 各自的同名事件成员
  *   全部进桶，先 base 装载序、后各包链接序；
  * - **SINGLE 终止旗标**（spec: ProcessState.cs:306-310：返回值 1 时跳过同桶剩余成员）
  *   是运行期执行语义：本表随成员携带 [Member.isSingle]，执行器读到旗标成员返回 1
  *   即截断本桶余下成员（后续桶不受影响 —— C# 的 ShiftNext 按**桶**推进，截断不跨桶）；
- * - **已知分叉（TODO(verify)，当前语料不可达）**：C# 对同一 label 是**并列加桶**
+ * - **并列加桶（2026-11-26 结案，在册 B23）**：C# 对同一 label 是四个**平行** if
  *   （`if (IsOnly) [0].Add; if (IsPri) [1].Add; if (IsLater) [3].Add;
- *   if (!IsPri && !IsLater) [2].Add`，LabelDictionary.cs:90-105），`IsPri && IsLater`
- *   的成员会落两桶、被派发两次；[FuncMeta.eventBucket] 是排他桶、只派发一次。
- *   语料全树 `#ONLY`/`#SINGLE` 命中 0、PRI 与 LATER 同体 0 处 ⇒ 现值不可观测；
- *   严格复刻需把桶位改成桶集合（跨文件接口变更，FuncMeta 是热路径类，归 M3-2 裁定）。
+ *   if (!IsPri && !IsLater) [2].Add`，LabelDictionary.cs:134-141 / :228-235；:233 原注
+ *   「#PRIかつ#LATERなら二重に登録する。eramakerの仕様」），`IsPri && IsLater` 的成员落
+ *   两桶、被派发两次。本表按 [FuncMeta.eventBuckets] 把同一成员展开成多条 `Member(bucket=…)`
+ *   与之同构（PC 侧派发序实证见 [docs/UPSTREAM-BUG-PR.md] 的 B23 行）。`#ONLY` 落桶 0 与桶 2，
+ *   桶 2 的那份因 `ProcessState.cs:312-347`（IsOnly → FinishEvent 终止整链）不可达，
+ *   与 C# 同形，派发读数不受影响。
  *
  * 构建期不可变；运行期只读。
  */
@@ -40,7 +42,7 @@ class EventRegistry private constructor(
     /**
      * 一个事件成员：物理下标 + 桶位 + ONLY / SINGLE 旗标 + 归属包（诊断）。
      *
-     * [isOnly] 与 [bucket] 同源派生自 [FuncMeta.isOnly]（`eventBucket` 的 ONLY=0），
+     * [isOnly] 与 [bucket] 同源派生自 [FuncMeta.isOnly]（`eventBuckets` 里的 ONLY=0），
      * 但**不**让运行期拿 `bucket == 0` 反推旗标：派发所需的语义全部随成员带出，
      * 四桶表本身就是可直接执行的真源（M2-6），不依赖第二张元数据表。
      */
@@ -57,6 +59,7 @@ class EventRegistry private constructor(
 
     /**
      * 事件名的执行序成员（四桶序，同桶链接序）；非事件名或未知名返回空表。
+     * 双旗标成员（`#PRI`+`#LATER`、`#ONLY`）在此出现两次，各带自己的桶位。
      * 返回列表不可变。
      */
     fun membersOf(key: String): List<Member> =
@@ -85,7 +88,8 @@ class EventRegistry private constructor(
             val out = LinkedHashMap<String, List<Member>>(catalog.events.size * 2)
             for ((key, bindings) in catalog.events) {
                 require(bindings.isNotEmpty()) { "事件 $key 的成员表为空（LSC 事件视图损坏）" }
-                val members = ArrayList<Member>(bindings.size)
+                // 一个成员按其桶集合展开成多条（C# 并列加桶），容量按最多双桶给。
+                val members = ArrayList<Member>(bindings.size * 2)
                 for (b in bindings) {
                     val meta = metaByIndex[b.physicalIndex]
                     require(meta != null) {
@@ -94,15 +98,18 @@ class EventRegistry private constructor(
                     require(meta.isEvent) {
                         "事件 $key 的成员 ${meta.key} 不是事件函数（LSC 事件视图污染）"
                     }
-                    members += Member(
-                        physicalIndex = b.physicalIndex,
-                        bucket = meta.eventBucket,
-                        isOnly = meta.isOnly,
-                        isSingle = meta.isSingle,
-                        ownerPackageId = b.ownerPackageId,
-                    )
+                    for (bucket in meta.eventBuckets) {
+                        members += Member(
+                            physicalIndex = b.physicalIndex,
+                            bucket = bucket,
+                            isOnly = meta.isOnly,
+                            isSingle = meta.isSingle,
+                            ownerPackageId = b.ownerPackageId,
+                        )
+                    }
                 }
-                // 四桶序：稳定排序保持链接序（成员已按链接序进入）。
+                // 四桶序：稳定排序保持链接序（成员已按链接序进入；同一成员的多条展开
+                // 来自同一个桶集合，桶内相对次序仍由链接序决定，与 Map 迭代序无关）。
                 members.sortBy { it.bucket }
                 out[key] = members.toList()
             }

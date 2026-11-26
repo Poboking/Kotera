@@ -1,0 +1,34 @@
+; PC-CMP-02B-BT-ONLY.ERB -- 对拍装置夹具 A2b（ONLY 遮蔽实验）
+; Question this case answers: PC registers an #ONLY label in bucket 0 AND bucket 2
+;   (reference/emuera-skia-4.981/Emuera/Runtime/Script/Data/LabelDictionary.cs:134-141, first and
+;    fourth if), yet nobody ever sees the duplicate. Why?
+;   reference/emuera-cs/MinorShift.Emuera.Runtime.Script/ProcessState.cs:326-329
+;     if (calledFunction.IsOnly) calledFunction.FinishEvent();
+;   FinishEvent (:259-264) sets group = 4 and CurrentLabel = null, so the FIRST return of the
+;   #ONLY member ends the whole event dispatch and bucket 2 is never reached.
+;   Same tri-branch on the fork: reference/emuera-skia-4.981/Emuera/Runtime/Script/Process.State.cs:505-510.
+; So the duplicate registration is REAL but MASKED. The port models it as an exclusive bucket 0
+;   (core-vm/.../proc/FuncMeta.kt:227-233) and therefore cannot distinguish "masked duplicate"
+;   from "no duplicate" -- which is the argument in the 判词 for why the ONLY half of the fork
+;   (FuncMeta.kt:213-226 TODO(verify)) cannot be settled by looking at the bucket list alone.
+; Expected on PC 4.981: DRIVER -> nested BEFORE_THROW bucket 0: ONLY, then nothing.
+;   PCMARK-BT2-PRI, PCMARK-BT2-N and PCMARK-BT2-THROWN all ABSENT.
+; Expected on the port (exclusive): DRIVER -> ONLY, PRI, N (bucket 1 and 2 keep running) -> diff.
+; One boot only, see PC-CMP-02A header (pending throw re-fires after BEFORE_THROW finishes).
+
+@EVENTLOAD
+#LATER
+	PRINTFORML PCMARK-BT2-DRIVER
+	THROW PC-CMP-02B
+	PRINTFORML PCMARK-BT2-THROWN
+
+@BEFORE_THROW
+#ONLY
+	PRINTFORML PCMARK-BT2-ONLY
+
+@BEFORE_THROW
+#PRI
+	PRINTFORML PCMARK-BT2-PRI
+
+@BEFORE_THROW
+	PRINTFORML PCMARK-BT2-N

@@ -60,8 +60,9 @@ import com.eratw.port.core.host.SpritePool
  *
  * ## 参数校验（照既有内建惯例）
  *
- * 个数由 [BuiltinMethod.checkArity] 统一报（`函数 SPRITEANIMEFRAME 的参数个数不匹配（需要 1 个）`
- * 这条既有文案）；类型错按邻近家族（`fn/HtmlMethods.kt` 同一句式）报 CodeEE，不做隐式转串——
+ * 个数由 [BuiltinMethod.checkArity] 统一报（定长形参表支 = `ArgsCountNotMatches`，
+ * 屏上 `SPRITEANIMEFRAME函数: 需要1个参数，但传入了N个`；arity 文案族见
+ * `specs/error-texts.yaml` 第十二节）；类型错按邻近家族（`fn/HtmlMethods.kt` 同一句式）报 CodeEE，不做隐式转串——
  * 原版 `GetFunctionMethod` 在解析期就按 `CheckArgumentType` 挡掉类型不符，移植侧的这层检查
  * 至今仍是运行期补齐（METHOD_ARG_TYPE 缺口，见 `PcOracleGapTest`），文案与 HtmlMethods 一致。
  *

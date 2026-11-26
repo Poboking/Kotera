@@ -1,0 +1,28 @@
+; MODDX3-A2 探针包源（新角色链路验证，CONTRACT-MODDX3-A2 §3）。
+; 本文件是探针测试 ModDx3CharaTrackProbeTest 的数据源，测试从 fixtures 目录现场读取，
+; 不在测试里内嵌副本（防两处漂移）。改动本文件须同步 expected-outcomes.tsv 与测试断言。
+;
+; 取位说明：NO=999 是「不存在于语料 CSV/Chara（番号 0..167）」的探针号；语料侧
+; 「人物数量上限 = 200」（ERB/DIM.ERH:212）与 KOJO 拼名分发 M_KOJO_K{NO} 都按 NO 寻址，
+; 999 只做「模板缺失」的运行期探针，不进任何 base 循环。
+;
+; 三个函数覆盖契约 §3 探针矩阵：
+; - M_KOJO_K999       = 探针①：无主 KOJO 函数（不指向任何现存角色的 KOJO_ 命名函数）；
+; - PROBE_CHARA_ADD   = 探针③：ADDCHARA 指向不存在模板号的运行期探针；
+; - PROBE_KOJO_DISPATCH = KOJO 动态分发可达性探针（CALLFORM 拼名命中模块函数）。
+
+@M_KOJO_K999
+PRINTL MODDX3-A2 无主KOJO探针（NO=999 无CSV模板，仅验证编译与动态分发可达）
+RETURN 0
+
+@PROBE_CHARA_ADD
+#DIM pos
+ADDCHARA 999
+pos = CHARANUM - 1
+PRINTFORML COUNT={CHARANUM}
+PRINTFORML NAME=%NAME:pos%
+RETURN 0
+
+@PROBE_KOJO_DISPATCH
+CALLFORM M_KOJO_K999
+RETURN 0

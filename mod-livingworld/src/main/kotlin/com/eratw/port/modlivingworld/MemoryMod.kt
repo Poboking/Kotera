@@ -5,7 +5,11 @@ import com.eratw.port.modapi.EntityRefFieldCmp
 import com.eratw.port.modapi.EraMod
 import com.eratw.port.modapi.HasRelation
 import com.eratw.port.modapi.ModContext
+import com.eratw.port.modapi.add
 import com.eratw.port.modapi.queryPlan
+import com.eratw.port.modapi.setValue
+import com.eratw.port.modapi.valueOf
+import com.eratw.port.modlivingworld.generated.LwFactFacade
 
 /**
  * Living World 记忆 Mod 入口（§21.9 判据 3「知识不自动传播」的落点；模型形状照 M91
@@ -17,13 +21,19 @@ import com.eratw.port.modapi.queryPlan
  * 只由 KNOWS 边决定（[knowledgeOf] 按入边圈定），引擎与全库没有任何代码会替 B 建边 ——
  * B 只能经显式 [teach] 拿到 HEARSAY 副本。负向证明（摘传播闸 ⇒ 自动传播红）由组合测试
  * 的反向用例承担。
+ *
+ * fact 的字段读写走生成物 [LwFactFacade]：列名与类型由生成物一处提供。
  */
 class MemoryMod : EraMod {
 
     private lateinit var context: ModContext
 
+    /** 类型化读写面（onLoad 装配）。 */
+    private lateinit var fact: LwFactFacade
+
     override fun onLoad(context: ModContext) {
         this.context = context
+        this.fact = LwFactFacade(context.entities)
     }
 
     override fun onEnable() {
@@ -47,15 +57,15 @@ class MemoryMod : EraMod {
      */
     fun recordWitness(witness: EntityId, about: EntityId, predicate: String, occurredAt: Long): EntityId {
         require(context.entities.exists(witness)) { "witness 不存在：$witness（不落无主知识）" }
-        val fact = context.entities.create(MemoryDeclarations.ARCHETYPE_FACT)
-        context.entities.setRef(fact, MemoryDeclarations.FIELD_SUBJECT, about)
-        context.entities.setStr(fact, MemoryDeclarations.FIELD_PREDICATE, predicate)
-        context.entities.setInt(fact, MemoryDeclarations.FIELD_OCCURRED_AT, occurredAt)
-        context.relationships.add(witness, MemoryDeclarations.RELATION_KNOWS, fact)
+        val view = fact.create()
+        view.subject = about
+        view.predicate = predicate
+        view.occurredAt = occurredAt
+        context.relationships.add(witness, MemoryDeclarations.KNOWS, view.id)
         context.relationships.setValue(
-            witness, MemoryDeclarations.RELATION_KNOWS, fact, Provenance.FIRSTHAND.code,
+            witness, MemoryDeclarations.KNOWS, view.id, Provenance.FIRSTHAND.code,
         )
-        return fact
+        return view.id
     }
 
     /**
@@ -66,22 +76,22 @@ class MemoryMod : EraMod {
      */
     fun teach(learner: EntityId, fact: EntityId, provenance: Provenance = Provenance.HEARSAY): Boolean =
         context.entities.exists(fact) &&
-            context.relationships.add(learner, MemoryDeclarations.RELATION_KNOWS, fact) &&
+            context.relationships.add(learner, MemoryDeclarations.KNOWS, fact) &&
             context.relationships.setValue(
-                learner, MemoryDeclarations.RELATION_KNOWS, fact, provenance.code,
+                learner, MemoryDeclarations.KNOWS, fact, provenance.code,
             )
 
     /** [owner] 的知识集 = KNOWS 入边指向的 fact（EntityId 升序快照）。 */
     fun knowledgeOf(owner: EntityId): List<EntityId> = context.query.query(
         queryPlan {
-            archetype(MemoryDeclarations.ARCHETYPE_FACT)
-            where(HasRelation(MemoryDeclarations.RELATION_KNOWS, outgoing = false, other = owner))
+            archetype(MemoryDeclarations.FACT)
+            where(HasRelation(MemoryDeclarations.KNOWS, outgoing = false, other = owner))
         },
     )
 
     /** [owner] 持有 [fact] 的认知来源（读边值）；无边（不知道）返回 null。 */
     fun provenanceOf(owner: EntityId, fact: EntityId): Provenance? {
-        val code = context.relationships.valueOf(owner, MemoryDeclarations.RELATION_KNOWS, fact)
+        val code = context.relationships.valueOf(owner, MemoryDeclarations.KNOWS, fact)
         return Provenance.entries.firstOrNull { it.code == code }
     }
 }

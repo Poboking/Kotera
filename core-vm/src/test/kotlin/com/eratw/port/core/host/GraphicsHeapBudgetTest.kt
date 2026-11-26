@@ -2,6 +2,7 @@ package com.eratw.port.core.host
 
 import com.eratw.port.core.err.CodeEE
 import java.nio.file.Files
+import org.junit.jupiter.api.Assumptions
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -181,6 +182,15 @@ class GraphicsHeapBudgetTest {
     @Test
     fun `create_需求大于堆上限抛可诊断错误且不留假画布`() {
         val max = Runtime.getRuntime().maxMemory()
+        // 本用例的构造前提：巨大的画布要能用**两个 Int** 表达（`w*h` 落进 Int），
+        // 才能先撞分配前闸而不是 `NegativeArraySizeException`；而「大于堆上限」要求
+        // max < 4 × Int.MAX_VALUE（≈8.6 GiB）。测试 worker 抬到 10g 时这条前提根本不成立
+        // （2026-11-17 实测：`-PtestXmx=10g` 下本断言红，其余 3947 条全绿）⇒ 明确跳过，
+        // 不改成「构造不出就闭嘴」的假绿。
+        Assumptions.assumeTrue(
+            max <= 4L * Int.MAX_VALUE,
+            "堆上限 $max 超过 4×Int.MAX（≈8.6 GiB）：单块像素缓冲无法同时落进 Int 又超过堆上限，跳过",
+        )
         // 需求 > 堆上限，同时 w*h 必须落进 Int（否则会先撞 NegativeArraySizeException，测不到本闸）
         val pixels = max / 4L + 4096L
         val bigSide = kotlin.math.ceil(kotlin.math.sqrt(pixels.toDouble())).toInt()

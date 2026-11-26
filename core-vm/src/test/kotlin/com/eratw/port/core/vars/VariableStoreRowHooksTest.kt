@@ -73,6 +73,8 @@ class VariableStoreRowHooksTest {
             noAtDelete.add(noSnapshot())
         }
 
+        override fun onWorldReset() = Unit
+
         private fun noSnapshot(): List<Long> =
             (0 until store.characters.count).map { store.readInt("NO", longArrayOf(it.toLong())) }
     }

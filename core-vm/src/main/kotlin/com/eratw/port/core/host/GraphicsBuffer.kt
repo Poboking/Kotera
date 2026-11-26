@@ -2878,6 +2878,46 @@ class SpritePool {
      * 本档保证负号段不会无限堆在 Java 堆上。[budgetBytes] ≤ 0 ⇒ 退化成尽量退（自洽读法同
      * 正号段，[evictDeferredPixelsWithinSharedBudget] 在正号段贴满共用预算时恰好落到这一支）。
      *
+     * ## 堆压力判据（heap-oom lane，2026-11-17）：不只量池驻留，还量**进程堆**
+     *
+     * [budgetBytes] 量的是「池账本」（共用档剩余），看不见非像素那一段（程序表 / 变量池 /
+     * 行缓冲）。上报簇 `2026-11-08 08:39:57`（0.2.39、HUAWEI AL-AL00）的形状就是缝：**负号段
+     * 驻留 48 MiB** 落在共用档（maxMemory ÷4 = 128 MiB）之内 ⇒ 本档判「不需要动」，而进程堆
+     * 已到 512 MiB 挡的 100%，下一次分配直接 `OutOfMemoryError`。正号段那一侧早有一道
+     * [GraphicsPool.evictWithinHeapHeadroom] 把预算换成 `min(池预算, 堆余量预算)`；负号段此前
+     * **没有对应的一条**，本参数补的就是它（同一常量、同一条线、同一族 `evictDeferred`，
+     * 不新开释放路径）。
+     *
+     * 算式（两个上限同时成立，取「更紧的那个触发」）：
+     * - 池账本触发：`驻留 > budgetBytes`（原判据，**一个字都没放宽**）；
+     * - 堆压力触发：`heapNeedBytes = max(0, usedHeapBytes − heapLineBytes)`，其中
+     *   `heapLineBytes = [GraphicsBuffer.heapSafetyLineBytes](maxMemory) = maxMemory ×
+     *   [GraphicsBuffer.HEAP_SAFETY_PERCENT]%`（默认 80，与 `RunTrail.RELEASE_AT_PERCENT`
+     *   同源，不新增旋钮）。
+     *
+     * 逐出量：**两者取大**，即 `本轮要退的字节 ≥ max(0, 驻留 − budgetBytes, heapNeedBytes)`
+     * —— 本轮已退字节 `freedBytes` 与池账本读数 `resident` 同时被判停，任一条不满足就继续走
+     * 下一张。512 MiB 挡、堆贴到 100%（`used = 512 MiB`、`line = 410 MiB`）时
+     * `heapNeedBytes ≈ 102 MiB`；负号段 48 MiB 全退完仍差 ⇒ **退完即停**（候选穷尽），
+     * 不越界去动正号段（那是 [GraphicsPool.evictWithinHeapHeadroom] 的活）。
+     *
+     * 逐出上限与代价（判据给的是「退到够为止」，不是「全退」）：
+     * - 单轮上限 = 负号段可重解候选的**全部**（本轮最多 258 MiB 量级的那一段，实测形状里
+     *   48 MiB / 约 33 张 CSV 父图），但只在 `resident > budget` 或 `freedBytes < heapNeedBytes`
+     *   时才继续，退够一张就停；
+     * - 单张代价 = `evictDeferred` 的**丢引用**（把 IntArray 置空），不解码、不编码、不落盘
+     *   ⇒ 单张微秒级；最坏一轮 = 候选数 × 微秒级 + 两处 `Runtime` 读数（调用方已付）。
+     * - 重解代价落在**下一次真读**（`pixels` 落地）且逐字节同图（判据 1 的立档理由，用例
+     *   `SpritePoolHeapPressureGateTest` 的「逐出后重取像素逐字节相同」钉着）。
+     *
+     * 停档：只走 `evictDeferred` 这一档（「重解必得同一张图」）。第二档
+     * [evictCompositedSpritesWithinBudget]（摘名 + dispose）**不在**本函数里 —— 它动的是脚本
+     * 可见的 Sprite 名，触发条件不许因为多了一条堆判据就放宽。
+     *
+     * @param usedHeapBytes 判定用的已用堆（生产取 [GraphicsBuffer.heapUsedBytes]；单测显式注入
+     *   复刻「堆已 90%」的形状，core 层不挂静态可变全局，读数只从参数进）
+     * @param heapLineBytes 判定用的安全线（生产取 [GraphicsBuffer.heapSafetyLineBytes]；
+     *   缺省 [Long.MAX_VALUE] = 本判据不生效，桌面装置与全部既有调用点行为逐字不变）
      * @param protect 这一张**永不逐出**。语义同正号段 `get()` 传的「刚交出去的那张」：
      *   读侧将来若在取图点挂本档检查点（回执里的接线项），必须把自己正要用的一张传进来，
      *   否则「唯一一张且超预算」会退化成每帧重解的螺旋（上一路踩过的坑，对照组见
@@ -2890,8 +2930,17 @@ class SpritePool {
         budgetBytes: Long,
         protect: GraphicsBuffer? = null,
         scratch: SpriteEvictScratch? = null,
+        usedHeapBytes: Long = 0L,
+        heapLineBytes: Long = Long.MAX_VALUE,
     ): Long =
         synchronized(this) {
+            // 堆压力还差多少字节（heap-oom lane，2026-11-17）：判据 = `已用堆 > 安全线`。
+            // 安全线由 [GraphicsBuffer.heapSafetyLineBytes] 给（= `maxMemory ×
+            // GraphicsBuffer.HEAP_SAFETY_PERCENT%`，默认 80，与正号段的
+            // [GraphicsPool.evictWithinHeapHeadroom] 同一个常量、同一条线）。缺省
+            // `heapLineBytes = Long.MAX_VALUE` ⇒ 差值恒 0 ⇒ 只有池账本判据生效（老形状逐字不变，
+            // 桌面装置与既有调用点不必改一行）。
+            val heapNeedBytes = if (usedHeapBytes > heapLineBytes) usedHeapBytes - heapLineBytes else 0L
             // 快路径（零分配，2026-11-04 OOM 波）：先按「不去重」扫一遍驻留。不去重和
             // ≥ 去重和（共享父图的每一片 Sprite 都会把同一份 pixelBytes 再数一遍），所以
             // 不去重和 ≤ 预算 ⇒ 去重驻留必然 ≤ 预算 ⇒ 必然无事可做，直接返回。
@@ -2911,7 +2960,7 @@ class SpritePool {
                 }
                 if (upperBound > budgetBytes) break
             }
-            if (upperBound <= budgetBytes) return 0L
+            if (upperBound <= budgetBytes && heapNeedBytes <= 0L) return 0L
             // 慢路径（oomsrc 波，2026-11-05）：快路径只救「本就空/本就够」的形状；能走到
             // 这里说明**去重和要现算**，而旧形状在此之后还要两趟全表（snapshot 的 HashSet +
             // seen/ordered 的 HashSet 与 ArrayList，共三件容器），回合边界每发一次现搭一次
@@ -2930,17 +2979,23 @@ class SpritePool {
                     }
                 }
             }
-            if (resident <= budgetBytes) return 0L
+            if (resident <= budgetBytes && heapNeedBytes <= 0L) return 0L
             var freedPixels = 0L
+            var freedBytes = 0L
             var i = 0
             while (i < owned.candidateCount()) {
-                if (resident <= budgetBytes) break
+                // 两条判据同时成立才停：①池账本回到预算内（原口径，一字未改）；②本轮已退出的
+                // 字节数达到堆压力差额 `heapNeedBytes`（新增）。没越过安全线时 ② 恒成立 ⇒
+                // 停手点与改动前逐字相同。
+                if (resident <= budgetBytes && freedBytes >= heapNeedBytes) break
                 val buffer = owned.candidateAt(i)
                 if (buffer !== protect) {
                     val freed = buffer.evictDeferred()
                     if (freed > 0L) {
                         freedPixels += freed
-                        resident -= freed * 4L
+                        val bytes = freed * 4L
+                        resident -= bytes
+                        freedBytes += bytes
                     }
                 }
                 i++
@@ -2970,15 +3025,32 @@ class SpritePool {
      *
      * 调用口径：读正号段驻留用 [GraphicsPool.residentBytes]（原子读，任意线程）；本函数在
      * VM 线程回合边界调（GameHost 的页档），锁内只退不化解，见类 KDoc 的线程口径。
+     *
+     * ## 堆压力（heap-oom lane，2026-11-17）
+     *
+     * 上面的预算只量「共用档剩余」，[usedHeapBytes] 越过安全线
+     * `[GraphicsBuffer.heapSafetyLineBytes]` 时**即使池账本没超预算**也照退，判据与算式见
+     * [evictDeferredPixelsWithinBudget] 的「堆压力判据」节。两个缺省值都是生产读数
+     * （`Runtime` 两处调用，与正号段 [GraphicsPool.evictWithinHeapHeadroom] 同量级），
+     * 于是宿主的既有调用点（`MemoryGovernor` 的 `budget.csv` 页档）**不必改一行**就吃到这条
+     * 判据；单测按参数注入复刻「堆已 90%」，core 层不挂静态可变全局。
+     *
+     * @param usedHeapBytes 判定用的已用堆；生产缺省 [GraphicsBuffer.heapUsedBytes]
+     * @param maxMemoryBytes 判定用的堆上限；不可知（`Long.MAX_VALUE`）⇒ 安全线
+     *   [Long.MAX_VALUE] ⇒ 本判据恒不生效（桌面装置逐字不变）
      */
     fun evictDeferredPixelsWithinSharedBudget(
         gfxResidentBytes: Long,
         protect: GraphicsBuffer? = null,
         scratch: SpriteEvictScratch? = null,
+        usedHeapBytes: Long = GraphicsBuffer.heapUsedBytes(),
+        maxMemoryBytes: Long = Runtime.getRuntime().maxMemory(),
     ): Long = evictDeferredPixelsWithinBudget(
-        GraphicsPool.sharedPixelBudgetBytes() - gfxResidentBytes,
-        protect,
-        scratch,
+        budgetBytes = GraphicsPool.sharedPixelBudgetBytes() - gfxResidentBytes,
+        protect = protect,
+        scratch = scratch,
+        usedHeapBytes = usedHeapBytes,
+        heapLineBytes = GraphicsBuffer.heapSafetyLineBytes(maxMemoryBytes),
     )
 
     /** [evictCompositedSpritesWithinBudget] 的读数快照。 */

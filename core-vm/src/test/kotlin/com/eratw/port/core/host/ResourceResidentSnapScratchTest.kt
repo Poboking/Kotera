@@ -311,13 +311,18 @@ class ResourceResidentSnapScratchTest {
 
     /** 真语料根：`$ERATW_GAMEDIR`（4.980）与它同级的 4.981 EAGLOV3；缺则整发跳过。 */
     private fun realCorpusRoots(): List<Pair<String, Path>> {
+        // 「resources 是目录」还不够——退役档（261017）的 resources 已被换代波清成
+        // 空壳（目录在、0 条目），只查目录会让装置对着空语料装载 0 条而红。
+        // 目录内至少有一个条目才算真语料（与「本装置不回落假语料」同一原则）。
+        fun hasContent(dir: Path): Boolean =
+            Files.isDirectory(dir) && Files.list(dir).use { it.findFirst().isPresent }
         val out = ArrayList<Pair<String, Path>>()
         val primary = System.getenv("ERATW_GAMEDIR")?.trim()?.takeIf { it.isNotEmpty() }?.let { Path.of(it) }
-        if (primary != null && Files.isDirectory(primary.resolve("resources"))) {
+        if (primary != null && hasContent(primary.resolve("resources"))) {
             out += Pair(primary.fileName.toString(), primary)
         }
         val sibling = primary?.parent?.resolve("eraTW4.981-261017-EAGLOV3")
-        if (sibling != null && Files.isDirectory(sibling.resolve("resources"))) {
+        if (sibling != null && hasContent(sibling.resolve("resources"))) {
             out += Pair(sibling.fileName.toString(), sibling)
         }
         assumeTrue(out.isNotEmpty(), "缺 ERATW_GAMEDIR 或其 resources 目录：跳过（本装置不回落假语料）")

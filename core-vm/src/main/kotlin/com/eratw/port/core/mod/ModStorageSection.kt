@@ -9,20 +9,32 @@ import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
 import java.util.Collections
 
-/** An existing key mapped to null is an ABSENT tombstone, not a missing key. */
+/**
+ * Existing key mapped to null is an ABSENT tombstone, not a missing key.
+ *
+ * [dataVersion] 是**作者面数据版本**（`EraMod.dataVersion`）在侧车里的落点：装载/迁移成功后由宿主
+ * 写进容器，读档时用来判断要不要调 `onMigrate`。缺这个字段的旧档（MST1 v1 字节）解码视作 0。
+ */
 class ModStorageSection(
     val packageId: String,
     entries: Map<String, ModValue?> = emptyMap(),
     val orphan: Boolean = false,
+    val dataVersion: Int = 0,
 ) {
+    init {
+        require(dataVersion >= 0) { "dataVersion 不能为负：$dataVersion" }
+    }
+
     val entries: Map<String, ModValue?> = Collections.unmodifiableMap(LinkedHashMap(entries))
 
     fun isTombstone(key: String): Boolean = entries.containsKey(key) && entries[key] == null
 
     override fun equals(other: Any?): Boolean = other is ModStorageSection &&
-        packageId == other.packageId && entries == other.entries && orphan == other.orphan
+        packageId == other.packageId && entries == other.entries && orphan == other.orphan &&
+        dataVersion == other.dataVersion
 
-    override fun hashCode(): Int = 31 * (31 * packageId.hashCode() + entries.hashCode()) + orphan.hashCode()
+    override fun hashCode(): Int =
+        31 * (31 * (31 * packageId.hashCode() + entries.hashCode()) + orphan.hashCode()) + dataVersion
 }
 
 class ModStorageFormatException(
@@ -33,13 +45,30 @@ class ModStorageFormatException(
     enum class Reason {
         BAD_MAGIC, UNSUPPORTED_VERSION, TRUNCATED, INVALID_UTF8, INVALID_COUNT,
         UNKNOWN_VALUE_TYPE, NON_CANONICAL_ORDER, DUPLICATE_PACKAGE, DUPLICATE_KEY, TRAILING_DATA,
+        INVALID_DATA_VERSION,
     }
 }
 
-/** MST1 uses big-endian fixed-width integers and unsigned UTF-8 byte ordering, without Unicode normalization. */
+/**
+ * MST1 容器编解码：大端定宽整数 + 无符号 UTF-8 字节序，不做 Unicode 归一化。
+ *
+ * ## 版本与双读
+ *
+ * - v1（历史档）：每段 = packageId + 条目表，**没有** dataVersion 字段；
+ * - v2（当前写出）：每段末尾追加 i32 dataVersion；写出恒为 v2。
+ *
+ * 解码同时接受 v1/v2：v1 的段按 `dataVersion = 0` 补齐（=「旧档缺字段视作 0」，于是作者从 0 起
+ * 递增 dataVersion 时，老档第一次读会自然触发一次迁移）。v1→v2 的升级只发生在**写出**时，
+ * 旧档本身不就地改写。
+ */
 object ModStorageSectionCodec {
     private const val MAGIC = 0x4D535431
-    const val VERSION = 1
+
+    /** 当前写出版本；v2 = 每段末尾追加 i32 dataVersion。 */
+    const val VERSION = 2
+
+    /** 仍在读的旧版本：v1 段不含 dataVersion 字段，解码时补 0。 */
+    private const val LEGACY_VERSION = 1
 
     fun encode(sections: Collection<ModStorageSection>): ByteArray {
         val ordered = sections.map { utf8(it.packageId, "packageId") to it }
@@ -75,6 +104,8 @@ object ModStorageSectionCodec {
                         }
                     }
                 }
+                // v2：段尾记录本包数据版本（结构版本），读档迁移判断用；v1 段没有这 4 字节。
+                output.writeInt(section.dataVersion)
             }
         }
         return bytes.toByteArray()
@@ -84,7 +115,9 @@ object ModStorageSectionCodec {
         val input = Reader(bytes)
         if (input.int32("magic") != MAGIC) fail(ModStorageFormatException.Reason.BAD_MAGIC, 0, "Expected MST1")
         val version = input.uint16("version")
-        if (version != VERSION) fail(ModStorageFormatException.Reason.UNSUPPORTED_VERSION, 4, "Unsupported version $version")
+        if (version != VERSION && version != LEGACY_VERSION) {
+            fail(ModStorageFormatException.Reason.UNSUPPORTED_VERSION, 4, "Unsupported version $version")
+        }
         val count = input.int32("section count")
         if (count < 0) fail(ModStorageFormatException.Reason.INVALID_COUNT, 6, "Negative section count $count")
         input.requireCount(count.toLong(), 6, "sections")
@@ -113,7 +146,21 @@ object ModStorageSectionCodec {
                 }
                 entries[key] = value
             }
-            sections += ModStorageSection(packageId, entries, packageId !in knownPackages)
+            val dataVersion = if (version < VERSION) {
+                0
+            } else {
+                val dataVersionOffset = input.offset
+                val value = input.int32("data version")
+                if (value < 0) {
+                    fail(
+                        ModStorageFormatException.Reason.INVALID_DATA_VERSION,
+                        dataVersionOffset,
+                        "Negative data version $value",
+                    )
+                }
+                value
+            }
+            sections += ModStorageSection(packageId, entries, packageId !in knownPackages, dataVersion)
         }
         if (input.remaining != 0) fail(ModStorageFormatException.Reason.TRAILING_DATA, input.offset, "Trailing ${input.remaining} bytes")
         return Collections.unmodifiableList(sections)
@@ -130,6 +177,32 @@ object ModStorageSectionCodec {
         }
         require(encoded.remaining() <= 0xFFFF) { "$label exceeds u16 UTF-8 length: ${encoded.remaining()}" }
         return ByteArray(encoded.remaining()).also { encoded.get(it) }
+    }
+
+    /**
+     * 写入侧入档闸（M2-BUG-04）：[text] 必须能被 MST1 段格式编码 —— 合法 UTF-16（严格 UTF-8
+     * 编码器可编码，孤立代理对拒）且 UTF-8 字节数 ≤ 0xFFFF（u16 长度前缀上限）。判据单源 =
+     * [utf8] 本体（同一编码器、同一上限，不另抄一份判据）。
+     *
+     * 为什么判据必须前移到写入入口：容器写入口（[ModStorageStore] 的作者面 `put` / 宿主面
+     * `putReservedKey`）在**落写之前**调本闸，使容器里每段「按构造可编码」—— 存档抓取
+     * （ModSidecarStoragePort.captureChunks 逐段 [encode]）与足迹诊断（ModStorageFootprint）
+     * 的编码从此不可能因作者数据抛 IAE。修复前该判据只在编码期兑现：超限/非法文本先落写、
+     * 再经诊断旁路抛 IAE（写已落地却报错 + 毒条目留在段里令本包后续每次 put 连锁抛 +
+     * 存档抓取整链失败被 saveData 的 catch(Throwable) 折成存档失败）。
+     *
+     * 解码方向天然满足本闸（u16 前缀定界 + 严格 UTF-8 解码拒绝），无需复查；包装后仍带
+     * [utf8] 的原始判据文本（超限字节数 / Invalid UTF-16），作者可据此定位。
+     */
+    internal fun requireEncodableText(label: String, text: String) {
+        try {
+            utf8(text, label)
+        } catch (error: IllegalArgumentException) {
+            throw IllegalArgumentException(
+                "$label 无法编入 MST1 段格式（须为合法 UTF-16 且 UTF-8 编码后不超过 65535 字节）：${error.message}",
+                error,
+            )
+        }
     }
 
     private fun compareBytes(a: ByteArray, b: ByteArray): Int {

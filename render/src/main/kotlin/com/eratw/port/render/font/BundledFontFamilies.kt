@@ -367,24 +367,44 @@ object BundledFontFamilies {
             }
         }
 
+    /**
+     * 登记族名的**预归一键**（启动期算一次）。
+     *
+     * 为什么要有它：热路径此前每次 [byFamily] 都对八个登记族名各建一遍 `StringBuilder`
+     * 再 `toString` —— 2026-11-20 vivo ANR 的冻结栈顶
+     * （`StringBuilder.toString ← normalize ← byFamily ← resolve ← FontWidthRuler.advanceCells`）
+     * 正是它；折行一整屏几千码位 × 9 次归一就是秒级。预归一后 [byFamily]/[resolve]
+     * 对请求名只归一一次、其余全是短串比较，**零分配**。
+     * （调用侧真正的去分配靠 `ResolvedFontFamilyCache`；本表把缓存未命中的残路也变便宜。）
+     */
+    private val NORMALIZED_FAMILIES: List<Pair<String, BundledFontFamily>> =
+        ALL.map { normalize(it.family) to it }
+
+    /** 归一键 → 族实例；不命中返回 null（调用方按既有优先级落到别名表或默认族）。 */
+    private fun byNormalizedKey(key: String): BundledFontFamily? {
+        for ((normalized, entry) in NORMALIZED_FAMILIES) {
+            if (normalized == key) return entry
+        }
+        return null
+    }
+
     /** 按 id 查（`sarasa` / `lxgw` / `maple` / `saitamaar` / `misaki` / `fusion` / `ark` / `unifont`）。 */
     fun byId(id: String): BundledFontFamily? = ALL.firstOrNull { it.id == id }
 
     /** 按族名精确查（大小写不敏感，空白已归一）。 */
-    fun byFamily(family: String): BundledFontFamily? {
-        val key = normalize(family)
-        return ALL.firstOrNull { normalize(it.family) == key }
-    }
+    fun byFamily(family: String): BundledFontFamily? = byNormalizedKey(normalize(family))
 
     /**
      * 配置里的字体名 → 实际使用的族。**永不返回 null、永不抛。**
      *
      * 优先级：登记族名 > 别名表 > 默认族。
+     * 请求名只归一一次（旧实现 `byFamily` 与别名表各归一一遍，白做一次）。
      */
     fun resolve(requested: String?): BundledFontFamily {
         if (requested.isNullOrBlank()) return default
-        byFamily(requested)?.let { return it }
-        ALIASES[normalize(requested)]?.let { return byId(it) ?: default }
+        val key = normalize(requested)
+        byNormalizedKey(key)?.let { return it }
+        ALIASES[key]?.let { return byId(it) ?: default }
         return default
     }
 }

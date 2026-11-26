@@ -12,6 +12,11 @@ fixtures/replay/** text eol=lf
 # 缺省关审计的逐字节基线（stdout / 未绑定符号 TSV）是复现凭据，钉 LF。
 tools/erbcc/src/test/resources/reachability/** text eol=lf
 
+# 审计基线与最小语料是逐字节复现凭据，钉 LF。
+tools/erbcc/audit-baseline/** text eol=lf
+tools/erbcc/src/test/resources/minicorpus-engine/** text eol=lf
+tools/erbcc/src/test/resources/minicorpus-engine-expr/** text eol=lf
+
 # erbcc-rs 的基准与基准语料是复现凭据：含 SJIS 原始字节（半截 lead byte），
 # 整棵树按 binary 处理，不做任何 EOL 转换。
 tools/erbcc-rs/tests/data/** binary

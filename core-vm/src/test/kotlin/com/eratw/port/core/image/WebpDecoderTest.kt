@@ -31,19 +31,19 @@ import kotlin.test.assertTrue
  *
  * | 容器形态 | 4.980 | 4.981 | 本移植侧结果 |
  * |---|---|---|---|
- * | `VP8X` + `VP8 ` + `ALPH`（有损 + 独立 alpha） | 1036 | 1576 | 不支持 → [WebpDecodeException] → 函数 0 |
+ * | `VP8X` + `VP8 ` + `ALPH`（有损 + 独立 alpha） | 1036 | 1585 | 不支持 → [WebpDecodeException] → 函数 0 |
  * | `VP8X` + `VP8 `（有损、无 ALPH） | 26 | 47 | 同上 |
  * | `VP8 ` 裸容器（有损） | 831 | 18 | 同上 |
- * | `VP8L` 裸容器（无损） | 569 / 解通 125 | 1143 / 解通 458 | 容器/头支持，位流层解通数见 [语料全量成败清单] |
- * | `VP8X` + `VP8L`（无损） | 77 / 解通 2 | 74 / 解通 2 | 同上 |
- * | `VP8X` + `ANIM`/`ANMF`（动画） | 9 / 解通 9 | 25 / 解通 25 | 复刻原版：画布尺寸空白图 → 函数 1 |
- * | 合计 | 2548 / 成功 136 | 2883 / 成功 485 | 动画全部成功；有损全部失败 |
+ * | `VP8L` 裸容器（无损） | 569 / 解通 125 | 1136 / 解通 457 | 容器/头支持，位流层解通数见 [语料全量成败清单] |
+ * | `VP8X` + `VP8L`（无损） | 77 / 解通 2 | 75 / 解通 2 | 同上 |
+ * | `VP8X` + `ANIM`/`ANMF`（动画） | 9 / 解通 9 | 26 / 解通 26 | 复刻原版：画布尺寸空白图 → 函数 1 |
+ * | 合计 | 2548 / 成功 136 | 2887 / 成功 485 | 动画全部成功；有损全部失败 |
  *
- * 有损合计 4.980 = 1036 + 26 + 831 = **1893**、4.981 = 1576 + 47 + 18 = **1641**；
- * 无损合计 4.980 = 569 + 77 = **646**、4.981 = 1143 + 74 = **1217**；
- * `VP8X` 容器 4.980 = 1036 + 26 + 77 + 9 = **1148**、4.981 = 1576 + 47 + 74 + 25 = **1722**。
+ * 有损合计 4.980 = 1036 + 26 + 831 = **1893**、4.981 = 1585 + 47 + 18 = **1650**；
+ * 无损合计 4.980 = 569 + 77 = **646**、4.981 = 1136 + 75 = **1211**；
+ * `VP8X` 容器 4.980 = 1036 + 26 + 77 + 9 = **1148**、4.981 = 1585 + 47 + 75 + 26 = **1733**。
  * 两列都满足「没有无损 + ALPH 的实例」：顶层 `ALPH` 段只与有损位流配对。
- * 动画文件 4.981 25 个（`EagloV` 5、`l13/留琴` 8、`剧本自定义附件/K97` 9、`动图示例` 3），4.980 9 个；
+ * 动画文件 4.981 26 个（`EagloV` 6、`l13/留琴` 8、`剧本自定义附件/K97` 9、`动图示例` 3），4.980 9 个；
  * 全部 `VP8X` 且 ALPHA 标志置位。
  * 普查最大尺寸：4.980 = 8192x4000；4.981 新增 `resources/FASH绘/26_別顔2.webp` 头声明 **16176x16176**
  * （约 2.6 亿像素），超出原版 8192 上限与像素总数守卫——该根普查里它按 TOOBIG/像素总数失败属预期。
@@ -111,7 +111,7 @@ class WebpDecoderTest {
         assertTrue(ex.message!!.startsWith("WEBP-UNSUPPORTED-LOSSY"), ex.message)
         // 这一笔**不按根取列**：断言锁的是 main 侧失败消息里的登记数（WebpDecoder.kt:263 的常量文本），
         // 与当前挂的是哪个语料根无关——两根下解码器吐的都是同一句。该文本登记的是 4.980 普查
-        // 「有损 1893 = 831 裸容器 + 1036 带 ALPH + 26 不带 ALPH」（4.981 实为 1641，见类 KDoc）；
+        // 「有损 1893 = 831 裸容器 + 1036 带 ALPH + 26 不带 ALPH」（4.981 = 1650，见类 KDoc）；
         // 断言只锁「消息形态带普查登记数」，数字随 main 侧文案走，不随语料升版改。
         assertTrue(ex.message!!.contains("1893"), ex.message)
     }
@@ -247,11 +247,12 @@ class WebpDecoderTest {
      * 遍历语料全部 `.webp`，按容器形态统计成败并打印清单。
      *
      * 断言的是**两根 Python 头普查 + 本路 JVM 全量自查**对上的读数，全部按 `when (profile)` 两列：
-     * 总数 4.980 = 2548 / 4.981 = 2883；动画 9 / 25 全部成功；有损 1893 / 1641 全部失败且失败码只能是
+     * 总数 4.980 = 2548 / 4.981 = 2887（4.981 列 = 261111 出货根实扫，2026-11-17 随语料换代重采）；
+     * 动画 9 / 26 全部成功；有损 1893 / 1650 全部失败且失败码只能是
      * `WEBP-UNSUPPORTED-LOSSY`（或结构截断 / 超限），无损解通数见下方逐格断言。
      *
      * ⚠️ 「无损解通数 < 无损总数」是**当前已知缺口**（`WebpDecoder` 的 VP8L 位流层与 libwebp 不同步），
-     * 不是设计目标：4.980 = 125/646、4.981 = 458/1217；位流层修好后这里的读数必须上调。
+     * 不是设计目标：4.980 = 125/646、4.981 = 457/1211；位流层修好后这里的读数必须上调。
      */
     @Test
     fun `语料全量成败清单`() {
@@ -264,7 +265,7 @@ class WebpDecoderTest {
         assertEquals(
             when (profile) {
                 CorpusProfile.V4_980 -> 2548
-                CorpusProfile.V4_981 -> 2883
+                CorpusProfile.V4_981 -> 2887
             },
             files.size,
             "语料 .webp 总数（$profile 实扫）",
@@ -312,7 +313,7 @@ class WebpDecoderTest {
         assertEquals(
             when (profile) {
                 CorpusProfile.V4_980 -> 1148
-                CorpusProfile.V4_981 -> 1722
+                CorpusProfile.V4_981 -> 1733
             },
             total["VP8X-lossy"]!! + total["VP8X-lossless"]!! + total["VP8X-animated"]!!,
             "VP8X 容器总数（$profile 实扫）",
@@ -328,7 +329,7 @@ class WebpDecoderTest {
         assertEquals(
             when (profile) {
                 CorpusProfile.V4_980 -> 569
-                CorpusProfile.V4_981 -> 1143
+                CorpusProfile.V4_981 -> 1136
             },
             total["bare/VP8L"],
             "裸无损容器（$profile 实扫）",
@@ -336,7 +337,7 @@ class WebpDecoderTest {
         assertEquals(
             when (profile) {
                 CorpusProfile.V4_980 -> 1893
-                CorpusProfile.V4_981 -> 1641
+                CorpusProfile.V4_981 -> 1650
             },
             (total["bare/VP8 "] ?: 0) + (total["VP8X-lossy"] ?: 0),
             "有损位流合计（$profile 实扫）",
@@ -344,7 +345,7 @@ class WebpDecoderTest {
         assertEquals(
             when (profile) {
                 CorpusProfile.V4_980 -> 646
-                CorpusProfile.V4_981 -> 1217
+                CorpusProfile.V4_981 -> 1211
             },
             (total["bare/VP8L"] ?: 0) + (total["VP8X-lossless"] ?: 0),
             "无损位流合计（$profile 实扫）",
@@ -352,7 +353,7 @@ class WebpDecoderTest {
         assertEquals(
             when (profile) {
                 CorpusProfile.V4_980 -> 9
-                CorpusProfile.V4_981 -> 25
+                CorpusProfile.V4_981 -> 26
             },
             total["VP8X-animated"],
             "动画条数（$profile 实扫）",
@@ -364,16 +365,16 @@ class WebpDecoderTest {
         assertEquals(
             when (profile) {
                 CorpusProfile.V4_980 -> 9
-                CorpusProfile.V4_981 -> 25
+                CorpusProfile.V4_981 -> 26
             },
             ok["VP8X-animated"],
             "动画全部按原版给空白图（$profile）",
         )
-        // 无损当前实测读数（缺口登记，修好后要上调；4.980 = 125/2/136、4.981 = 458/2/485，两根实扫）
+        // 无损当前实测读数（缺口登记，修好后要上调；4.980 = 125/2/136、4.981 = 457/2/485，两根实扫）
         assertEquals(
             when (profile) {
                 CorpusProfile.V4_980 -> 125
-                CorpusProfile.V4_981 -> 458
+                CorpusProfile.V4_981 -> 457
             },
             ok["bare/VP8L"],
             "裸 VP8L 当前实测解通数（$profile）",

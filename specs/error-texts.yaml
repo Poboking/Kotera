@@ -1852,3 +1852,91 @@ keys:
       调用了一个加载时解析失败的函数
     en: |-
       A function that failed parsing at loading was called
+
+  # =====================================================================
+  # 十二、函数实参个数族（arity 闸）—— 2026-11-17 lane arity-family 整族收编
+  # 生产者与官方分支一一对应（1.824 `FunctionMethod.cs` / 4.981 同行族，两版键名与触发支全同）：
+  #   TooManyFuncArgs     1.824 :279 / 4.981 :263 —— 实参多于槽位（`omitStart >= 0` 形）
+  #   NotEnoughArgs       1.824 :283 / 4.981 :269 —— 少于下界（下界 = OmitStart，无省略位时 = 形参表长度）
+  #   ArgsCountNotMatches 1.824 非 Ex :314、Ex :270 / 4.981 :254 —— 定长形参表个数不匹配
+  #   ArgsNotNeeded       1.824 非 Ex :316、Ex :274 / 4.981 :256 —— 形参表长度为 0 却传了实参
+  #   ArgsNotFitExpr      1.824 :191 / 4.981 :157 —— 成对变参组 `(count - 前缀) % 组长 != 0`
+  #
+  # 两表不同文（类头点名的 `ArgIsNot*` / `NotVarFunc` 同判据 ⇒ 收 reference 形）：
+  # 语料根表（`lang/emuera-zhs.xml` :946/:947/:948/:949/:989）把函数名放到冒号后
+  # （`函数{0}: 参数过多`），reference 内嵌表放在冒号前（`{0}函数: 参数过多`）。日文两版
+  # `Lang.cs` 逐字同文、英文两版 eng 表逐字同文（只有行号差）。因此本族**不记 `zhs_root_xml`**：
+  # 一记就进 `LangKeySourceTableTest`「根表可读时逐个核对」的逐字对账，必然因位序判红。
+  # 移植侧本族的现网屏上串本来就是 reference 形（`GET_MONTH函数: 参数过多`，
+  # `fn/Builtins.kt` 与 `fn/FindElementOmitTest` 的既有读数），收这一形 = 零屏上漂移。
+  # =====================================================================
+
+  - id: TooManyFuncArgs
+    lang_cs: 3790
+    zhs_xml: 901
+    eng_xml: 904
+    args: 1
+    status: wired
+    used_at: fn/Builtins.kt checkArity 的「LangKey.TooManyFuncArgs」+ compile/ArgSignatureCheck.kt checkOneBuiltin 的「LangKey.TooManyFuncArgs」
+    ja: |-
+      {0}関数: 引数が多すぎます
+    zhs: |-
+      {0}函数: 参数过多
+    en: |-
+      {0}: Too many arguments
+
+  - id: NotEnoughArgs
+    lang_cs: 3794
+    zhs_xml: 902
+    eng_xml: 905
+    args: 2
+    status: wired
+    used_at: fn/Builtins.kt checkArity 的「LangKey.NotEnoughArgs」+ compile/ArgSignatureCheck.kt checkOneBuiltin 的「LangKey.NotEnoughArgs」
+    ja: |-
+      {0}関数: 少なくとも{1}つの引数が必要です
+    zhs: |-
+      {0}函数: 至少需要{1}个参数
+    en: |-
+      {0}: Required {1} arguments
+
+  - id: ArgsCountNotMatches
+    lang_cs: 3798
+    zhs_xml: 903
+    eng_xml: 906
+    args: 3
+    status: wired
+    used_at: fn/Builtins.kt checkArity 的「LangKey.ArgsCountNotMatches」+ compile/ArgSignatureCheck.kt checkOneBuiltin 的「LangKey.ArgsCountNotMatches」
+    ja: |-
+      {0}関数: {1}つの引数が必要ですが，{2}つが与えられています
+    zhs: |-
+      {0}函数: 需要{1}个参数，但传入了{2}个
+    en: |-
+      {0}: Required {1} arguments but passed {2}
+
+  - id: ArgsNotNeeded
+    lang_cs: 3802
+    zhs_xml: 904
+    eng_xml: 907
+    args: 1
+    status: wired
+    used_at: fn/Builtins.kt checkArity 的「LangKey.ArgsNotNeeded」+ compile/ArgSignatureCheck.kt checkOneBuiltin 的「LangKey.ArgsNotNeeded」
+    ja: |-
+      {0}関数: 引数の必要がありません
+    zhs: |-
+      {0}函数: 不需要参数
+    en: |-
+      {0}: Not required arguments
+
+  - id: ArgsNotFitExpr
+    lang_cs: 3958
+    zhs_xml: 943
+    eng_xml: 946
+    args: 4
+    status: wired
+    used_at: fn/MapDataTableMethods.kt dtRowAdd 的「CodeEE.keyed(LangKey.ArgsNotFitExpr」+ compile/ArgSignatureCheck.kt checkOneBuiltin 的「LangKey.ArgsNotFitExpr」+ tools/erbcc/src/main/kotlin/com/eratw/port/erbcc/compile/PairedArgLoadCheck.kt pairedArgLoadWarning 的「LangKey.ArgsNotFitExpr」
+    ja: |-
+      {0}関数: 引数の数({1})が{2}+{3}nではありません
+    zhs: |-
+      {0}函数: 参数数量({1})不满足{2}+{3}n
+    en: |-
+      {0}: The count of the arguments ({1}) is not matching {2}+{3}n

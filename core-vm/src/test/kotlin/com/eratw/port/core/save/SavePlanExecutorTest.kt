@@ -165,6 +165,42 @@ class SavePlanExecutorTest {
     }
 
     @Test
+    fun `RollBack目标静默半截写_必须fail-closed且保留journal与bak_重入自愈`() {
+        // 生产写面 NioSaveTransactionIo.write 是单次 channel.write（NioSaveTransactionIo.kt:53），
+        // 没有同仓 RootedSaveFileIo 的「write 可能部分写入，必须循环到缓冲耗尽」循环
+        // （SaveFileIo.kt:262）：静默半截写不抛异常。回滚写路若不回读校验，半截目标会
+        // 随 journal 与 .bak 的删除变成永久损坏且无恢复源 —— 本闸钉住「写后按
+        // journal.oldSha256 回读，不符即抛、恢复源保留」。
+        val io = F.seededIo()
+        val shortWrite = ShortWriteTargetIo(io, F.SAV_TARGET)
+        io.disk[F.SAV_TARGET] = F.SAV_NEW.copyOf()
+        io.disk[F.RT2_PART] = "corrupt".toByteArray()
+        io.disk[F.SAV_BAK] = F.SAV_OLD.copyOf()
+        io.disk[F.RT2_BAK] = F.RT2_OLD.copyOf()
+        val journal = F.journal(CommitState.BACKED_UP, F.savMember(), F.rt2Member())
+        F.writeJournalToDisk(io, journal)
+        val plan = planFor(io, journal)
+        assertIs<SaveRecovery.RecoveryPlan.RollBack>(plan)
+
+        // sav 目标写入静默半截：未修复时回滚会「成功」，journal 与 .bak 随后全删。
+        assertThrows<IllegalStateException> {
+            SavePlanExecutor(shortWrite, F.JOURNAL_PATH).execute(journal, plan)
+        }
+        // 恢复源必须原样保留：journal 未删、.bak 对未删，下一次恢复可按同一判定重做。
+        assertTrue(io.disk[F.JOURNAL_PATH] != null)
+        assertTrue(io.disk[F.SAV_BAK] != null && io.disk[F.RT2_BAK] != null)
+
+        // 重入（写入面恢复健康）：按同一判定整对回滚收敛，残件清光。
+        shortWrite.shortWriteEnabled = false
+        val result = SavePlanExecutor.recoverAndExecute(shortWrite, F.JOURNAL_PATH)
+        assertEquals(SavePlanExecutor.ExecutionResult.RolledBack(2), result)
+        assertEquals(F.SAV_OLD.asList(), io.disk[F.SAV_TARGET]!!.asList())
+        assertEquals(F.RT2_OLD.asList(), io.disk[F.RT2_TARGET]!!.asList())
+        assertTrue(io.disk[F.JOURNAL_PATH] == null)
+        assertTrue(io.disk[F.SAV_BAK] == null && io.disk[F.RT2_BAK] == null)
+    }
+
+    @Test
     fun `Halt_零动作原样报告`() {
         val io = F.seededIo()
         io.disk[F.SAV_TARGET] = F.SAV_NEW.copyOf()
@@ -204,5 +240,35 @@ class SavePlanExecutorTest {
         assertEquals(sha256Hex(F.SAV_NEW), sha256Hex(io.disk[F.SAV_TARGET]!!))
         assertEquals(sha256Hex(F.RT2_NEW), sha256Hex(io.disk[F.RT2_TARGET]!!))
         assertTrue(io.disk[F.JOURNAL_PATH] == null)
+    }
+
+    /**
+     * 只对 [targetPath] 静默半截写的假体：模拟阻塞 FileChannel 单次 write 少写不抛
+     * （对照 RootedSaveFileIo 的同判据锚 SaveFileIo.kt:262「write 可能部分写入，
+     * 必须循环到缓冲耗尽」；NioSaveTransactionIo.write 无该循环）。
+     */
+    private class ShortWriteTargetIo(
+        private val inner: FakeTransactionIo,
+        private val targetPath: String,
+    ) : SaveTransactionIo {
+        var shortWriteEnabled = true
+
+        override fun read(path: String): ByteArray? = inner.read(path)
+
+        override fun write(path: String, bytes: ByteArray) {
+            if (shortWriteEnabled && path == targetPath && bytes.size > 1) {
+                inner.write(path, bytes.copyOfRange(0, bytes.size / 2))
+            } else {
+                inner.write(path, bytes)
+            }
+        }
+
+        override fun fsync(path: String) = inner.fsync(path)
+
+        override fun rename(from: String, to: String) = inner.rename(from, to)
+
+        override fun delete(path: String) = inner.delete(path)
+
+        override fun availableBytes(): Long = inner.availableBytes()
     }
 }

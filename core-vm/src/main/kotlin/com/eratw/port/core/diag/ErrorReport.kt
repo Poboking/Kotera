@@ -50,6 +50,10 @@ import java.time.format.DateTimeFormatter
  * [STACK_MAX_LINES] / [EXTRA_MAX_LINES] / [EXIT_FORENSICS_MAX_LINES]），单行超长截断到
  * [LINE_MAX_CHARS]；截断在**尾部保留**（屏上原文取最后 N 行——最近的内容才是现场）。
  *
+ * 行数窗口与单行闸都按**物理行**算：[extraSectionLines] 的一条元素若内嵌换行，先摊平成多条
+ * 物理行再各自剪（2026-11-17 lane-g-mem）。否则「一条逻辑读数写成多行」会被当成一行 400 字
+ * 剪掉尾巴 —— 内存分项账面正是这么丢掉「代码缓存」四键的。
+ *
  * KDoc 注意：正文不出现块注释定界符字符对（见 AGENTS.md 铁律 5）。
  */
 class ErrorReport(
@@ -123,6 +127,26 @@ class ErrorReport(
     val consoleTailLines: List<String> = emptyList(),
     /** 补充现场（宿主自定的读数行，如装载轨迹）。 */
     val extraSectionLines: List<String> = emptyList(),
+    /**
+     * 度量源读数（**单独成节、单独行预算**）：堆结构账面这类「多行同源读数」走这里，
+     * 不走 [extraSectionLines]。
+     *
+     * 为什么另开一节（2026-11-17 lane-k）：[extraSectionLines] 是**尾窗**
+     * （[EXTRA_MAX_LINES] 条物理行，越靠前越先被剪），而堆账面在真机满档报告里排在中前段
+     * （装载轨迹 68 行 + 各读数块叠加就顶穿 80 行）⇒ 账面整段被挤掉，报告里连
+     * 「Java 堆结构账面」的段 5 代码缓存都看不到（0.2.46 的 180 行报告即此形状）。
+     * 把预算从 80 抬到 120 只是把这条线往后挪一格，下次字段继续长就再复现一次
+     * （[EXTRA_MAX_LINES] 的 KDoc 已经记过一次 40→80）；这里的判据是
+     * **「整段读数」与「可能无限增长的现场行」不该共用同一个窗口**。
+     *
+     * 本节口径：
+     * - 位置在 `[错误]` 之后、异常栈之前 ⇒ 既单独计预算，也**提前**到人和脚本都先看到的地方；
+     * - 自己的窗口 [METRIC_MAX_LINES] 条物理行（尾部保留），逐行仍走 [clip] 的
+     *   [LINE_MAX_CHARS] 单行闸 —— **不抬那道闸、也不在这里按行首白名单放行**（那等于在
+     *   报告面把超长读数伪装成合规）；
+     * - 与 [extraSectionLines] 不重叠（宿主只许择一投递，见接线约定）。
+     */
+    val metricSectionLines: List<String> = emptyList(),
 ) {
 
     /** 渲染成完整报告文本（UTF-8 纯文本，发送端不再加工）。 */
@@ -159,6 +183,11 @@ class ErrorReport(
         if (errorMessage.isNotEmpty()) sb.appendLine("信息：${clip(errorMessage)}")
         rootCause?.takeIf { it.isNotBlank() }?.let { sb.appendLine("根因：${clip(it)}") }
         scriptLocation?.takeIf { it.isNotBlank() }?.let { sb.appendLine("脚本位置：${clip(it)}") }
+        if (metricSectionLines.isNotEmpty()) {
+            sb.appendLine(sep)
+            sb.appendLine("[度量源读数]（最多 $METRIC_MAX_LINES 行，超限保尾部；每行按 $LINE_MAX_CHARS 字剪尾）")
+            metricSectionLines.takeLastPhysicalLines(METRIC_MAX_LINES).forEach { sb.appendLine(clip(it)) }
+        }
         if (errorStackLines.isNotEmpty()) {
             sb.appendLine(sep)
             sb.appendLine("[异常栈（含因果链）]（最多 $ERROR_STACK_MAX_LINES 行，超限保尾部——最深层是根因）")
@@ -177,12 +206,24 @@ class ErrorReport(
         if (extraSectionLines.isNotEmpty()) {
             sb.appendLine(sep)
             sb.appendLine("[补充现场]")
-            extraSectionLines.takeLast(EXTRA_MAX_LINES).forEach { sb.appendLine(clip(it)) }
+            extraSectionLines.takeLastPhysicalLines(EXTRA_MAX_LINES).forEach { sb.appendLine(clip(it)) }
         }
         sb.appendLine(bar)
         sb.appendLine("报告结束")
         return sb.toString()
     }
+
+    /**
+     * 摊平内嵌换行后取尾部 [n] 条**物理行**。
+     *
+     * 一条「逻辑读数」可以是多物理行（度量源的 `renderReportLines` 就是按段断行的），
+     * 而 [clip] 的单行闸只该管一行物理文本。不摊平就会出现「整段 430 字当一行 →
+     * 尾部读数被切」的形状：2026-11-17 真机三份 OOM 报告里
+     * `代码缓存：节点块 …（超长截断）` 即此。窗口也按物理行算，否则一条长读数会
+     * 顶掉 [EXTRA_MAX_LINES] 里若干条真有信息的行。
+     */
+    private fun List<String>.takeLastPhysicalLines(n: Int): List<String> =
+        flatMap { it.lineSequence().toList() }.takeLast(n)
 
     private fun clip(line: String): String =
         if (line.length <= LINE_MAX_CHARS) line else line.take(LINE_MAX_CHARS) + "…（超长截断）"
@@ -215,6 +256,18 @@ class ErrorReport(
          * 不在一个量级上。
          */
         const val EXTRA_MAX_LINES = 80
+
+        /**
+         * 度量源读数小节的行数上限（尾部保留）：[metricSectionLines]。
+         *
+         * 为什么单开一条而从 [EXTRA_MAX_LINES] 的 80 里分：那一窗口装的是**可能无限增长**的
+         * 现场行（装载轨迹 / 冻结现场 / 心跳），多行同源的整段读数（堆结构账面
+         * `LiveSetCensus.renderReportLines`，段数由 `SECTION_COUNT` 封顶）在它中前段会被整段剪掉。
+         * 12 = 账单段数上限（5）+ 翻倍余量：字段继续加时仍能整段装下，且这一节总量有界
+         * （12 × [LINE_MAX_CHARS] ≈ 4.8 KB，端点单份 512 KB 上限不在一个量级）。
+         * 若真长到 12 行以上，读数按物理行尾部保留 —— 与其余小节同一条纪律。
+         */
+        const val METRIC_MAX_LINES = 12
 
         /**
          * 系统取证小节的行数上限：本轮足迹两行 + 最多三条退出记录 + 判读一行，

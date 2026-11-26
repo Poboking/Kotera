@@ -13,7 +13,6 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
-import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -23,9 +22,11 @@ import org.junit.jupiter.api.io.TempDir
  *
  * 策略契约：
  * - target 不存在：复制 seed；
- * - `plugins/qol_data.db`（[DEFAULT_MUTABLE_DATA_SOURCES]）：可写稳定路径，target 已存在就
- *   永不回滚，seed 更新也不覆盖玩家写入；
- * - 其余 seed 库：seed 的 lastModified 比 target 新时原子刷新，否则保留 ERB 写入；
+ * - [DEFAULT_MUTABLE_DATA_SOURCES] 命中的库（默认空集，机制经构造参数注入测试）：target 已存在
+ *   就永不刷新，seed 更新也不覆盖 —— 供未来真正存玩家私有状态的库使用；
+ * - 其余 seed 库（含 `plugins/qol_data.db`，2026-11-17 起退出 mutable：其 12 张表全部由启动
+ *   注册 `QOL_DB_INIT` 从语料常量全量重建，无玩家私有数据，取证见 `specs/verify-notes.md`
+ *   2026-11-17 章节）：seed 的 lastModified 比 target 新时原子刷新，否则保留 ERB 写入；
  * - 刷新失败（如 target 只读）必须保留旧库，不能出现半截文件。
  */
 class SqliteSeedPolicyTest {
@@ -83,26 +84,51 @@ class SqliteSeedPolicyTest {
     }
 
     @Test
-    fun `qol_data 可写库保留玩家写入且不随 seed 更新回滚`() {
-        val layout = SqlitePathLayout(seedRoot, writeRoot)
-        val qol = assertIs<SqliteOpenTarget.File>(layout.resolve("Data Source=plugins/qol_data.db"))
-        assertTrue(qol.mutable, "plugins/qol_data.db 必须是可写稳定库")
-        assertEquals("plugins/qol_data.db", qol.relativePath)
-
+    fun `qol_data 语料派生库随 seed 更新刷新`() {
+        // 2026-11-17 退出 mutable 的行为钉：qol_data.db 12 张表全部由启动注册从语料常量
+        // 全量重建（无玩家私有数据），新 APK 带的新 seed 必须能覆盖老设备旧库。
         val seed = createSeed(
             "plugins/qol_data.db",
             "CREATE TABLE qol (id INTEGER PRIMARY KEY, v TEXT)",
-            "INSERT INTO qol (id, v) VALUES (1, 'seed')",
+            "INSERT INTO qol (id, v) VALUES (1, 'seed-v1')",
         )
         val driver = newDriver()
         driver.open("Data Source=plugins/qol_data.db").use { db ->
+            assertEquals(1L, db.scalarLong("SELECT COUNT(*) FROM qol"))
+        }
+
+        executeSeed(seed, "INSERT INTO qol (id, v) VALUES (2, 'seed-v2')")
+        bumpModified(seed)
+
+        driver.open("Data Source=plugins/qol_data.db").use { db ->
+            assertEquals(2L, db.scalarLong("SELECT COUNT(*) FROM qol"), "新 seed 必须覆盖旧库")
+            assertEquals("seed-v2", db.text("SELECT v FROM qol WHERE id = 2"))
+        }
+    }
+
+    @Test
+    fun `注入 mutable 集合的库保留写入且不随 seed 更新刷新`() {
+        // 机制级钉：mutableDataSources 注入命中后「永不刷新」语义仍在（默认空集只是没有
+        // 生产消费者），防止未来加回玩家可写库时机制已被静默删掉。
+        val seed = createSeed(
+            "plugins/private.db",
+            "CREATE TABLE qol (id INTEGER PRIMARY KEY, v TEXT)",
+            "INSERT INTO qol (id, v) VALUES (1, 'seed')",
+        )
+        val driver = AndroidXSqliteDriver(
+            BundledSQLiteDriver(),
+            seedRoot,
+            writeRoot,
+            mutableDataSources = setOf("plugins/private.db"),
+        )
+        driver.open("Data Source=plugins/private.db").use { db ->
             db.execute("INSERT INTO qol (id, v) VALUES (100, 'player')")
         }
 
         executeSeed(seed, "INSERT INTO qol (id, v) VALUES (2, 'seed-new')")
         bumpModified(seed)
 
-        driver.open("Data Source=plugins/qol_data.db").use { db ->
+        driver.open("Data Source=plugins/private.db").use { db ->
             assertEquals("player", db.text("SELECT v FROM qol WHERE id = 100"))
             assertEquals(0L, db.scalarLong("SELECT COUNT(*) FROM qol WHERE id = 2"))
             assertEquals(2L, db.scalarLong("SELECT COUNT(*) FROM qol"))

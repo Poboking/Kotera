@@ -6,6 +6,14 @@ import com.eratw.port.modapi.ActionSelectionContext
 import com.eratw.port.modapi.EntityId
 import com.eratw.port.modapi.EraMod
 import com.eratw.port.modapi.ModContext
+import com.eratw.port.modapi.add
+import com.eratw.port.modapi.get
+import com.eratw.port.modapi.put
+import com.eratw.port.modapi.query
+import com.eratw.port.modapi.setValue
+import com.eratw.port.modapi.valueOf
+import com.eratw.port.modlivingworld.generated.LwEventFacade
+import com.eratw.port.modlivingworld.generated.NpcKeys
 
 /**
  * 社交事件 Mod 入口（§21.9 判据 5「多候选确定性 + 可解释淘汰 + 决策随机流独立性」与
@@ -24,12 +32,22 @@ import com.eratw.port.modapi.ModContext
  *   抛异常的约束谓词 + 点名抛异常的 provider（metadata 开关）—— 失败记录带
  *   packageId / candidateKey / 阶段，判据 7 的定位面。
  *
- * 降级口径与角色 Mod 相同（生产宿主缺省不注入 DecisionPipeline，ModRuntimeAssembly.kt:91）：
- * fail-closed 桩异常原文进日志面 + [arbitrationDegraded] 读数，装载继续。
+ * 降级口径与角色 Mod 相同：生产**开态**注入真 `DecisionPipeline`（总闸玩家面缺省开 =
+ * RT2-GATE-OPEN，ModRuntimeAssembly.kt:383 `buildDecisionPipeline` 开态构造、:448 注入位；
+ * 类头 :141 明文该口径自 W1-DSTATE 起翻转，取代旧说「生产缺省不注入」）——生产装载成功的
+ * mod 不走 UOE 降级分支；仅当宿主未注入管线（关态 = mod 根本不装载，生产不可达；台架/测试
+ * 构造缺省 null）时 `context.actions` 是显式 fail-closed 桩 —— 桩异常原文进日志面 +
+ * [arbitrationDegraded] 读数，装载继续。
+ *
+ * 事件读数走生成物 [LwEventFacade]：列名由生成物一处提供（本包不声明原型，读数挂在宿主
+ * 实体上，故 Facade 只有 `of` 没有 `create`）。
  */
 class EventMod : EraMod {
 
     private lateinit var context: ModContext
+
+    /** 类型化读写面（onLoad 装配）。 */
+    private lateinit var event: LwEventFacade
 
     /** 仲裁参与是否因宿主未注入管线而降级（与角色 Mod 同口径）。 */
     var arbitrationDegraded: Boolean = false
@@ -41,7 +59,8 @@ class EventMod : EraMod {
 
     override fun onLoad(context: ModContext) {
         this.context = context
-        eventRounds = context.storage.get(EventDeclarations.STORAGE_EVENT_ROUNDS)?.toLongOrNull() ?: 0L
+        this.event = LwEventFacade(context.entities)
+        eventRounds = context.storage.get(EventDeclarations.EVENT_ROUNDS)?.toLongOrNull() ?: 0L
     }
 
     override fun onEnable() {
@@ -49,7 +68,7 @@ class EventMod : EraMod {
     }
 
     override fun onDisable() {
-        context.storage.put(EventDeclarations.STORAGE_EVENT_ROUNDS, eventRounds.toString())
+        context.storage.put(EventDeclarations.EVENT_ROUNDS, eventRounds.toString())
     }
 
     override fun onUnload() {
@@ -58,13 +77,11 @@ class EventMod : EraMod {
     }
 
     /** 读一个实体的「事件发生过几次」读数（判据 4「各自字段」的读路径）。 */
-    fun eventSeenOf(entity: EntityId): Long = context.entities.getInt(
-        entity, EventDeclarations.FIELD_EVENT_SEEN,
-    )
+    fun eventSeenOf(entity: EntityId): Long = event.of(entity).seen
 
     /** 读单向紧张度（本包自己的边型；与关系 Mod 的好感边互不覆盖）。 */
     fun tensionOf(from: EntityId, to: EntityId): Long = context.relationships.valueOf(
-        from, EventDeclarations.RELATION_TENSION, to,
+        from, EventDeclarations.TENSION, to,
     )
 
     /** 仲裁参与注册（provider + 约束 + handler；降级口径见类头 KDoc）。 */
@@ -76,7 +93,7 @@ class EventMod : EraMod {
                 val guest = constraintContext.candidate.payloadRef ?: return@constraint false
                 context.relationships.valueOf(
                     constraintContext.candidate.actor,
-                    RelationshipDeclarations.RELATION_AFFINITY,
+                    RelationshipDeclarations.AFFINITY,
                     guest,
                 ) > 0L
             }
@@ -106,7 +123,7 @@ class EventMod : EraMod {
         if (selection.metadata[EventMod.METADATA_PROVIDER_BOOM] == "1") {
             error("事件 provider 炸点（判据 7 定位演示）")
         }
-        val actors = context.entities.query(CharacterDeclarations.ARCHETYPE_NPC)
+        val actors = context.entities.query(NpcKeys.archetype)
         if (actors.size < 2) return emptyList()
         val host = actors.first()
         val guest = actors.last()
@@ -151,13 +168,12 @@ class EventMod : EraMod {
     private fun applyOutcome(action: ActionContext, tensionDelta: Long) {
         val host = action.candidate.actor
         val guest = action.candidate.payloadRef
-        context.entities.setInt(
-            host, EventDeclarations.FIELD_EVENT_SEEN, eventSeenOf(host) + 1L,
-        )
+        val view = event.of(host)
+        view.seen = view.seen + 1L
         if (guest != null && tensionDelta > 0L) {
-            context.relationships.add(host, EventDeclarations.RELATION_TENSION, guest)
+            context.relationships.add(host, EventDeclarations.TENSION, guest)
             context.relationships.setValue(
-                host, EventDeclarations.RELATION_TENSION, guest,
+                host, EventDeclarations.TENSION, guest,
                 tensionOf(host, guest) + tensionDelta,
             )
         }

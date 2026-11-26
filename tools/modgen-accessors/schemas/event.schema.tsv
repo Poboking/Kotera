@@ -1,0 +1,3 @@
+schema	com.eratw.port.modlivingworld.generated	LwEvent
+component	lw.event.eventData	component
+field	lwEventSeen	INT	false	seen

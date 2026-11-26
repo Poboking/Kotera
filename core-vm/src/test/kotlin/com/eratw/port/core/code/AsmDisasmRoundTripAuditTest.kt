@@ -107,6 +107,7 @@ class AsmDisasmRoundTripAuditTest {
         Opcode._RETF -> "\$0"
         Opcode._CALL_STR -> "R0, -2147483648, R1"
         Opcode._EVAL_INT_JZ -> "\$0, R0, 0"
+        Opcode._EVAL_FLOAT -> "\$0, R0"
         Opcode._LT_JZ, Opcode._GT_JZ -> "R0, R1, 0"
         else -> error("扩展指令缺形态: $op ${Opcode.nameOf(op)}")
     }
@@ -139,8 +140,8 @@ class AsmDisasmRoundTripAuditTest {
     }
 
     @Test
-    fun `全部 249 个操作码逐条往返字节级恒等`() {
-        assertEquals(249, Opcode.NAMES.size, "操作码表大小漂移，遍历范围要跟着改")
+    fun `全部 250 个操作码逐条往返字节级恒等`() {
+        assertEquals(250, Opcode.NAMES.size, "操作码表大小漂移，遍历范围要跟着改")
         assertEquals(Opcode.MAX_OPCODE, Opcode.NAMES.size - 1)
         val exprs = listOf<Expr>(IntLiteral(1L))
         for (op in Opcode.NAMES.indices) {

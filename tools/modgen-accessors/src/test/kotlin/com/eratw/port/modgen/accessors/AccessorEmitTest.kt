@@ -3,19 +3,22 @@ package com.eratw.port.modgen.accessors
 import com.eratw.port.modapi.ComponentDecl
 import com.eratw.port.modapi.EntityApi
 import com.eratw.port.modapi.EntityId
-import com.eratw.port.modapi.EntityState
 import com.eratw.port.modapi.FieldDecl
 import com.eratw.port.modapi.FieldType
-import com.eratw.port.modfamily.generated.FamilyAccessors
-import com.eratw.port.modgen.accessors.generated.FreshAccessors
-import java.io.ByteArrayOutputStream
-import java.io.PrintStream
+import com.eratw.port.modapi.getInt
+import com.eratw.port.modapi.getRef
+import com.eratw.port.modapi.getStr
+import com.eratw.port.modapi.setInt
+import com.eratw.port.modapi.setRef
+import com.eratw.port.modapi.setStr
+import com.eratw.port.modfamily.generated.FamilyFacade
+import com.eratw.port.modfamily.generated.FamilyKeys
+import com.eratw.port.modgen.accessors.generated.FreshFacade
+import com.eratw.port.modgen.accessors.generated.FreshKeys
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.attribute.FileTime
 import java.util.Random
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.io.TempDir
 import kotlin.test.assertContains
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -24,26 +27,43 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
+/**
+ * `:tools:modgen-accessors` 的生成器行为契约：**正常 schema 生成什么**。
+ *
+ * 2026-11-16 生成物从「一个扁平方法类 `<base>Accessors`」升级成三件套：
+ * `<base>Keys`（类型化字段键）/ `<base>View`（`var` 属性视图）/ `<base>Facade`（`create` + `of`）。
+ * 本文件随之改造，调用点统一成 `facade.of(id).<prop>`。
+ *
+ * **取不到 Boolean 的地方**：`View` 的属性 setter 必须返回 Unit，所以
+ * `entities.setInt/setStr/setRef` 的 Boolean 返回值在属性这条路上被丢弃。「写被拒要拿到
+ * false」只能直连 `api.setInt/setStr/setRef`（键是同一份 `Keys.<prop>`），这也是文档写明的
+ * 正规口径；属性这条路能验的是「被拒时旧值不动」。
+ *
+ * 单类过大后按关注点拆成三个类：本类管正常发射；非法输入拒载见 [AccessorEmitValidationTest]；
+ * CLI 读写与 `--check` 语义见 [AccessorEmitCliTest]。
+ */
 class AccessorEmitTest {
-    @TempDir
-    lateinit var temp: Path
-
     @Test
     fun familyBusinessCodeUsesOnlyTypedAccessors() {
         val entities: EntityApi = FakeEntityApi()
         val child = entities.create("person")
         val parent = entities.create("person")
-        val family = FamilyAccessors(entities)
+        val family = FamilyFacade(entities)
 
-        assertTrue(family.setAge(child, 42L))
-        assertTrue(family.setTitle(child, "家族の記録"))
-        assertTrue(family.setFather(child, parent))
-        val age: Long = family.age(child)
-        val title: String = family.title(child)
-        val father: EntityId = family.father(child)
+        family.of(child).age = 42L
+        family.of(child).title = "家族の記録"
+        family.of(child).father = parent
+        val age: Long = family.of(child).age
+        val title: String = family.of(child).title
+        val father: EntityId = family.of(child).father
         assertEquals(42L, age)
         assertEquals("家族の記録", title)
         assertEquals(parent, father)
+        // 键就是字段名本身：生成器不许拼组件名前缀、不许改大小写。
+        assertEquals("family", FamilyKeys.component.name)
+        assertEquals("age", FamilyKeys.age.name)
+        assertEquals("title", FamilyKeys.title.name)
+        assertEquals("father", FamilyKeys.father.name)
     }
 
     @Test
@@ -51,17 +71,26 @@ class AccessorEmitTest {
         val entities: EntityApi = FakeEntityApi()
         val child = entities.create("person")
         val parent = entities.create("person")
-        val fresh = FreshAccessors(entities)
+        val fresh = FreshFacade(entities)
 
-        assertTrue(fresh.setAge(child, 73L))
-        assertTrue(fresh.setDisplayName(child, "新しい名前"))
-        assertTrue(fresh.setFatherId(child, parent))
-        val age: Long = fresh.age(child)
-        val displayName: String = fresh.displayName(child)
-        val fatherId: EntityId = fresh.fatherId(child)
+        fresh.of(child).age = 73L
+        fresh.of(child).displayName = "新しい名前"
+        fresh.of(child).fatherId = parent
+        val age: Long = fresh.of(child).age
+        val displayName: String = fresh.of(child).displayName
+        val fatherId: EntityId = fresh.of(child).fatherId
         assertEquals(73L, age)
         assertEquals("新しい名前", displayName)
         assertEquals(parent, fatherId)
+
+        // Facade.create() 也在这条链上（fresh 的原型名 `person` 是测试替身认识的唯一原型名）。
+        val created = fresh.create()
+        created.age = 5L
+        created.displayName = "作られた"
+        assertTrue(entities.exists(created.id))
+        assertEquals(5L, fresh.of(created.id).age)
+        assertEquals("作られた", fresh.of(created.id).displayName)
+        assertEquals("person", FreshKeys.archetype.name)
     }
 
     @Test
@@ -69,8 +98,8 @@ class AccessorEmitTest {
         // TEST INFRASTRUCTURE: raw IDs and native calls are the independent bit/wire oracle.
         val api = FakeEntityApi()
         val child = api.create("person")
-        val family = FamilyAccessors(api)
-        val fresh = FreshAccessors(api)
+        val family = FamilyFacade(api)
+        val fresh = FreshFacade(api)
         assertFalse(api.exists(EntityId(Long.MIN_VALUE)), "Negative dangling references are not live entities")
         val random = Random(0x5745L)
         val values = (listOf(0L, -1L, Long.MIN_VALUE, Long.MAX_VALUE, 9_007_199_254_740_993L,
@@ -79,28 +108,31 @@ class AccessorEmitTest {
             List(32) { random.nextLong() }).distinct()
 
         for (bits in values) {
-            assertTrue(family.setAge(child, bits))
-            assertTrue(fresh.setAge(child, bits))
+            family.of(child).age = bits
+            fresh.of(child).age = bits
             assertEquals(bits, api.getInt(child, "age"))
             assertEquals(bits, api.getInt(child, "AGE"))
-            assertEquals(bits, family.age(child))
-            assertEquals(bits, fresh.age(child))
+            assertEquals(bits, family.of(child).age)
+            assertEquals(bits, fresh.of(child).age)
+            assertEquals(bits, api.getInt(child, FamilyKeys.age))
             assertTrue(api.setInt(child, "age", bits.inv()))
             assertTrue(api.setInt(child, "AGE", bits.inv()))
-            assertEquals(bits.inv(), family.age(child))
-            assertEquals(bits.inv(), fresh.age(child))
+            assertEquals(bits.inv(), family.of(child).age)
+            assertEquals(bits.inv(), fresh.of(child).age)
 
             val reference = EntityId(bits)
-            assertTrue(family.setFather(child, reference))
-            assertTrue(fresh.setFatherId(child, reference))
+            family.of(child).father = reference
+            fresh.of(child).fatherId = reference
             assertEquals(bits, api.getInt(child, "father"))
             assertEquals(bits, api.getInt(child, "father_ID"))
-            assertEquals(reference, family.father(child))
-            assertEquals(reference, fresh.fatherId(child))
+            assertEquals(reference, family.of(child).father)
+            assertEquals(reference, fresh.of(child).fatherId)
+            assertEquals(reference, api.getRef(child, "father"))
+            assertEquals(reference, api.getRef(child, FreshKeys.fatherId))
             assertTrue(api.setInt(child, "father", bits.inv()))
             assertTrue(api.setInt(child, "father_ID", bits.inv()))
-            assertEquals(bits.inv(), family.father(child).raw)
-            assertEquals(bits.inv(), fresh.fatherId(child).raw)
+            assertEquals(bits.inv(), family.of(child).father.raw)
+            assertEquals(bits.inv(), fresh.of(child).fatherId.raw)
         }
     }
 
@@ -109,20 +141,21 @@ class AccessorEmitTest {
         // TEST INFRASTRUCTURE: native API checks distinguish STR routing from INT routing.
         val api = FakeEntityApi()
         val entity = api.create("person")
-        val family = FamilyAccessors(api)
-        val fresh = FreshAccessors(api)
+        val family = FamilyFacade(api)
+        val fresh = FreshFacade(api)
         for (value in listOf("", "  leading and trailing  ", "家族・名前", "e\u0301", "\"\\\t\r\n\u0000")) {
-            assertTrue(family.setTitle(entity, value))
-            assertTrue(fresh.setDisplayName(entity, value))
+            family.of(entity).title = value
+            fresh.of(entity).displayName = value
             assertEquals(value, api.getStr(entity, "title"))
             assertEquals(value, api.getStr(entity, "display_name"))
-            assertEquals(value, family.title(entity))
-            assertEquals(value, fresh.displayName(entity))
+            assertEquals(value, family.of(entity).title)
+            assertEquals(value, fresh.of(entity).displayName)
             val nativeValue = "native:$value"
             assertTrue(api.setStr(entity, "title", nativeValue))
             assertTrue(api.setStr(entity, "display_name", nativeValue))
-            assertEquals(nativeValue, family.title(entity))
-            assertEquals(nativeValue, fresh.displayName(entity))
+            assertEquals(nativeValue, family.of(entity).title)
+            assertEquals(nativeValue, fresh.of(entity).displayName)
+            assertEquals(nativeValue, api.getStr(entity, FamilyKeys.title))
         }
     }
 
@@ -131,22 +164,26 @@ class AccessorEmitTest {
         val api = FakeEntityApi()
         val entity = api.create("person")
         val father = api.create("person")
-        val family = FamilyAccessors(api)
-        val fresh = FreshAccessors(api)
-        assertTrue(family.setAge(entity, Long.MIN_VALUE))
-        assertTrue(family.setTitle(entity, "old family"))
-        assertTrue(family.setFather(entity, father))
-        assertTrue(fresh.setAge(entity, Long.MAX_VALUE))
-        assertTrue(fresh.setDisplayName(entity, "old fresh"))
-        assertTrue(fresh.setFatherId(entity, father))
+        val family = FamilyFacade(api)
+        val fresh = FreshFacade(api)
+        family.of(entity).age = Long.MIN_VALUE
+        family.of(entity).title = "old family"
+        family.of(entity).father = father
+        fresh.of(entity).age = Long.MAX_VALUE
+        fresh.of(entity).displayName = "old fresh"
+        fresh.of(entity).fatherId = father
 
         api.rejectWrites = true
-        assertFalse(family.setAge(entity, 1L))
-        assertFalse(family.setTitle(entity, "changed"))
-        assertFalse(family.setFather(entity, EntityId.NULL))
-        assertFalse(fresh.setAge(entity, 2L))
-        assertFalse(fresh.setDisplayName(entity, "changed"))
-        assertFalse(fresh.setFatherId(entity, EntityId.NULL))
+        // 属性的 setter 丢掉 Boolean，判失败必须直连原生口（键是同一份）。
+        assertFalse(api.setInt(entity, FamilyKeys.age, 1L))
+        assertFalse(api.setStr(entity, FamilyKeys.title, "changed"))
+        assertFalse(api.setRef(entity, FamilyKeys.father, EntityId.NULL))
+        assertFalse(api.setInt(entity, FreshKeys.age, 2L))
+        assertFalse(api.setStr(entity, FreshKeys.displayName, "changed"))
+        assertFalse(api.setRef(entity, FreshKeys.fatherId, EntityId.NULL))
+        // 属性这条路写被拒时是静默的：不落值，也不许把旧值抹掉。
+        family.of(entity).age = 9L
+        fresh.of(entity).displayName = "silently dropped"
         assertEquals(Triple(Long.MIN_VALUE, "old family", father), familyValues(family, entity))
         assertEquals(Triple(Long.MAX_VALUE, "old fresh", father), freshValues(fresh, entity))
     }
@@ -157,15 +194,15 @@ class AccessorEmitTest {
         val api = FakeEntityApi()
         val entity = api.create("person")
         val destroyed = api.create("person")
-        val family = FamilyAccessors(api)
-        val fresh = FreshAccessors(api)
-        assertTrue(family.setAge(destroyed, 11L))
-        assertTrue(fresh.setDisplayName(destroyed, "removed"))
+        val family = FamilyFacade(api)
+        val fresh = FreshFacade(api)
+        family.of(destroyed).age = 11L
+        fresh.of(destroyed).displayName = "removed"
         assertTrue(api.destroy(destroyed))
         assertDefaults(family, fresh, entity)
         for (missing in listOf(EntityId.NULL, EntityId(-77L), destroyed)) {
             assertDefaults(family, fresh, missing)
-            assertWritesRejected(family, fresh, missing)
+            assertWritesRejected(api, missing)
             assertDefaults(family, fresh, missing)
             assertFalse(api.exists(missing))
         }
@@ -175,10 +212,10 @@ class AccessorEmitTest {
     fun undeclaredFieldsCannotBeCreatedByAccessors() {
         val api = FakeEntityApi(intFields = emptySet(), strFields = emptySet())
         val entity = api.create("person")
-        val family = FamilyAccessors(api)
-        val fresh = FreshAccessors(api)
+        val family = FamilyFacade(api)
+        val fresh = FreshFacade(api)
         assertDefaults(family, fresh, entity)
-        assertWritesRejected(family, fresh, entity)
+        assertWritesRejected(api, entity)
         assertDefaults(family, fresh, entity)
         assertTrue(api.exists(entity))
     }
@@ -191,32 +228,32 @@ class AccessorEmitTest {
         val second = api.fixtureEntity(0x200000001L)
         val otherApi = FakeEntityApi()
         val otherEntity = otherApi.fixtureEntity(first.raw)
-        val family = FamilyAccessors(api)
-        val fresh = FreshAccessors(api)
-        val otherFamily = FamilyAccessors(otherApi)
-        val otherFresh = FreshAccessors(otherApi)
-        assertTrue(family.setAge(first, 10L))
-        assertTrue(family.setTitle(first, "first"))
-        assertTrue(family.setFather(first, second))
-        assertTrue(family.setAge(second, 20L))
-        assertTrue(family.setTitle(second, "second"))
-        assertTrue(family.setFather(second, first))
-        assertTrue(fresh.setAge(first, 30L))
-        assertTrue(fresh.setDisplayName(first, "fresh"))
-        assertTrue(fresh.setFatherId(first, EntityId.NULL))
-        assertTrue(otherFamily.setAge(otherEntity, 40L))
-        assertTrue(otherFamily.setTitle(otherEntity, "other family"))
-        assertTrue(otherFamily.setFather(otherEntity, otherEntity))
-        assertTrue(otherFresh.setAge(otherEntity, 50L))
-        assertTrue(otherFresh.setDisplayName(otherEntity, "other fresh"))
-        assertTrue(otherFresh.setFatherId(otherEntity, otherEntity))
+        val family = FamilyFacade(api)
+        val fresh = FreshFacade(api)
+        val otherFamily = FamilyFacade(otherApi)
+        val otherFresh = FreshFacade(otherApi)
+        family.of(first).age = 10L
+        family.of(first).title = "first"
+        family.of(first).father = second
+        family.of(second).age = 20L
+        family.of(second).title = "second"
+        family.of(second).father = first
+        fresh.of(first).age = 30L
+        fresh.of(first).displayName = "fresh"
+        fresh.of(first).fatherId = EntityId.NULL
+        otherFamily.of(otherEntity).age = 40L
+        otherFamily.of(otherEntity).title = "other family"
+        otherFamily.of(otherEntity).father = otherEntity
+        otherFresh.of(otherEntity).age = 50L
+        otherFresh.of(otherEntity).displayName = "other fresh"
+        otherFresh.of(otherEntity).fatherId = otherEntity
         assertTrue(api.setInt(first, "other_age", 60L))
         assertTrue(api.setStr(first, "other_title", "unrelated component"))
         assertTrue(api.setInt(first, "other_father", -60L))
 
-        assertEquals(Triple(10L, "first", second), familyValues(FamilyAccessors(api), first))
+        assertEquals(Triple(10L, "first", second), familyValues(FamilyFacade(api), first))
         assertEquals(Triple(20L, "second", first), familyValues(family, second))
-        assertEquals(Triple(30L, "fresh", EntityId.NULL), freshValues(FreshAccessors(api), first))
+        assertEquals(Triple(30L, "fresh", EntityId.NULL), freshValues(FreshFacade(api), first))
         assertEquals(Triple(0L, "", EntityId.NULL), freshValues(fresh, second))
         assertEquals(Triple(40L, "other family", otherEntity), familyValues(otherFamily, otherEntity))
         assertEquals(Triple(50L, "other fresh", otherEntity), freshValues(otherFresh, otherEntity))
@@ -227,20 +264,38 @@ class AccessorEmitTest {
         assertEquals(60L, api.getInt(first, "other_age"))
         assertEquals("unrelated component", api.getStr(first, "other_title"))
         assertEquals(-60L, api.getInt(first, "other_father"))
+        // 属性名不是线名：按属性名去读必须仍是缺省值。
         assertEquals("", api.getStr(first, "displayName"))
         assertEquals(0L, api.getInt(first, "fatherId"))
     }
 
     @Test
     fun bothResourcesDeclareTheExpectedWireNamesAndTypes() {
-        val family = SchemaDecl("com.eratw.port.modfamily.generated", "FamilyAccessors", ComponentDecl("family", listOf(
-            FieldDecl("age", FieldType.INT), FieldDecl("title", FieldType.STR), FieldDecl("father", FieldType.INT, true),
-        )))
-        val fresh = SchemaDecl("com.eratw.port.modgen.accessors.generated", "FreshAccessors", ComponentDecl("family", listOf(
-            FieldDecl("AGE", FieldType.INT), FieldDecl("display_name", FieldType.STR), FieldDecl("father_ID", FieldType.INT, true),
-        )))
+        val family = SchemaDecl(
+            "com.eratw.port.modfamily.generated", "Family",
+            ComponentDecl("family", listOf(
+                FieldDecl("age", FieldType.INT), FieldDecl("title", FieldType.STR),
+                FieldDecl("father", FieldType.INT, true),
+            )),
+            archetype = "family.child",
+            propertyOverrides = emptyMap(),
+        )
+        val fresh = SchemaDecl(
+            "com.eratw.port.modgen.accessors.generated", "Fresh",
+            ComponentDecl("family", listOf(
+                FieldDecl("AGE", FieldType.INT), FieldDecl("display_name", FieldType.STR),
+                FieldDecl("father_ID", FieldType.INT, true),
+            )),
+            archetype = "person",
+        )
         assertEquals(family, parseSchema(resource("family.schema.tsv")))
         assertEquals(fresh, parseSchema(resource("fresh.schema.tsv")))
+        // 原型键与字段键一起钉住：`family.child` / `person`，字段键 = 线名本身。
+        assertEquals("family.child", FamilyKeys.archetype.name)
+        assertEquals("person", FreshKeys.archetype.name)
+        assertEquals("AGE", FreshKeys.age.name)
+        assertEquals("display_name", FreshKeys.displayName.name)
+        assertEquals("father_ID", FreshKeys.fatherId.name)
     }
 
     @Test
@@ -265,34 +320,28 @@ class AccessorEmitTest {
     fun entityRefFieldsEmitTypedRefAccessorsWithZeroRawLeakage() {
         // P1-6 ② / E 车：isEntityRef 字段必须生成 getRef/setRef；生成物 0 个 .raw、
         // 0 个手写 EntityId(getInt(...))。判据 5 的闸（AccessorEmit 退回旧写法必红）。
+        // 2026-11-16 起参数名从 `e` 改成 Receiver 属性 `id`（View 的 val id）。
         for (resourceName in listOf("family.schema.tsv", "fresh.schema.tsv")) {
             val source = AccessorEmit.emit(parseSchema(resource(resourceName)))
-            assertContains(source, "entities.getRef(e, ")
-            assertContains(source, "entities.setRef(e, ")
+            assertContains(source, "entities.getRef(id, ")
+            assertContains(source, "entities.setRef(id, ")
             assertFalse(".raw" in source, "$resourceName 生成物不得泄漏位域")
             assertFalse("EntityId(entities.getInt" in source, "$resourceName 不得再手写包装")
-            assertFalse("entities.setInt(e, \"father\", v.raw)" in source)
+            assertFalse("entities.setInt(id, \"father\", v.raw)" in source)
+            assertFalse("entities.setInt(id, \"father_ID\", v.raw)" in source)
         }
         // 生成访问器与公开引用口落在同一张 INT 列：两个方向逐值等价。
         val api = FakeEntityApi()
         val child = api.create("person")
         val father = api.create("person")
-        val family = FamilyAccessors(api)
-        assertTrue(family.setFather(child, father))
+        val family = FamilyFacade(api)
+        family.of(child).father = father
         assertEquals(father, api.getRef(child, "father"), "生成访问器写入后公开引用口读到同一身份")
-        assertEquals(family.father(child), api.getRef(child, "father"))
+        assertEquals(family.of(child).father, api.getRef(child, "father"))
         assertTrue(api.setRef(child, "father", EntityId.NULL))
-        assertEquals(EntityId.NULL, family.father(child), "公开引用口写入后生成访问器读到同一 INT 列")
-    }
-
-    @Test
-    fun newEntityApiRefMemberNamesAreReservedAgainstFieldNames() {
-        val names = EntityApi::class.java.methods.map { it.name.substringBefore('-') }.toSet()
-        assertTrue("getRef" in names)
-        assertTrue("setRef" in names)
-        for (field in listOf("getRef", "setRef", "get_ref", "set_ref")) {
-            assertFailsWith<IllegalArgumentException>(field) { AccessorEmit.emit(schema(field)) }
-        }
+        assertEquals(EntityId.NULL, family.of(child).father, "公开引用口写入后生成访问器读到同一 INT 列")
+        assertTrue(api.setRef(child, FamilyKeys.father, father))
+        assertEquals(father.raw, api.getInt(child, "father"))
     }
 
     @Test
@@ -308,401 +357,147 @@ class AccessorEmitTest {
                 }
             }
         }
-        assertTrue(parseSchema("schema\texample.generated\tEmptyAccessors\tfamily").component.fields.isEmpty())
-    }
-
-    @Test
-    fun parserRejectsMalformedRowsAndReportsTheirLine() {
-        for (header in listOf("", "\n", "schema", "schema\tpkg\tAccessors", "wrong\tpkg\tAccessors\tfamily",
-            "schema\tpkg\tAccessors\tfamily\textra")) {
-            assertContains(assertFailsWith<IllegalArgumentException> { parseSchema(header) }.message.orEmpty(), "line 1")
-        }
-        val header = "schema\texample.generated\tAccessors\tfamily\n"
-        for (row in listOf("", " ", "# comment", "field\tage\tINT", "field\tage\tINT\tfalse\textra",
-            "wrong\tage\tINT\tfalse", "field\t\tINT\tfalse", "field\t \tINT\tfalse",
-            "field\tage\tint\tfalse", "field\tage\tFLOAT\tfalse")) {
-            val error = assertFailsWith<IllegalArgumentException>(row) { parseSchema(header + row + "\n") }
-            assertContains(error.message.orEmpty(), "line 2")
-        }
-        val error = assertFailsWith<IllegalArgumentException> {
-            parseSchema(header + "field\tage\tINT\tfalse\n\nfield\ttitle\tSTR\tfalse\n")
-        }
-        assertContains(error.message.orEmpty(), "line 3")
-    }
-
-    @Test
-    fun entityReferenceBooleanMustBeStrictlyLowercaseTrueOrFalse() {
-        for (boolean in listOf("TRUE", "True", "FALSE", "False", "yes", "1", "0", "", " true", "false ")) {
-            val error = assertFailsWith<IllegalArgumentException>(boolean) {
-                parseSchema("schema\texample.generated\tAccessors\tfamily\nfield\tfather\tINT\t$boolean")
-            }
-            assertContains(error.message.orEmpty(), "line 2")
-            assertContains(error.message.orEmpty(), "true or false")
-        }
+        assertTrue(parseSchema("schema\texample.generated\tEmpty\tfamily").component.fields.isEmpty())
     }
 
     @Test
     fun camelCasePreservesMixedCaseWireKeysAndDeclarationOrder() {
-        val names = listOf("zValue", "AGE", "display_name", "father_ID", "URL_Value", "iOS_buildID", "HTTP_v2_ID", "a1_B2")
-        val getters = listOf("zValue", "age", "displayName", "fatherId", "urlValue", "iOSBuildID", "httpV2Id", "a1B2")
+        val names = listOf(
+            "zValue", "AGE", "display_name", "father_ID",
+            "URL_Value", "iOS_buildID", "HTTP_v2_ID", "a1_B2",
+        )
+        val properties = listOf(
+            "zValue", "age", "displayName", "fatherId",
+            "urlValue", "iOSBuildID", "httpV2Id", "a1B2",
+        )
         val schema = schema(*names.toTypedArray())
         val source = AccessorEmit.emit(schema)
-        val expectedMethods = getters.flatMap { listOf(it, "set" + it.replaceFirstChar { c -> c.uppercaseChar() }) }
-        assertEquals(expectedMethods, methodNames(source))
-        val wireKeys = Regex("entities\\.(?:get|set)(?:Int|Str)\\(e, \"([^\"]+)\"").findAll(source).map { it.groupValues[1] }.toList()
-        assertEquals(names.flatMap { listOf(it, it) }, wireKeys, "键必须逐字节等于声明里的字段名：不拼组件名、不改大小写")
-        val reversed = schema.copy(component = schema.component.copy(fields = schema.component.fields.reversed()))
-        assertEquals(expectedMethods.chunked(2).reversed().flatten(), methodNames(AccessorEmit.emit(reversed)))
+        assertEquals(properties, keyProperties(source))
+        assertEquals(properties, viewProperties(source))
+        assertEquals(names, wireNames(source), "键必须逐字节等于声明里的字段名：不拼组件名、不改大小写")
+        val reversed = schema.copy(
+            components = listOf(
+                ComponentSpec(schema.component.copy(fields = schema.component.fields.reversed()), "component"),
+            ),
+        )
+        val reversedSource = AccessorEmit.emit(reversed)
+        assertEquals(properties.reversed(), keyProperties(reversedSource))
+        assertEquals(properties.reversed(), viewProperties(reversedSource))
+        assertEquals(names.reversed(), wireNames(reversedSource))
     }
 
     @Test
-    fun invalidAsciiFieldNamesAndSourceInjectionAreRejected() {
-        for (name in listOf("", " ", "_age", "age_", "age__years", "1age", "age_2years", "年齢", "âge",
-            "age-name", "age.name", "age name", "`age`", "age\tname", "age\nname", "age\"", "age\\", "age;fun")) {
-            assertFailsWith<IllegalArgumentException>(name) { AccessorEmit.emit(schema(name)) }
-        }
-    }
-
-    @Test
-    fun hardSoftAndCamelizedKotlinKeywordsAreRejected() {
-        for (name in listOf("class", "when", "is", "object", "in", "return", "typealias", "get", "set", "by",
-            "field", "constructor", "data", "suspend", "private", "value", "context", "Class", "GET", "CONTEXT")) {
-            assertFailsWith<IllegalArgumentException>(name) { AccessorEmit.emit(schema(name)) }
-        }
-    }
-
-    @Test
-    fun duplicateWireNamesAndGetterSetterCollisionsAreRejectedInEitherOrder() {
-        // fooBar/fOObar would be distinct generated methods: wire-name uniqueness must reject them independently.
-        for (names in listOf(listOf("age", "AGE"), listOf("fooBar", "FOObar"), listOf("title", "Title"),
-            listOf("father_id", "fatherId"), listOf("age", "set_age"), listOf("age", "setAge"), listOf("x_Y", "xY"))) {
-            for (order in listOf(names, names.reversed())) {
-                assertFailsWith<IllegalArgumentException>(order.toString()) { AccessorEmit.emit(schema(*order.toTypedArray())) }
-            }
-        }
-    }
-
-    @Test
-    fun entityApiReflectionMembersAndIndirectSetterCollisionsAreRejected() {
+    fun entityApiMembersNoLongerConstrainFieldNames() {
+        // 旧生成器把字段展开成 `fun getAge(e)` / `fun setAge(e, v)`，于是「字段名 == EntityApi
+        // 成员名」和「字段名 == setXxx」都会撞方法表，必须反射 EntityApi 逐名拒绝。
+        // 新形状把方法收回 Facade 一处（只有 create/of），这层间接冲突整体消失 ——
+        // 反射断言保留，另把「现在必须能照常生成」也钉住。
         val members = EntityApi::class.java.methods.map { it.name.substringBefore('-') }.toSet()
         assertTrue(members.containsAll(listOf("getInt", "setInt", "getStr", "setStr", "setState", "getRef", "setRef")))
-        for (name in members + setOf("equals", "hashCode", "toString", "int", "str", "state", "get_int", "set_int", "GET_STR")) {
-            assertFailsWith<IllegalArgumentException>(name) { AccessorEmit.emit(schema(name)) }
+        for ((wire, property) in listOf(
+            "getInt" to "getInt", "setRef" to "setRef", "setState" to "setState",
+            "get_int" to "getInt", "set_int" to "setInt", "GET_STR" to "getStr",
+        )) {
+            val source = AccessorEmit.emit(schema(wire))
+            assertEquals(listOf(wire), wireNames(source))
+            assertEquals(listOf(property), keyProperties(source))
+            assertEquals(listOf(property), viewProperties(source))
+            assertEquals(listOf("of"), functionNames(source), "生成物里除 Facade 的 of/create 外不得有方法")
         }
     }
 
+    /** 新能力（2026-11-16）：`field` 行第 5 列 = 属性名覆盖，给线名是硬关键字的字段让路。 */
     @Test
-    fun stringEntityReferencesAreRejectedRatherThanSilentlyTreatedAsStrings() {
-        val invalid = schema("father").copy(component = ComponentDecl("family", listOf(FieldDecl("father", FieldType.STR, true))))
-        assertFailsWith<IllegalArgumentException> { AccessorEmit.emit(invalid) }
+    fun fieldRowFifthColumnOverridesPropertyNameForKeywordField() {
+        val text = "schema\texample.generated\tExample\tfamily\nfield\tobject\tINT\ttrue\tobj\n"
+        val schema = parseSchema(text)
+        assertEquals(mapOf("object" to "obj"), schema.propertyOverrides)
+        val source = AccessorEmit.emit(schema)
+        assertContains(source, "val obj: FieldKey<EntityId> = refKey(\"object\")")
+        assertContains(source, "var obj: EntityId")
+        assertContains(source, "entities.getRef(id, ExampleKeys.obj)")
+        assertContains(source, "entities.setRef(id, ExampleKeys.obj, value)")
+        assertFalse("var object" in source)
+        assertFalse("val object:" in source)
+        // 覆盖后的属性名照旧过标识符/关键字校验。
         assertFailsWith<IllegalArgumentException> {
-            AccessorEmit.emit(parseSchema("schema\texample.generated\tAccessors\tfamily\nfield\tfather\tSTR\ttrue"))
+            AccessorEmit.emit(schema.copy(propertyOverrides = mapOf("object" to "class")))
         }
+        assertFailsWith<IllegalArgumentException> {
+            AccessorEmit.emit(schema.copy(propertyOverrides = mapOf("object" to "ob j")))
+        }
+        // 覆盖表键是线名，不许撞字段本身之外的任何东西。
+        val twoFields = "schema\texample.generated\tExample\tfamily\n" +
+            "field\tage\tINT\tfalse\nfield\ttitle\tSTR\tfalse\ttitle\n"
+        assertEquals(mapOf("title" to "title"), parseSchema(twoFields).propertyOverrides)
+    }
+
+    /** 新能力（2026-11-16）：只有声明了原型名的 schema 才生成 `Facade.create()`。 */
+    @Test
+    fun facadeEmitsCreateOnlyWhenArchetypeIsDeclared() {
+        val withArchetype = parseSchema(resource("fresh.schema.tsv"))
+        assertEquals(listOf("create", "of"), functionNames(AccessorEmit.emit(withArchetype)))
+        val withoutArchetype = withArchetype.copy(archetype = null)
+        val source = AccessorEmit.emit(withoutArchetype)
+        assertEquals(listOf("of"), functionNames(source))
+        assertFalse("ArchetypeKey" in source)
+        assertFalse("fun create()" in source)
+        assertContains(source, "class FreshFacade(private val entities: EntityApi)")
+        assertContains(source, "fun of(id: EntityId): FreshView = FreshView(entities, id)")
     }
 
     @Test
-    fun invalidPackagesClassesAndComponentInjectionAreRejected() {
-        val valid = schema("age")
-        for (name in listOf("", ".example", "example.", "example..generated", "example.class", "example.by", "9example",
-            "example-name", "example/name", "example\nimport injected", "example;import", "`example`")) {
-            assertFailsWith<IllegalArgumentException>(name) { AccessorEmit.emit(valid.copy(packageName = name)) }
-        }
-        for (name in listOf("", "9Accessors", "_Accessors", "class", "data", "EntityApi", "EntityId", "Long", "String", "Boolean",
-            "Bad.Name", "Bad Name", "Bad\nclass Injected", "Bad\"", "Bad;", "`Accessors`")) {
-            assertFailsWith<IllegalArgumentException>(name) { AccessorEmit.emit(valid.copy(accessorName = name)) }
-        }
-        for (name in listOf("", "family.name", "family\"", "family\\", "family\n", "family;", "1family")) {
-            assertFailsWith<IllegalArgumentException>(name) {
-                AccessorEmit.emit(valid.copy(component = ComponentDecl(name, valid.component.fields)))
-            }
-        }
+    fun multiComponentSchemaEmitsOneKeyPerComponentAndOneFlatView() {
+        // 一个原型挂两个组件（livingworld 的 NPC = 性格 + 日程）：`Keys` 里一个组件一个 `ComponentKey`，
+        // 但 View 上的属性是**平铺**的 —— 字段寻址本来就跨组件共享一张全局表，把 View 也按组件分层
+        // 只是给调用方多套一层，没有任何收益。
+        val schema = parseSchema(
+            "schema\texample.generated\tNpc\n" +
+                "component\tlw.char.persona\n" +
+                "field\twarmth\tINT\tfalse\n" +
+                "component\tlw.char.schedule\tschedule\n" +
+                "field\teveningSlot\tINT\tfalse\n" +
+                "archetype\tlw.char.npc\n",
+        )
+        assertEquals(listOf("persona", "schedule"), schema.components.map { it.keyProperty })
+        assertEquals(listOf("lw.char.persona", "lw.char.schedule"), schema.components.map { it.declaration.name })
+        assertEquals(listOf("warmth", "eveningSlot"), schema.fields.map { it.name })
+        val source = AccessorEmit.emit(schema)
+        assertContains(source, "    val persona: ComponentKey = ComponentKey(\"lw.char.persona\")\n")
+        assertContains(source, "    val schedule: ComponentKey = ComponentKey(\"lw.char.schedule\")\n")
+        assertEquals(listOf("warmth", "eveningSlot"), keyProperties(source))
+        assertEquals(listOf("warmth", "eveningSlot"), viewProperties(source))
+        assertContains(source, "fun create(): NpcView = NpcView(entities, entities.create(NpcKeys.archetype))")
     }
 
-    @Test
-    fun standardLibraryPackageIsRejectedWithoutRejectingSimilarNames() {
-        val valid = schema("age")
-        for (name in listOf("kotlin", "kotlin.demo")) {
-            assertFailsWith<IllegalArgumentException>(name) { AccessorEmit.emit(valid.copy(packageName = name)) }
-        }
-        for (name in listOf("kotlinx.demo", "demo.kotlin")) {
-            assertTrue(AccessorEmit.emit(valid.copy(packageName = name)).startsWith("package $name\n"))
-        }
+    private fun familyValues(facade: FamilyFacade, entity: EntityId): Triple<Long, String, EntityId> {
+        val view = facade.of(entity)
+        return Triple(view.age, view.title, view.father)
     }
 
-    @Test
-    fun cliWritesChecksReportsChangedLineAndChecksRestoredBytesWithoutTouchingMtime() {
-        val input = writeSchema()
-        val output = temp.resolve("nested/generated/FamilyAccessors.kt")
-        val expected = AccessorEmit.emit(parseSchema(resource("family.schema.tsv"))).toByteArray(Charsets.UTF_8)
-        val written = cli(input.toString(), output.toString())
-        assertEquals(0, written.code, written.err)
-        assertContains(written.out, "WROTE:")
-        assertEquals("", written.err)
-        assertContentEquals(expected, Files.readAllBytes(output))
-        assertCheckReadOnly(input, output, 0, "OK:")
-
-        val source = expected.toString(Charsets.UTF_8)
-        val offset = source.indexOf("setTitle")
-        assertTrue(offset >= 0)
-        val changed = expected.copyOf().also { it[offset] = 'x'.code.toByte() }
-        Files.write(output, changed)
-        val stale = assertCheckReadOnly(input, output, 1, "STALE:")
-        val line = source.lineSequence().indexOfFirst { "fun setTitle(" in it } + 1
-        assertContains(stale.err, "first diff at line $line")
-        Files.write(output, expected)
-        assertCheckReadOnly(input, output, 0, "OK:")
+    private fun freshValues(facade: FreshFacade, entity: EntityId): Triple<Long, String, EntityId> {
+        val view = facade.of(entity)
+        return Triple(view.age, view.displayName, view.fatherId)
     }
 
-    @Test
-    fun cliCheckOfMissingArtifactDoesNotCreateDirectories() {
-        val input = writeSchema()
-        val output = temp.resolve("not-created/deep/Accessors.kt")
-        val result = cli("--check", input.toString(), output.toString())
-        assertEquals(1, result.code, result.err)
-        assertContains(result.err, "MISSING:")
-        assertContains(result.err, "first diff at line 1")
-        assertEquals("", result.out)
-        assertFalse(Files.exists(output.parent.parent))
-        assertFalse(Files.exists(output))
-    }
-
-    @Test
-    fun cliRejectsCrlfArtifactsAndMissingFinalNewlineWithoutRewriting() {
-        val input = writeSchema()
-        val output = temp.resolve("FamilyAccessors.kt")
-        val source = AccessorEmit.emit(parseSchema(resource("family.schema.tsv")))
-        for (noncanonical in listOf(source.replace("\n", "\r\n"), source.removeSuffix("\n"))) {
-            Files.writeString(output, noncanonical, Charsets.UTF_8)
-            assertCheckReadOnly(input, output, 1, "STALE:")
-        }
-        // CRLF is accepted for the input, but the generated output must still be canonical LF.
-        val crlfInput = resource("family.schema.tsv").replace("\r\n", "\n").replace("\n", "\r\n")
-        Files.writeString(input, crlfInput, Charsets.UTF_8)
-        assertEquals(0, cli(input.toString(), output.toString()).code)
-        assertContentEquals(source.toByteArray(Charsets.UTF_8), Files.readAllBytes(output))
-        assertCheckReadOnly(input, output, 0, "OK:")
-    }
-
-    @Test
-    fun invalidSchemasNeverOverwriteExistingOutputOrCreateMissingParents() {
-        val input = writeSchema()
-        val output = temp.resolve("preserved.kt")
-        val bytes = "keep this output\r\n".toByteArray(Charsets.UTF_8)
-        Files.write(output, bytes)
-        val header = "schema\texample.generated\tAccessors\tfamily\n"
-        for (invalid in listOf(header + "field\tage\tINT\tFalse", header + "field\tfather\tSTR\ttrue",
-            header + "field\tage\tINT\tfalse\nfield\tAGE\tINT\tfalse", "schema\tbad;package\tAccessors\tfamily")) {
-            Files.writeString(input, invalid, Charsets.UTF_8)
-            for (check in listOf(false, true)) {
-                val mtime = pinMtime(output)
-                val result = cli(*cliArgs(check, input, output))
-                assertEquals(2, result.code, result.err)
-                assertContains(result.err, "ERROR:")
-                assertEquals("", result.out)
-                assertUnchanged(output, bytes, mtime)
-                val missing = temp.resolve("never-created/Accessors.kt")
-                assertEquals(2, cli(*cliArgs(check, input, missing)).code)
-                assertFalse(Files.exists(missing.parent))
-            }
-        }
-    }
-
-    @Test
-    fun cliNeverOverwritesSchemaWhenInputAndOutputAreTheSamePath() {
-        val input = writeSchema()
-        val bytes = Files.readAllBytes(input)
-        for (output in listOf(input, temp.resolve("unused/../schema.tsv"))) {
-            for (check in listOf(false, true)) {
-                val mtime = pinMtime(input)
-                val result = cli(*cliArgs(check, input, output))
-                assertEquals(2, result.code, result.err)
-                assertContains(result.err, "must be different files")
-                assertEquals("", result.out)
-                assertUnchanged(input, bytes, mtime)
-            }
-        }
-        assertFalse(Files.exists(temp.resolve("unused")))
-    }
-
-    @Test
-    fun cliArgumentErrorsAreUsageErrorsWithoutCreatingOutput() {
-        val input = writeSchema().toString()
-        val output = temp.resolve("not-created/Accessors.kt")
-        for (args in listOf(emptyArray<String>(), arrayOf("--check"), arrayOf(input), arrayOf("--check", input),
-            arrayOf("--unknown", input, output.toString()), arrayOf(input, output.toString(), "extra"),
-            arrayOf(input, "--check"), arrayOf("--check", input, output.toString(), "extra"))) {
-            val result = cli(*args)
-            assertEquals(2, result.code, result.err)
-            assertContains(result.err, "Usage:")
-            assertEquals("", result.out)
-            assertFalse(Files.exists(output.parent))
-        }
-    }
-
-    @Test
-    fun cliMissingInputAndIoFailuresReturnErrorRatherThanStale() {
-        val input = writeSchema()
-        val directory = Files.createDirectory(temp.resolve("directory.kt"))
-        val missingOutput = temp.resolve("not-created/Accessors.kt")
-        for ((schemaPath, output) in listOf(temp.resolve("missing.tsv") to missingOutput,
-            directory to missingOutput, input to directory)) {
-            for (check in listOf(false, true)) {
-                val result = cli(*cliArgs(check, schemaPath, output))
-                assertEquals(2, result.code, result.err)
-                assertContains(result.err, "ERROR:")
-                assertEquals("", result.out)
-                assertFalse(Files.exists(missingOutput.parent))
-                assertTrue(Files.isDirectory(directory))
-            }
-        }
-    }
-
-    private fun schema(vararg names: String) = SchemaDecl(
-        "example.generated", "ExampleAccessors", ComponentDecl("family", names.map { FieldDecl(it) }),
-    )
-
-    private fun methodNames(source: String): List<String> =
-        Regex("    fun ([A-Za-z0-9]+)\\(").findAll(source).map { it.groupValues[1] }.toList()
-
-    private fun resource(name: String): String =
-        assertNotNull(javaClass.getResource("/$name"), "Missing test resource: $name")
-            .openStream().use { it.readBytes().toString(Charsets.UTF_8) }
-
-    private fun familyValues(accessors: FamilyAccessors, entity: EntityId) =
-        Triple(accessors.age(entity), accessors.title(entity), accessors.father(entity))
-
-    private fun freshValues(accessors: FreshAccessors, entity: EntityId) =
-        Triple(accessors.age(entity), accessors.displayName(entity), accessors.fatherId(entity))
-
-    private fun assertDefaults(family: FamilyAccessors, fresh: FreshAccessors, entity: EntityId) {
+    private fun assertDefaults(family: FamilyFacade, fresh: FreshFacade, entity: EntityId) {
         assertEquals(Triple(0L, "", EntityId.NULL), familyValues(family, entity))
         assertEquals(Triple(0L, "", EntityId.NULL), freshValues(fresh, entity))
     }
 
-    private fun assertWritesRejected(family: FamilyAccessors, fresh: FreshAccessors, entity: EntityId) {
-        assertFalse(family.setAge(entity, 1L))
-        assertFalse(family.setTitle(entity, "not stored"))
-        assertFalse(family.setFather(entity, entity))
-        assertFalse(fresh.setAge(entity, 2L))
-        assertFalse(fresh.setDisplayName(entity, "not stored"))
-        assertFalse(fresh.setFatherId(entity, entity))
-    }
-
-    private fun writeSchema(): Path = Files.writeString(temp.resolve("schema.tsv"), resource("family.schema.tsv"), Charsets.UTF_8)
-
-    private data class CliResult(val code: Int, val out: String, val err: String)
-
-    private fun cli(vararg args: String): CliResult {
-        val stdout = ByteArrayOutputStream()
-        val stderr = ByteArrayOutputStream()
-        val code = PrintStream(stdout, true, Charsets.UTF_8).use { out ->
-            PrintStream(stderr, true, Charsets.UTF_8).use { err -> runCli(arrayOf(*args), out, err) }
-        }
-        return CliResult(code, stdout.toString(Charsets.UTF_8), stderr.toString(Charsets.UTF_8))
-    }
-
-    private fun cliArgs(check: Boolean, input: Path, output: Path): Array<String> =
-        (if (check) listOf("--check", input.toString(), output.toString()) else listOf(input.toString(), output.toString())).toTypedArray()
-
-    private fun pinMtime(path: Path): FileTime {
-        Files.setLastModifiedTime(path, FileTime.fromMillis(946_684_800_000L))
-        return Files.getLastModifiedTime(path)
-    }
-
-    private fun assertUnchanged(path: Path, bytes: ByteArray, mtime: FileTime) {
-        assertContentEquals(bytes, Files.readAllBytes(path))
-        assertEquals(mtime, Files.getLastModifiedTime(path), "Read-only/error path changed the output mtime")
-    }
-
-    private fun assertCheckReadOnly(input: Path, output: Path, expectedCode: Int, diagnostic: String): CliResult {
-        val bytes = Files.readAllBytes(output)
-        val mtime = pinMtime(output)
-        val result = cli("--check", input.toString(), output.toString())
-        assertEquals(expectedCode, result.code, result.err)
-        if (expectedCode == 0) {
-            assertContains(result.out, diagnostic)
-            assertEquals("", result.err)
-        } else {
-            assertContains(result.err, diagnostic)
-            assertEquals("", result.out)
-        }
-        assertUnchanged(output, bytes, mtime)
-        return result
-    }
-
-    // TEST INFRASTRUCTURE: independent, case-sensitive wire storage, not a mocked generated facade.
-    private class FakeEntityApi(
-        private val intFields: Set<String> = setOf("age", "father", "AGE", "father_ID", "other_age", "other_father"),
-        private val strFields: Set<String> = setOf("title", "display_name", "other_title"),
-    ) : EntityApi {
-        private data class Record(val archetype: String, var state: EntityState = EntityState.ACTIVE)
-        private val records = mutableMapOf<EntityId, Record>()
-        private val ints = mutableMapOf<EntityId, MutableMap<String, Long>>()
-        private val strings = mutableMapOf<EntityId, MutableMap<String, String>>()
-        private var nextId = 1L
-        var rejectWrites = false
-
-        fun fixtureEntity(raw: Long): EntityId {
-            val id = EntityId(raw)
-            require(!id.isNull && !exists(id))
-            records[id] = Record("person")
-            return id
-        }
-
-        override fun create(archetype: String): EntityId {
-            require(archetype in setOf("person", "other")) { "Undeclared archetype: $archetype" }
-            while (EntityId(nextId).isNull || exists(EntityId(nextId))) nextId++
-            val id = EntityId(nextId++)
-            records[id] = Record(archetype)
-            return id
-        }
-
-        override fun destroy(id: EntityId): Boolean {
-            if (records.remove(id) == null) return false
-            ints.remove(id)
-            strings.remove(id)
-            return true
-        }
-
-        override fun exists(id: EntityId): Boolean = id in records
-
-        override fun stateOf(id: EntityId): EntityState? = records[id]?.state
-
-        override fun setState(id: EntityId, state: EntityState): Boolean {
-            val record = records[id] ?: return false
-            record.state = state
-            return true
-        }
-
-        override fun getInt(id: EntityId, field: String): Long =
-            if (exists(id) && field in intFields) ints[id]?.get(field) ?: 0L else 0L
-
-        override fun setInt(id: EntityId, field: String, value: Long): Boolean {
-            if (rejectWrites || !exists(id) || field !in intFields) return false
-            ints.getOrPut(id) { mutableMapOf() }[field] = value
-            return true
-        }
-
-        override fun getStr(id: EntityId, field: String): String =
-            if (exists(id) && field in strFields) strings[id]?.get(field) ?: "" else ""
-
-        override fun setStr(id: EntityId, field: String, value: String): Boolean {
-            if (rejectWrites || !exists(id) || field !in strFields) return false
-            strings.getOrPut(id) { mutableMapOf() }[field] = value
-            return true
-        }
-
-        // P1-6 ②：类型化引用口共用**同一张 ints 表**，不是第二套列存。
-        // 于是 :96-103 的 INT 列对拍（setFather 后 getInt 读、setInt 后 father() 读）
-        // 在改成 getRef/setRef 之后逐值不变，正好证明「不改 codec 不改列存」。
-        override fun getRef(id: EntityId, field: String): EntityId = EntityId(getInt(id, field))
-
-        override fun setRef(id: EntityId, field: String, value: EntityId): Boolean =
-            setInt(id, field, value.raw)
-
-        override fun query(archetype: String, state: EntityState?): List<EntityId> = records.entries
-            .filter { it.value.archetype == archetype && (state == null || it.value.state == state) }
-            .map { it.key }
-            .sortedBy { it.raw }
+    /**
+     * 「写被拒」只能从原生口读 Boolean（属性 setter 返回 Unit），键仍是同一份 `Keys.<prop>`。
+     */
+    private fun assertWritesRejected(api: FakeEntityApi, entity: EntityId) {
+        assertFalse(api.setInt(entity, FamilyKeys.age, 1L))
+        assertFalse(api.setStr(entity, FamilyKeys.title, "not stored"))
+        assertFalse(api.setRef(entity, FamilyKeys.father, entity))
+        assertFalse(api.setInt(entity, FreshKeys.age, 2L))
+        assertFalse(api.setStr(entity, FreshKeys.displayName, "not stored"))
+        assertFalse(api.setRef(entity, FreshKeys.fatherId, entity))
+        // 同一列的裸名口径必须一致。
+        assertFalse(api.setInt(entity, "age", 1L))
+        assertFalse(api.setStr(entity, "display_name", "not stored"))
+        assertFalse(api.setRef(entity, "father_ID", entity))
     }
 }

@@ -21,6 +21,8 @@ class FakeTransactionIo(
     var freeBytes: Long = Long.MAX_VALUE / 4,
     var crashPoint: CrashPoint? = null,
 ) : SaveTransactionIo {
+    /** 置非空则 [availableBytes] 照真机那个样子直接抛（默认空 = 正常读数）。 */
+    var availableFailure: Throwable? = null
     val disk = HashMap<String, ByteArray>()
     val ops = ArrayList<String>()
     private val counters = HashMap<OpKind, Int>()
@@ -71,6 +73,7 @@ class FakeTransactionIo(
 
     override fun availableBytes(): Long {
         ops += "AVAILABLE"
+        availableFailure?.let { throw it }
         return freeBytes
     }
 }

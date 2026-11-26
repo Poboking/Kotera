@@ -30,10 +30,12 @@ import kotlin.test.assertTrue
  * 再逐行一个元素、`}` 收尾的**行连续块**，声明本身要靠预处理层的块合并才成立。
  * 原文（`ERB/コマンド関連/COMF/外出系/COMF640-641_月虹市場&アビリティカード/`
  * `COMF641 アビリティカード_カードパラメータ.ERH`，见 [erhRel] 常量，实际取真文件）：
- *  - `:225` 单独一行 `{
- *  - `:226` `#DIM CONST COM641_AC_カードタイプ付与BIT配列 =`
- *  - `:227`–`:259` 33 行元素，每行 `1 << COM641_AC_カードIDX_*`（可 `|` 复合），行尾逗号、末元素无逗号
- *  - `:260` 单独一行 `}`
+ * 行号一律按**当前出货语料 261111** 校准（261017 已退役，见
+ * `specs/engine-profiles.yaml` 的 `corpora.V4_981_261017.retired`）：
+ *  - `:233` 单独一行 `{
+ *  - `:234` `#DIM CONST COM641_AC_カードタイプ付与BIT配列 =`
+ *  - `:235`–`:267` 33 行元素，每行 `1 << COM641_AC_カードIDX_*`（可 `|` 复合），行尾逗号、末元素无逗号
+ *  - `:268` 单独一行 `}`
  * 块合并口径 spec: EraStreamReader.cs:130-184（移植侧 `LogicalLineReader.kt:214-252`，
  * 连接串 = `Config.ReplaceContinuationBR` 去引号 = 单空格，EraStreamReader.cs:178-179）。
  *
@@ -56,14 +58,17 @@ class Com641RealErhDimLoadTest {
     private val bitArray = "COM641_AC_カードタイプ付与BIT配列"
 
     /**
-     * `ERH:227-259` 的 33 个元素按原版语义独立算出的期望值
+     * `ERH:235-267`（261111）的 33 个元素按原版语义独立算出的期望值
      * （`IDX_ステータス補助=0 / 戦闘補助=1 / 技能補助=2 / うふふ補助=3 / 特殊効果=10`，
-     * 即 ERH:209-213 的五行标量 CONST；元素式 = `1 << i` 逐条按位或）。
+     * 即 ERH:217-221 的五行标量 CONST；元素式 = `1 << i` 逐条按位或）。
+     * **例外**：261111 把第 31 个元素（0 基 30，ERH:265）写成字面 `0` —— 语料自带注释
+     * 「本仓：第 30 行（暴食のムカデ）置 0」（不经卡片引擎，效果在 DANMAKU 外部实现），
+     * 261017 是 `2`；这里跟出货语料走。
      * 由独立脚本从真文件原文算出，不经过移植侧解析器 —— 断言的是语义而不是自证。
      */
     private val expectedBits = longArrayOf(
         1024, 6, 6, 7, 7, 1, 1, 2, 2, 1, 1, 1, 1, 1, 1, 1,
-        2, 2, 2, 1, 1, 2, 2, 4, 1025, 4, 2, 6, 6, 10, 2, 6, 5,
+        2, 2, 2, 1, 1, 2, 2, 4, 1025, 4, 2, 6, 6, 10, 0, 6, 5,
     )
 
     private fun productionConfig(): DimParseConfig {
@@ -102,16 +107,16 @@ class Com641RealErhDimLoadTest {
         assertEquals(decls.size, sharp.count { it.content.startsWith("#DIM") }, "SHARP 行都应是 #DIM 声明")
         val target = decls.firstOrNull { it.raw.contains(bitArray) }
         assertNotNull(target, "行连续块合并后必须出现 $bitArray 的声明；实际 SHARP 行 = ${sharp.map { it.content.take(40) }}")
-        // 原文 `:226` 的等号后是空的，元素全在后续物理行里 ⇒ 合并串必须同时含 `=`、首个元素的
-        // `1 << `、以及最后一个元素（:583 的 `1` 属于另一个块，这里只要求块尾元素 `技能補助`）
+        // 原文 `:234` 的等号后是空的，元素全在后续物理行里 ⇒ 合并串必须同时含 `=`、首个元素的
+        // `1 << `、以及最后一个元素（后文另一个 `{ }` 块的 `1` 不该混进来，这里只要求块尾元素 `技能補助`）
         assertTrue(target.raw.startsWith("#DIM CONST $bitArray = "), "合并串应以空等号起头：${target.raw.take(60)}")
-        assertTrue("1 << COM641_AC_カードIDX_特殊効果," in target.raw, "首元素（ERH:227）应并入：${target.raw.take(120)}")
-        assertTrue("1 << COM641_AC_カードIDX_ステータス補助 | 1 << COM641_AC_カードIDX_技能補助" in target.raw, "末元素（ERH:259）应并入")
+        assertTrue("1 << COM641_AC_カードIDX_特殊効果," in target.raw, "首元素（ERH:235）应并入：${target.raw.take(120)}")
+        assertTrue("1 << COM641_AC_カードIDX_ステータス補助 | 1 << COM641_AC_カードIDX_技能補助" in target.raw, "末元素（ERH:267）应并入")
         // 块内 33 个元素 ⇒ 逗号 32 个，且不含 `}`（闭合符不进内容，spec: EraStreamReader.cs:152-157）
         assertEquals(32, target.raw.count { it == ',' }, "33 元素 ⇒ 32 个逗号：${target.raw}")
         assertTrue('}' !in target.raw && '{' !in target.raw, "块标记不进逻辑行内容")
         // 逻辑行号 = 闭合 `}` 所在物理行（0 基），spec: EraStreamReader.cs:130-184 + LogicalLineReader.kt:14
-        assertEquals(259, target.line, "逻辑行号 = `}`（物理 :260，0 基 259）")
+        assertEquals(267, target.line, "逻辑行号 = `}`（物理 :268，0 基 267）")
     }
 
     @Test
@@ -140,7 +145,7 @@ class Com641RealErhDimLoadTest {
         val unmerged = VariableStore(VariableRegistry(), VarConfig(systemSaveInBinary = true))
         val bare = SystemVariableBootstrap.install(
             unmerged,
-            listOf(SystemVariableBootstrap.RawDeclaration("#DIM CONST $bitArray =", erhRel, 225)),
+            listOf(SystemVariableBootstrap.RawDeclaration("#DIM CONST $bitArray =", erhRel, 234)),
             productionConfig(),
         )
         assertEquals(0, bare.declared, "无块合并时等号后为空 ⇒ 不注册")

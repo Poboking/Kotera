@@ -380,9 +380,9 @@ class RuntimeDiagnosticsTest {
     @Test
     fun `domain与outcome枚举序钉死`() {
         assertEquals(
-            listOf("PHASE", "JOB", "HOOK", "INTERACTION", "DECISION", "ACTION", "SAVE"),
+            listOf("PHASE", "JOB", "HOOK", "INTERACTION", "DECISION", "ACTION", "SAVE", "EVENT"),
             DiagnosticDomain.entries.map { it.name },
-            "七域顺序同 era-arch-v61u.md §21.6",
+            "前七域顺序同 era-arch-v61u.md §21.6；EVENT 只许末尾追加（改序会打乱工具侧判读）",
         )
         assertEquals(
             listOf("OK", "SKIPPED", "FAILED", "REJECTED"),

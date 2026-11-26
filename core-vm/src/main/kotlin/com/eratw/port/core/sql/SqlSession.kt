@@ -58,6 +58,34 @@ internal class SqlSession(private val driver: SqlDriver) : AutoCloseable {
     private var nextHandle = 1L
     private var closed = false
 
+    /**
+     * 语句边界互斥锁（C2 修复批，组长单点授权）：VM 线程的每一条语句/行操作与宿主 close
+     * 在此单点互斥，**不动任何 SQL 语义、连接池策略与查询实现**。
+     *
+     * ## 为什么要有这把锁
+     *
+     * 驱动按单线程契约设计（`AndroidXSqliteDriver.kt:42`「连接/语句只在创建它的 VM 线程
+     * 使用」），而宿主 [close] 从 UI 线程进来（`GameSession.close` → aux 槽）——close 与
+     * VM 语句执行并发时，本类的两张表、连接的空闲语句池（access-order LinkedHashMap）与
+     * `closed` 标志全部无锁：并发 put/drain 是结构性竞态，最坏把遍历方钉成死循环（落在
+     * UI 线程 = ANR 硬挂），native 半边在非 serialized 编译档下更是 UB。原版无此面对应物
+     * ——WinForms 单线程，脚本运行期窗口直接拒绝操作（`MainWindow.cs:1085-1087`），
+     * 退出从不与脚本并发；判据自立：**移植自有资源面不得比单线程原版多出 UB**。
+     *
+     * ## 互斥序（「确定序」的含义）
+     *
+     * - VM 侧每个入口持锁到**语句边界**（一条语句跑完 / 一次行推进完成）才放锁；
+     * - [close] 取同一把锁独占 ⇒ close 等到的是「在途语句收尾」，不是 VM 整条链——
+     *   实测最坏合法链 2.9 亿指令 ≈130s 是纯计算形态，从不持本锁；语料语句（点查
+     *   199/324、全表扫描均为小表）ms 级，UI 等待上界 = 当前在途语句的剩余时长；
+     * - close 之后 VM 再撞 SQL：表已清空，走「连接不存在 / 无效 Reader ID」的既有
+     *   CodeEE 口径上浮，被宿主 closed 首查静默（`GameHost.kt` 关闭协议第 2 条）——
+     *   与现状唯一差别是这些撞击与 close **不再交错**。
+     *
+     * 监视器可重入：[connectionOpen] 内部经 [executeNonQuery] 执行 PRAGMA，同线程嵌套取锁无害。
+     */
+    private val boundaryLock = Any()
+
     /** 一条已 prepare 的 reader 语句；[hasRow] 记录最近一次 [readerRead] 是否落在有效行。 */
     private class Reader(val statement: SqlStatement) {
         var hasRow = false
@@ -73,9 +101,11 @@ internal class SqlSession(private val driver: SqlDriver) : AutoCloseable {
      * 驱动打开失败（[SqlNativeException]）不吞、不登记：S0 让它上抛，M1 负责包成 CodeEE。
      */
     fun connect(name: String, connectionString: String?) {
-        val key = name.lowercase()
-        if (connections.containsKey(key)) return
-        connections[key] = driver.open(connectionString ?: MEMORY_DATABASE)
+        synchronized(boundaryLock) {
+            val key = name.lowercase()
+            if (connections.containsKey(key)) return
+            connections[key] = driver.open(connectionString ?: MEMORY_DATABASE)
+        }
     }
 
     /**
@@ -90,17 +120,19 @@ internal class SqlSession(private val driver: SqlDriver) : AutoCloseable {
      */
     @Suppress("TooGenericExceptionCaught")
     fun connectionOpen(name: String, connectionString: String) {
-        val key = name.lowercase()
-        connections.remove(key)?.close()
-        val database = driver.open(connectionString)
-        try {
-            executeNonQuery(database, "PRAGMA journal_mode = WAL")
-            executeNonQuery(database, "PRAGMA synchronous = NORMAL")
-        } catch (e: Throwable) {
-            runCatching { database.close() }
-            throw e
+        synchronized(boundaryLock) {
+            val key = name.lowercase()
+            connections.remove(key)?.close()
+            val database = driver.open(connectionString)
+            try {
+                executeNonQuery(database, "PRAGMA journal_mode = WAL")
+                executeNonQuery(database, "PRAGMA synchronous = NORMAL")
+            } catch (e: Throwable) {
+                runCatching { database.close() }
+                throw e
+            }
+            connections[key] = database
         }
-        connections[key] = database
     }
 
     /**
@@ -110,13 +142,15 @@ internal class SqlSession(private val driver: SqlDriver) : AutoCloseable {
      * 直到脚本显式 CLOSE 或 `CloseAll`（[close]）。
      */
     fun disconnect(name: String) {
-        connections.remove(name.lowercase())?.close()
+        synchronized(boundaryLock) { connections.remove(name.lowercase())?.close() }
     }
 
     /** 按名取连接；不存在抛 CodeEE（`SQL_EXECUTE_*` 族的「未连接」口径）。 */
     fun require(name: String, fn: String): SqlConnection =
-        connections[name.lowercase()]
-            ?: throw CodeEE("函数 $fn：数据库连接 \"$name\" 不存在（先执行 SQL_CONNECT \"$name\"）")
+        synchronized(boundaryLock) {
+            connections[name.lowercase()]
+                ?: throw CodeEE("函数 $fn：数据库连接 \"$name\" 不存在（先执行 SQL_CONNECT \"$name\"）")
+        }
 
     /**
      * 按名取连接；不存在返回 null（不抛错）。
@@ -124,7 +158,7 @@ internal class SqlSession(private val driver: SqlDriver) : AutoCloseable {
      * 唯一消费者是 `SQL_IMPORT_MAP_XML`：spec 明文「dbName 未连接返回 0（不抛错）」，
      * 与 `SQL_EXECUTE_*` 族的「未连接抛 CodeEE」不同轴。
      */
-    fun find(name: String): SqlConnection? = connections[name.lowercase()]
+    fun find(name: String): SqlConnection? = synchronized(boundaryLock) { connections[name.lowercase()] }
 
     /**
      * 执行一条非查询语句并返回受影响行数。
@@ -139,19 +173,21 @@ internal class SqlSession(private val driver: SqlDriver) : AutoCloseable {
         db: SqlConnection,
         sql: String,
         params: List<SqlBind> = emptyList(),
-    ): Long = db.prepare(sql).use { statement ->
-        bindAll(statement, params)
-        if (statement.columnCount > 0) {
-            statement.step()
-            SELECT_NONQUERY_RESULT
-        } else {
-            val before = db.totalChanges()
-            var hasNext = statement.step()
-            while (hasNext) {
-                hasNext = statement.step()
+    ): Long = synchronized(boundaryLock) {
+        db.prepare(sql).use { statement ->
+            bindAll(statement, params)
+            if (statement.columnCount > 0) {
+                statement.step()
+                SELECT_NONQUERY_RESULT
+            } else {
+                val before = db.totalChanges()
+                var hasNext = statement.step()
+                while (hasNext) {
+                    hasNext = statement.step()
+                }
+                val after = db.totalChanges()
+                if (after > before) db.lastChanges() else 0L
             }
-            val after = db.totalChanges()
-            if (after > before) db.lastChanges() else 0L
         }
     }
 
@@ -165,9 +201,11 @@ internal class SqlSession(private val driver: SqlDriver) : AutoCloseable {
         db: SqlConnection,
         sql: String,
         params: List<SqlBind> = emptyList(),
-    ): SqlValue? = db.prepare(sql).use { statement ->
-        bindAll(statement, params)
-        if (statement.step()) readColumn(statement, 0) else null
+    ): SqlValue? = synchronized(boundaryLock) {
+        db.prepare(sql).use { statement ->
+            bindAll(statement, params)
+            if (statement.step()) readColumn(statement, 0) else null
+        }
     }
 
     /**
@@ -181,24 +219,28 @@ internal class SqlSession(private val driver: SqlDriver) : AutoCloseable {
         sql: String,
         params: List<SqlBind> = emptyList(),
     ): Int {
-        val statement = db.prepare(sql)
-        val bindFailure = runCatching { bindAll(statement, params) }.exceptionOrNull()
-        if (bindFailure != null) {
-            runCatching { statement.close() }
-            throw bindFailure
+        synchronized(boundaryLock) {
+            val statement = db.prepare(sql)
+            val bindFailure = runCatching { bindAll(statement, params) }.exceptionOrNull()
+            if (bindFailure != null) {
+                runCatching { statement.close() }
+                throw bindFailure
+            }
+            val handle = nextHandle
+            nextHandle += 1
+            readers[handle] = Reader(statement)
+            return handle.toInt()
         }
-        val handle = nextHandle
-        nextHandle += 1
-        readers[handle] = Reader(statement)
-        return handle.toInt()
     }
 
     /** 推进 reader 一行；句柄不存在/已关闭返回 false（`SQL_READER_READ` 的 0 口径）。 */
     fun readerRead(handle: Long): Boolean {
-        val reader = readers[handle] ?: return false
-        val hasRow = reader.statement.step()
-        reader.hasRow = hasRow
-        return hasRow
+        synchronized(boundaryLock) {
+            val reader = readers[handle] ?: return false
+            val hasRow = reader.statement.step()
+            reader.hasRow = hasRow
+            return hasRow
+        }
     }
 
     /**
@@ -209,18 +251,22 @@ internal class SqlSession(private val driver: SqlDriver) : AutoCloseable {
      * 之前取列即抛 `InvalidOperationException` 的形状一致，不静默返回 0/null。
      */
     fun readerValue(handle: Long, index: Int, fn: String): SqlValue {
-        val reader = readers[handle]
-            ?: throw CodeEE("函数 $fn：无效的 Reader ID：$handle")
-        if (!reader.hasRow) {
-            throw CodeEE("函数 $fn：Reader $handle 尚未 READ 到有效行")
+        synchronized(boundaryLock) {
+            val reader = readers[handle]
+                ?: throw CodeEE("函数 $fn：无效的 Reader ID：$handle")
+            if (!reader.hasRow) {
+                throw CodeEE("函数 $fn：Reader $handle 尚未 READ 到有效行")
+            }
+            return readColumn(reader.statement, index)
         }
-        return readColumn(reader.statement, index)
     }
 
     /** 关闭并移除 reader；句柄不存在时 no-op（`SQL_READER_CLOSE` 重复关闭不中断脚本）。 */
     fun closeReader(handle: Long) {
-        val reader = readers.remove(handle) ?: return
-        reader.statement.close()
+        synchronized(boundaryLock) {
+            val reader = readers.remove(handle) ?: return
+            reader.statement.close()
+        }
     }
 
     /**
@@ -228,28 +274,33 @@ internal class SqlSession(private val driver: SqlDriver) : AutoCloseable {
      *
      * 单个 close 抛异常不阻断其余关闭：所有对象都尝试关完后，抛**第一个**失败
      * （`close()` 的契约：异常按首个失败抛，但其余仍尝试关闭）。
+     *
+     * 取 [boundaryLock]：等到在途语句收尾（语句边界）才动手，与 VM 侧使用面构成确定序
+     * ——本等待不等于「等 VM 线程退出」（合法长链是纯计算形态，从不持该锁）。
      */
     override fun close() {
-        if (closed) return
-        closed = true
+        synchronized(boundaryLock) {
+            if (closed) return
+            closed = true
 
-        var firstFailure: Throwable? = null
-        val openReaders = readers.values.toList()
-        readers.clear()
-        for (reader in openReaders) {
-            val failure = runCatching { reader.statement.close() }.exceptionOrNull()
-            if (firstFailure == null) firstFailure = failure
+            var firstFailure: Throwable? = null
+            val openReaders = readers.values.toList()
+            readers.clear()
+            for (reader in openReaders) {
+                val failure = runCatching { reader.statement.close() }.exceptionOrNull()
+                if (firstFailure == null) firstFailure = failure
+            }
+
+            val openConnections = connections.values.toList()
+            connections.clear()
+            for (connection in openConnections) {
+                val failure = runCatching { connection.close() }.exceptionOrNull()
+                if (firstFailure == null) firstFailure = failure
+            }
+
+            val firstThrown = firstFailure
+            if (firstThrown != null) throw firstThrown
         }
-
-        val openConnections = connections.values.toList()
-        connections.clear()
-        for (connection in openConnections) {
-            val failure = runCatching { connection.close() }.exceptionOrNull()
-            if (firstFailure == null) firstFailure = failure
-        }
-
-        val firstThrown = firstFailure
-        if (firstThrown != null) throw firstThrown
     }
 
     private fun bindAll(statement: SqlStatement, params: List<SqlBind>) {

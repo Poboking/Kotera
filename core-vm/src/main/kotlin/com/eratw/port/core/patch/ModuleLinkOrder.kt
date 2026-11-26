@@ -118,6 +118,7 @@ object ModuleLinkOrder {
             if (existing != null) {
                 throw LinkOrderException(
                     "链接组合里 packageId 重复：${p.packageId}（下标 $existing 与 $i）",
+                    packageIds = listOf(p.packageId),
                 )
             }
         }
@@ -155,6 +156,9 @@ object ModuleLinkOrder {
                 val j = indexById[constraint.packageId]
                     ?: throw LinkOrderException(
                         "包 [${p.packageId}] 缺少硬依赖 [${constraint.packageId}]（组合里没有这个包，拒绝强跑）",
+                        // 归因只给声明方：被缺的目标不在组合里（盘上可能根本没有），写它的
+                        // canonical 行等于替一个不存在的包报「装载失败」。
+                        packageIds = listOf(p.packageId),
                     )
                 requireNotSelf(p.packageId, j, i, "requires")
                 checkRequiresVersion(p, constraint, packages[j])
@@ -193,6 +197,9 @@ object ModuleLinkOrder {
         throw LinkOrderException(
             "包 [${dependent.packageId}] 硬依赖 [${target.packageId}] 版本区间 $interval，" +
                 "实际 [$actualRaw] —— $verdict，拒绝强跑",
+            // 版本区间不匹配是**双方组合**的问题：两边都在组合里、都因整链拒载装不上，
+            // 各自一条 canonical 行，玩家在设置页两个包下都能看到同一条四元组归因。
+            packageIds = listOf(dependent.packageId, target.packageId),
         )
     }
 
@@ -202,7 +209,7 @@ object ModuleLinkOrder {
 
     private fun requireNotSelf(id: String, from: Int, to: Int, kind: String) {
         if (from == to) {
-            throw LinkOrderException("包 [$id] 的 $kind 指向自身（依赖环）")
+            throw LinkOrderException("包 [$id] 的 $kind 指向自身（依赖环）", packageIds = listOf(id))
         }
     }
 
@@ -230,11 +237,21 @@ object ModuleLinkOrder {
             val blocked = packages.indices
                 .filter { graph.indegree[it] > 0 }
                 .map { packages[it].packageId }
-            throw LinkOrderException("模块依赖环：${blocked.joinToString(", ")}")
+            // 环上每个包都在组合里、都装不上 ⇒ 逐包可归因。
+            throw LinkOrderException("模块依赖环：${blocked.joinToString(", ")}", packageIds = blocked)
         }
         return out
     }
 }
 
-/** 链接组合无法定序（缺硬依赖 / 重复包 / 显式排序配置重复 / 依赖环）——整组拒绝，不猜、不强跑。 */
-class LinkOrderException(message: String) : RuntimeException(message)
+/**
+ * 链接组合无法定序（缺硬依赖 / 重复包 / 显式排序配置重复 / 依赖环）——整组拒绝，不猜、不强跑。
+ *
+ * @property packageIds 本次拒载**可归因的盘上包名**（构造期由各抛出点按已知组合填充，只读）。
+ *   空列表 = 无可靠包级归因（例如「显式排序配置内重复」是玩家配置面错误、不指向组合里任何
+ *   已装载包），调用方据此改走不可归因留痕出口。本属性只供留痕归因，不参与定序裁决。
+ */
+class LinkOrderException(
+    message: String,
+    val packageIds: List<String> = emptyList(),
+) : RuntimeException(message)

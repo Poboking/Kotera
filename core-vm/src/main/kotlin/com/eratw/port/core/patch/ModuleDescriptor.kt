@@ -128,6 +128,29 @@ data class CharaRouteDeclaration(
 }
 
 /**
+ * 原版全局变量受控写授权声明（`RT2MANIFEST/8` 的 `write-grants` 可选段，ModDX4-B1）。
+ *
+ * [name] = 原版全局变量键（引擎侧按大写归一寻址；线格式承载原文，归一在消费点做）；
+ * [isStr] = 该键的授权类型（false = INT / true = STR），与运行期写通道一一对应：
+ * INT 授权只走整型写、STR 授权只走字符串写，类型不符 = 坏 grant（声明期整包拒）。
+ *
+ * 声明的是**单键标量/首格**授权：0 维标量与 1 维非角色数组（裸引用同形的 0 号元素）可写；
+ * 角色变量与 2 维以上不可按名寻址，装载期校验即拒，不留到运行期猜。键在本包内唯一
+ * （大写归一后判重，构造期 fail-closed）。
+ */
+data class WriteGrantDeclaration(
+    val name: String,
+    val isStr: Boolean = false,
+) {
+    init {
+        require(name.isNotBlank()) { "write-grants 键不能为空" }
+    }
+
+    /** 授权键的大写归一（口径同 [NamePolicy]：trim + 大写，IGNORE CASE 寻址）。 */
+    val canonicalName: String get() = NamePolicy.canonical(name)
+}
+
+/**
  * 位置无关模块描述符（Manifest 核心字段，ABI-5）。
  *
  * - [externalCalls]：本模块 `_CALL(22)` 引用的外部函数名表；指令字侧以负下标
@@ -233,12 +256,76 @@ data class ModuleDescriptor(
      * 镜像派生（见 [DeclarationRegistry.freeze]）。无路由 = 缺省空表，字节与旧档逐位一致。
      */
     val charaRoutes: List<CharaRouteDeclaration> = emptyList(),
+    /**
+     * 展示元数据（`RT2MANIFEST/4` 的 meta 扩展域）：显示名 / 作者 / 说明。
+     *
+     * **三个全空 = 编码器仍出 `/3`**（既有资产与 NOT_PROVIDED 语义不受影响）；任一非空
+     * 才升 `/4`。解码器同时接受 `/3`（三字段全空）与 `/4`。本域**不参与**任何链接 /
+     * 版本裁决 / 声明事务：纯粹给宿主与玩家看的（模组列表、导入页）。
+     */
+    val displayName: String = "",
+    val author: String = "",
+    val description: String = "",
+    /**
+     * 作者声明的设置项（RT2 per-mod 配置，`RT2MANIFEST/5` 的 settings 段）。
+     *
+     * 空清单 = 不升版本：编码器仍出 `/3`（无展示元数据）或 `/4`（有展示元数据），既有资产
+     * 逐字节不变；非空才写 `/5`（解码器同时接受 `/3` / `/4` / `/5`）。键包内唯一、类型固定，
+     * 声明顺序 = 设置页渲染顺序，**有语义、写侧不排序**。值本身不在 manifest 里（设备侧
+     * 按包配置文件）；本域只进声明面，不参与链接 / 版本裁决 / 声明事务的冲突域。
+     */
+    val settings: List<SettingDeclaration> = emptyList(),
+    /**
+     * 作者声明的**运行期引擎 API 版本闸**（`RT2MANIFEST/6` 的 min-api 段，ModDX-2 DX2-B；
+     * 对标 SMAPI `minApiVersion`）：本包要求的最低引擎作者面契约版本（`ModApi.VERSION` 口径）。
+     *
+     * 缺省 0 = **不设闸**（旧 descriptor 与旧 manifest 逐字节零变化；编码器只在非 0 时升 `/6`）。
+     * 裁决不在本类做（这里没有 `ModApi.VERSION` 可见性）：装配期由 app 宿主
+     * `ModChainAssembly` 统一判 `minApi > ModApi.VERSION` ⇒ 整链拒载并逐包归因
+     * （与 requires 缺失同口径的 fail-closed，见其装配侧 KDoc）。
+     *
+     * 负值在构造期 fail-closed 拒绝（decode 期经 [ManifestCodec] 的
+     * `guarded("ModuleDescriptor")` 归一成带行号的格式异常）。
+     */
+    val minApi: Int = 0,
+    /**
+     * 作者显式声明的逐条声明源位置（`RT2MANIFEST/7` 的 `declaration-positions` 可选段，
+     * ModDX-3 DX3-C；对标蓝图冲突报告的「文件:行号」要求）。
+     *
+     * 映射键 = 冲突报告里那条声明的人类可读原文（即 [DeclarationRegistry] 传给
+     * `DeclarationSite.declaration` 的串，例如 `global-dim MOD_STATE`、
+     * `component-schema Education 的字段 mentorId`）；值 = 作者填的 `文件:行号`（原样承载，
+     * 不在 core 侧解析、不猜、不从 Kotlin 反射造行号）。
+     *
+     * 缺省空表 = **不写新段、不升版本**：编码器仍按 /3 /4 /5 /6 既有规则落盘，旧 manifest
+     * 逐字节零变化；只有真的声明了位置的包才升 /7（解码器同时接受 /3 /4 /5 /6 /7）。
+     * 本域只进声明面：不参与链接 / 版本裁决 / 声明冲突的裁决，仅在冲突诊断时回显位置。
+     */
+    val declarationPositions: Map<String, String> = emptyMap(),
+    /**
+     * 作者显式声明的原版全局变量受控写授权（`RT2MANIFEST/8` 的 `write-grants` 可选段，
+     * ModDX4-B1；语义与 mod-api [com.eratw.port.modapi.WriteGrantDecl] 逐条对应）。
+     *
+     * 缺省空表 = **不写新段、不升版本**：编码器仍按 /3 /4 /5 /6 /7 既有规则落盘，旧 manifest
+     * 逐字节零变化；只有真的声明了授权的包才升 /8（解码器同时接受 /3 /4 /5 /6 /7 /8）。
+     * 键在大写归一后包内唯一（构造期 fail-closed；decode 期经 `guarded` 归一成带行号的
+     * 格式异常）。存在性/类型校验归装载相位（写授权注册表构造点），不在本类（这里没有
+     * `VariableRegistry` 可见性）。
+     */
+    val writeGrants: List<WriteGrantDeclaration> = emptyList(),
 ) {
     init {
         require(packageId.isNotEmpty()) { "packageId 不能为空" }
+        require(minApi >= 0) { "min-api 不能为负：$minApi（0 = 不设闸）" }
         // requires 约束条目语法 fail-closed（含 min ≤ max，语法见类 KDoc）：非法即整包拒。
         // decode 期经 ManifestCodec 的 guarded("ModuleDescriptor") 自动带行号。
         for (entry in requires) parseRequiresConstraint(entry)
+        require(settings.map { it.key }.toSet().size == settings.size) {
+            "settings 段设置项键在本包内必须唯一：${settings.map { it.key }}"
+        }
+        require(writeGrants.map { it.canonicalName }.toSet().size == writeGrants.size) {
+            "write-grants 键在本包内必须唯一（大写归一后判）：${writeGrants.map { it.name }}"
+        }
     }
 
     /** 覆盖声明键归一（大写，IGNORE CASE 口径同 Config.StrComper）。 */

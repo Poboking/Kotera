@@ -404,8 +404,9 @@ python tools/golden-coverage.py                # 300/303 语句、252/271 函数
 | GGETTEXTSIZE | `str, fontName, fontSize[, fontStyle]` | `:6537-6548` 4 槽 `OmitStart=3`；`:6560-6566`、`:6584-6587`（宽为返回值、高写 `RESULT_ARRAY[1]`）⇒ **首实参不是 gId** |
 | XML_SET / XML_SET_BYNAME | `doc, xpath, value[, allMatched[, style]]` | `:1156-1166` / `:1188-1202` 5 槽 `OmitStart=3`；`:1259` 第 4 位=多匹配节点开关、`:1260-1264` 第 5 位=style(0..2) |
 
-> 官方 bug / 怪癖按 ADR-005 原样记录，不做“顺手修正”：LOADTEXT / SAVETEXT 的尾随实参求值后丢弃、
-> RESUMETEXTBOX 声明三实参却整组忽略、`GAMEBASE_AUTHER` 拼写错误名与正名并存。
+> 官方 bug 按 ADR-005（2026-11-17 分类处置口径）登记 `docs/UPSTREAM-BUG-PR.md`：语料侧 bug 走内容补丁修、引擎侧 bug 在引擎直接修为真确语义，不再「原样记录、不修」；判「官方正确设计」（非 bug）才照抄保留，且判性须带 C# `文件:行号` 正证。下列 LOADTEXT / SAVETEXT 尾随实参求值后丢弃、RESUMETEXTBOX 声明三实参却整组忽略、`GAMEBASE_AUTHER` 拼写错误名等条目，须逐条复核归属侧（语料 or 引擎）并按新口径处置或在 §C③ 登记为官方正确设计。
+>
+> 本文 §12 / §13 等「ADR-005 偏离登记」及各类「不复刻崩溃」「按现状钉」段落为**历史证据链**（记录当时判据与 C# 锚），原样保留；与 2026-11-17 新口径冲突时以 ADR-005 + `UPSTREAM-BUG-PR.md` 为准，不据旧判词放弃在册 bug。
 
 **（3）specs/variables.yaml** — 新增 `multi_dim_arrays` 8 条（此前只在 `default_sizes` 的合并说明里以注释出现过）：
 
@@ -1283,7 +1284,8 @@ ERH 不产生 `@` 标签（`ErhLoader.cs` 无标签分支，见 `loader.md` D.2 
      * `10px` 在官方词法层就报 CodeEE —— ReadInt64 把数字后的 `p` 当 2 底指数
      * （spec: LexicalAnalyzer.cs:66-68），readDigits 读到 `x` 得空串（:100-111、:140-152）。
      * 因此这里按文本切分是**超集规避**（接受官方会拒绝的 `10px`），不是待验项；
-     * 逐字复刻须改词法器（同 CMP-53 的登记面）。
+     * 若判为官方正确设计则维持（逐字复刻须改词法器，同 CMP-53 的登记面）；
+     * 若判为官方 bug 则按 ADR-005 新口径在引擎侧直修 + 登记 UPSTREAM-BUG-PR.md。
      */
 ```
 
@@ -1457,8 +1459,13 @@ ADR-005 **偏离登记**口径改口径，不得再写成「按现状钉＝官�
     （VariableEvaluator.cs:722/:732）。
 14. **VARSET 负 END + 缺 START = no-op**（StatementExecutor）：交换仅当 Start!=null
     （FunctionIdentifier.cs:1642-1656）。
-15. **MesSkip 吞掉后无条件清标志**（WAIT / WAITANYKEY / PRINT W 位 / TWAIT 四处）：
-    EmueraConsole.cs:1456；语料 INPUT canSkip 0 处，当前零可观测面，纯对齐。
+15. **MesSkip 跨连续无值等待存活**（WAIT / WAITANYKEY / PRINT W 位 / TWAIT 吞掉时不清标志；
+    清标志只发生在取值等待阻塞前与 FORCEWAIT）：EmueraConsole.cs:1451-1456（蛇版 4.981
+    :1502-1515）——`MesSkip = false` 在输入循环 while **之后**，一次跳过提交连续跑过所有
+    NeedValue=false 的等待直到撞取值等待 / StopMesskip。
+    **11-17 更正并真修**：旧判据「吞掉后无条件清标志」把 :1456 误读进循环内（2026-10-26
+    fixcore 审查 C4 同源误读），导致长按跳过一次只推进一页、快进中 INPUT(canSkip) 快路径
+    （FunctionIdentifier.cs:853）读不到跳过态——与原版不一致，引擎侧直修（docs/UPSTREAM-BUG-PR.md B 类）。
 16. **立绘死条目不画**（ScreenComposer.drawSprite isCreated 守卫）：EmueraConsole.cs:1844。
 17. **GOTO 动态标签缺失文案对齐 zhs**（Vm.kt + ProcessRuntime.resolveLabel）：emuera-zhs.xml:540。
     **11-05 更正并真修**（lane labeldollar `e956db74`）：这一条当时只对齐了 `{0}` = 求值名**原文**，
@@ -1844,8 +1851,9 @@ render **818/0**；`corpusSmoke` **GATE GREEN**（3971 文件 / 110,066 切片 /
 会走到「没 scopeIn 过却被 scopeOut」——空栈分支把 data 置 null。
 
 **为什么登记而不修**：这不对称在本批之前就存在（leave 侧一直没动过）；且「动态私有
-随函数作废」本身可能就是原版语义——退函数时把它清掉恰好多对。官方 bug 原样复刻是
-铁律，判明之前不许顺手改。
+随函数作废」本身可能就是原版语义——退函数时把它清掉恰好多对。按 ADR-005（2026-11-17
+分类处置口径），**判明是官方 bug 就在引擎侧直修、登记 `UPSTREAM-BUG-PR.md`；判明是官方正确设计才照抄保留**，
+判性须带 C# `文件:行号` 正证；在判明之前不许顺手改。
 
 **销账路线**（两问都要答）：
 1. C# 对质：`Process.cs:531-536` finally 里的 ScopeOut 遍历对象是什么——调用时刻记录的
@@ -2115,7 +2123,7 @@ commit `48494165eaf3335f3982b6a7c33bee662b8ba2c1`（2026-08-28）的 1-based 行
 
 ## 24. 2026-11-01 4.981 升版 · C 路：SAVEDATA 声明 diff + 迁移链取证 + 合成档语义锁（worker lane-save，worktree `<work-root>/eratw-wt-u981-save`，分支 `wave/u981-save`）
 
-对应契约 `CONTRACT-U981-SAVE.md`（§10.3 存档兼容结论的 W4 落账）。本节只追加，不改旧节。
+对应契约 `../docs/archive/CONTRACT-U981-SAVE.md`（§10.3 存档兼容结论的 W4 落账）。本节只追加，不改旧节。
 
 ### 24.1 取证口径与方法
 
@@ -2471,8 +2479,8 @@ commit `48494165eaf3335f3982b6a7c33bee662b8ba2c1`（2026-08-28）的 1-based 行
 
 ## 32. `maxStepsPerRun = 10 亿` 的 `DeviceBudget` 兜底是移植层语义（ENGFIX-4 登记，2026-11-05）
 
-- **现象**：真机极慢/超长合法链（2026-10-30 的 `EVENTTRAIN` 起床链实测 2.90 亿条指令）曾被 60 秒墙钟误杀；ENGFIX-3 起官方死循环语义（墙钟 + 弹框问玩家、从不自动中止，`Process.cs:470-489`）在 core 复刻，`maxStepsPerRun` 随之降级为**移植层极端兜底**。
-- **官方口径**：Emuera 从不按指令数中止脚本 —— 死循环判据只有墙钟（`Config.InfiniteLoopAlertTime` 注册缺省 5000ms，`ConfigData.cs:75`）+ 同步 YesNo 弹框（`Process.cs:478-488`、`Dialog.cs:21-28`），玩家点「否」即继续。
+- **现象**：真机极慢/超长合法链（2026-10-30 的 `EVENTTRAIN` 起床链实测 2.90 亿条指令）曾被 60 秒墙钟误杀；ENGFIX-3 起官方死循环语义（墙钟 + 弹框问玩家、从不自动中止，skia `Process.cs:481-515`、1.824 `:493-512`）在 core 复刻，`maxStepsPerRun` 随之降级为**移植层极端兜底**。
+- **官方口径**：Emuera 从不按指令数中止脚本 —— 死循环判据只有墙钟（`Config.InfiniteLoopAlertTime` 注册缺省 5000ms，`ConfigData.cs:75`）+ 同步 YesNo 弹框（skia `Process.cs:497-513`、1.824 `:501-505`、`Dialog.cs:21-28`），玩家点「否」即继续。
 - **移植侧偏差（ADR-005 例外）**：`GameSession.PRODUCTION_MAX_STEPS_PER_RUN = 1_000_000_000L` 是 Android 侧的极端兜底，命中即抛 `StepLimitExceeded`（`LoopGuardCause.DeviceBudget`），按装载失败收口并留 `deadloop-site.txt` 现场。取值依据：实测最坏合法链 2.90 亿条的 3.4 倍；代价是真死循环 ≈7.5 分钟才报（见该常量 KDoc）。
 - **为什么保留**：设备被系统降频/抢占时墙钟会误杀合法重负载，指令数闸与设备速度无关，是「不误杀优先」的最后一道；官方行为面（弹框问玩家）由 ENGFIX-4 的 AlertDialog 接线承接，两者不冲突。
 - **ENGFIX-4 接线面**：`VmConfig.infiniteLoopAlertTimeMs` 阈值取会话生效配置 `InfiniteLoopAlertTime`（置 0 关）；`ProcessRuntime.askInfiniteLoop` 经 `infiniteLoopPrompt` 把 VM 线程阻塞到 UI 作答；app 侧 `BlockingInfiniteLoopPrompt` + `PortraitShellCopy.dialogYes/dialogNo`（三语）。
@@ -2581,7 +2589,7 @@ commit `48494165eaf3335f3982b6a7c33bee662b8ba2c1`（2026-08-28）的 1-based 行
 
 ## 34. A4 三件翻案落地：img 无 width 按图元宽高比 + 立绘段按钮行内命中 + 图层几何精确式（IMG-A4 · 2026-11-06）
 
-对应契约 `CONTRACT-IMG-A4.md`（主人 2026-11-05 指令）。本节只记「近似/偏差 → 复刻」的翻案与残留 TODO。
+对应契约 `../docs/archive/CONTRACT-IMG-A4.md`（主人 2026-11-05 指令）。本节只记「近似/偏差 → 复刻」的翻案与残留 TODO。
 
 ### 34.1 无 `width` 属性的 `<img>` 按图元真实宽高比（翻案「回落量 AltText」）
 
@@ -3241,3 +3249,298 @@ Str `:1424-1426`、数组/浮点 `:1430-1500`，`vToken == null` 时只 `reader.
 
 **边界**：内部 `RestoreReport` 的未认领键清单仍会算（写回闸与诊断共用），只是不再上屏；
 `specs/save-format.md` §7/§8/§9/§10 的切片回写口径不变（ADR-005 例外仍登记在案）。
+
+## 2026-11-17 做菜报错：`#DIM CONST` 常量名形参默认值装载期折叠（玩家「做菜报错：数组变量"ITEM"的第1参数(-1)超出数组范围」根修）
+
+**现象**（玩家上报 1794793143585，app 0.2.47/23，Xiaomi 24122RKC7C）：做菜时抛
+`数组变量"ITEM"的第1参数(-1)超出数组范围`，栈 `COOKING_UI` 行292 ← `COM413` 行122。
+
+**根因层 = 装载/编译相位（默认值项 Restructure），不在 UI 壳、不在语料、不加白名单**：
+编译期补位表 `CallDefaultsCollector` 只收字面量默认值；`@材料设定D(ARG:1 = MATD_未指定,
+ARG:2..10 = MATD_空)` 这种「常量名形态默认值」整函数无可注入位 ⇒ 键根本不进表 ⇒
+`padOmittedArgs` 原样返回 ⇒ 省略位停在帧槽 0。原版在装载期把默认值项 `Restructure` 成
+`SingleTerm`（`Reference/emuera-cs/.../ErbLoader.cs:724-727`：`aExpression2.Restructure(exm) as SingleTerm`），
+`#DIM CONST` 名折成它的值，省略位按 `Def[i]` 顶替（`CalledFunction.cs:167`）。
+
+**玩家链实证**：`MATD_空 = -1` 是 `DISH_ING` 的空槽哨兵
+（`ERB/Headers/MATERIAL_TAGS.ERH:3` 明写「ITEM 编号 >= 0」、`:6 #DIM CONST MATD_空 = -1`），
+折不出 ⇒ 哨兵变成道具号 0 = 跳蛋 ⇒ ①菜单把 9 个空槽画成「跳蛋(11)」②`DISHDATA` 材料判定按
+「持有跳蛋」判成作れる（RESULT=10）③`COM413:206` 无守卫取 `SELECT_ING = DISH_ING:2 = 0`，
+下一轮撞「0 番はローターなので」修整（`:65-67`）复位成 -1 ④`COOKING_UI:293` 的
+`ITEM:SELECT_ING` 抛越界。原版同链拿到 -1，材料判定停空槽 ⇒ 只报「材料不足…」不抛错。
+
+**修法（引擎侧、非补丁，提交 `273f81483`）**：`LineParser.foldConstDefault` 走既有
+`DimSizeEvaluator`（与 `#DIM` 尺寸 / `#LOCALSIZE` 同一份 `dimConsts`、同一求值器，
+`CorpusCompile.kt:706` 注入 `symbolTable.config.constValues`），字面量折不开时再按常量名与
+算术式折叠；折不出仍「不注入」（省略位停帧槽默认，原文进装载报告），不退化成 0。
+表达式层解析失败不再提前返回 —— 默认值的定值依据只有这张表。
+`CallDefaults` 侧相应收常量名形态默认值。产物对账：erbc 侧车 param-defaults 段，修复前
+「材料设定D」整行不存在，修复后 = `(-7 -1×9)`；compileCorpus 4365 文件 119156 切片 0 失败
+（strict 档零降级）。读数：定向 core-vm 15 类 184/0（DefaultArgTest 14/0，新增 4 条钉：
+常量名按 dimConsts 折叠 / 在册常量名算术式折叠 / CALL 省略 ARG:n 位取 -1 而非 0 /
+显式负数实参不被默认值覆盖）；反向证明撤掉折叠 4 条新钉全红，恢复后 `LineParser.kt` sha256 逐字节一致。
+
+**触发面收窄（DB 分支不可能崩）**：游戏语料自建 `QOL_DISH_DB` —— `ERB/TITLE.ERB:28`
+`CALL QOL_DB_INIT` → `ERB/魔改内容/qol/qol_db.ERB:47 @QOL_DB_INIT` → `qol_dish.ERB:105-110`
+`CREATE TABLE QOL_DISH_DB` + `_meta` 版本戳（与 `NOW_VERSION` 比对后按需 `CALL QOL_DISH_DATA_REGISTER`，`:146`）。
+实测真语料 + 真 SQLite（`bootChainProfile` 停 TITLE 首等待点）：12 表 / `QOL_DISH_DB` 350 行 /
+221 = 鱼糜寿司 / `dish_schema_version = 20261111`。DB 分支走 `qol_dish.ERB:363 VARSET DISH_ING, -1`
++ `GETNUM(ITEM, …)`，未命中返回 **-1**（`Creator.Method.cs:5293-5294`，
+`TryKeywordToInteger` 失败 → `return -1`），不会给出道具号 0 ⇒ DB 分支不可能触发本崩溃。
+⇒ 玩家侧必是非 DB 分支（`DISHDATA_ORIGINAL` 的 `材料设定D(...)` 省略位取 0 污染 `DISH_ING`）：
+屏上 221 = 鱼糜寿司（`DISHDATA_ORIGINAL` 表）而库里 221 = 壽司糖，说明该设备
+`QOL_DISH_DB` 无 221 行。卡点 = 缺玩家存档 / mod 全集，无法区分「菜号不在库（mod 或角色专属菜）」
+与「该设备 `QOL_DB_INIT` 未跑成」两因（沿用 OBS2-L3 ③ 取证缺口）。
+撤回 `c8db79308` 回执「启动链路里没有任何建表/灌数调用」的结论 —— 当时 grep 只找
+`SQL_CREATE`/`SQL_INSERT`，漏了 `SQL_EXECUTE_NONQUERY`（`qol_dish.ERB:105-110` 即此写法）。
+
+**预置库（seed-db）投递（2026-11-17 二次更新：mutable 保护已按主人裁定撤销）**：
+`plugins/qol_data.db` 曾命中 `DEFAULT_MUTABLE_DATA_SOURCES`（`AndroidXSqliteDriver.kt:74-76`
+对已存在 target 的 mutable 库永不采纳新 seed），初判为性能/推广面缺口、挂账待裁决。
+经全量取证（下方「触发面收窄」段 + seed 生成器 `devtools/gen_qol_seeddb.py:44-57` 的
+12 表清单对账）：**库中不存在任何不可从语料重建的玩家私有数据** —— 12 张表全部由启动注册
+从语料常量 `INSERT OR REPLACE` 全量重建；`is_custom` 是 mod/语料作者标记
+（`ITEMDATA.ERB:808-1235` 硬编码，注释「标记来源于 Add_Item 的自定义代码」），非玩家创建；
+`gettable` 是捕捉条件键（昼間/夏AND夜間），库中根本未存捕捉进度；`_meta` 全是版本戳；
+无任何表存存档进度/玩家设置/时间戳/计数器。seed 本身由真引擎跑同一条启动注册链导出
+（两次独立生成 sha256 相等），与语料同源。⇒ 主人裁定「无关紧要就不妥协」，
+mutable 保护撤销：`DEFAULT_MUTABLE_DATA_SOURCES` 改为空集，qol_data.db 走统一
+「seed 更新则原子刷新」路径 —— 升级 APK 后新 seed（经 `bundledAssetNeedsCopy` 长度判据
+重新解包、mtime=解包时刻）覆盖老设备旧库，玩家首启直接拿到与随包语料一致的库，
+`QOL_DB_INIT` 版本戳匹配跳过重建（省实测 2659ms 建图）。机制保留（构造可注入
+`mutableDataSources`），供未来真正存玩家私有状态的库恢复「永不回滚」语义。
+让位档（盘上数据版本 > 随包版本）下 seed 不落盘、target 不刷新，高版本数据不被打回 —— 语义自洽。
+读数：`:sqlite-adapter:test` 全绿（`SqliteSeedPolicyTest` 新钉 qol 刷新 + 机制注入钉；
+`SqlitePathLayoutTest` 默认空集断言）；反向证明 = 恢复 mutable 默认集合即新钉红。
+
+**取证口径**：vmdbg `call` 不执行 TITLE 引导链（沙箱零 db 文件），真启动链需
+`--pre "QOL_DB_INIT"`（`Commands.kt` KDoc 已写明）。DB 分支实测：
+`call DISHDATA --args 221/226 --pre "QOL_DB_INIT"` 均 PASS（221 steps=148 / 226 steps=784），
+`GET_MATERIAL_LIST` 的 CODEEE 是把宏当函数调用的调用方式错误（「该函数为 #FUNCTION(S) 的宏，须用 CALL」），
+非引擎 bug。
+
+**TODO(verify)**：真机端到端复跑做菜（待 seed-db 随包出包后销账）；区分玩家走非 DB 路的两因需玩家存档 / mod 全集。
+
+## 2026-11-17 稀疏下标覆盖面：`++`/`--` 绕开补径（同一报错簇的第二处入口，提交 `d3eaeaa8c`）
+
+**背景**：1 维内置数组的动态下标越界在 4.981 不是错误（字典背板，口径见 `variables.yaml`
+`sparse_1d_backplane` 与上一条 `273f81483`）。移植侧的补径挂在 `VarRef` 家族的读/写/加入口上，
+但 `core/expr/Expr.kt` 的两个一元入口**没有走那条通道**。
+
+**根因层 = 装载/编译相位（表达式树求值入口），不在 UI 壳、不在语料**：
+`Unary.changeValue` 与 `UnaryAfter.getIntValue` 自己 `borrowIndices` 后**直呼**
+`reader.plusInt(...)`，绕开 `VarRef.addIntValue` 的「严格通道 → 仅动态下标转稀疏」判定 ⇒
+`X = ++ITEM:IDX`（IDX 运行期为 -1）照抛 `数组变量"ITEM"的第1参数(-1)超出数组范围`。
+
+**原版锚**：`VariableTerm.cs:218-235`（`ChangeValue` → `Identifier.PlusValue`，经
+`VariableData` 的 `SparseArray` 缺省 0 + delta 写回字典）；一元算子分派
+`OperatorMethodManager.cs:609-627`（前置）/ `:629-655`（后置）；背板语义 `SparseArray.cs:25-40`。
+
+**修法**：`Unary.changeValue` 改为 `(operand as VarRef).addIntValue(ctx, delta)`；
+`UnaryAfter.getIntValue` 改为 `vr.addIntValue(...)` 后按「前置返回 +1 后的值、后置返回原值」折算
+（`newVal ∓ 1`）——口径不变，只是继承补径判定。常量下标照抛、2 维/角色行照抛不变。
+
+**浮点三路**（`getFloatValue`/`setFloatValue`/`addFloatValue`）**判为不适用、不补**：
+角色浮点标量/数组在 4.981 计数为 0（`VariableCode.cs:138` `__COUNT_CHARACTER_FLOAT__ = 0x00`、
+`:167` `__COUNT_CHARACTER_FLOAT_ARRAY__ = 0x00` ⇒ `CharacterData.cs:38`/`:41` 皆 `Array.Empty`，
+`:55-59` 的填 SparseArray 循环空转），全局浮点只有 `LOCALF`/`ARGF` 且皆 `__LOCAL__`
+（`VariableCode.cs:99-101`，实分配在 `ExecutionContext.LocalFloats`），背板是密集
+`double[][]`（`VariableData.cs:29`）⇒ 给浮点补稀疏钩子是**造语义**（比不改更糟）。
+
+**读数**：`SparseArrayOorTest` 13 → 20 例，定向 20/0；反向证明撤掉两处改动 ⇒ 4 红
+（前置自增/前置自减/后置自增/后置自减），报错文案与玩家真机逐字一致。
+
+**入口覆盖矩阵（待接线三条）**：`Vm.kt:2981-3095` 五个 `_STK_*VAR*` 栈码无稀疏补径
+（发射面仅 `Assembler.kt:457-467`，语料不可达 ⇒ 需写明「此族仅供 .erbasm」或补径，二选一）；
+`VariableStore.kt:1549-1559` 句柄快径口需 KDoc 明示口径；`variables.yaml` 已补 `++`/`--` 条（本波）。
+
+## 2026-11-18 台账锚补登：GameHost 关闭协议外部审计复核结论（stab-c C2 调研 §6-⑥）
+
+「GameHost 外部审计 P0/P1#3 复核结论 = **关闭协议与池锁机制实证成立**」，落点提交 `a7cf1165c`
+（close/shutdownForExit/handleLoadOrRuntimeFault 三处资源释放所有权与线程口径的 KDoc 回写，
+提交信息自记「外部审计 GPT-P0 复核判不成立、机制原本存在，属文档可见性修复」）。此前该结论
+只活在 GameHost.kt KDoc 自记与提交信息里，verify-notes 无锚；本行补登后，stab-c C2 深化调研
+（RECON-STAB-C2-CLOSE.md §2「在库实证锚」）与后续修复批均以本条为防重复面依据。
+
+## 35. HTMLDIV 负 depth：键全负时正文行仍可点（B9 定案 · 判词 7 · 2026-11-26）
+
+与 §33（HTMLDIV-B1 div 版面复刻）同源不同面：§33 管**画在哪**，本条管**点得到谁**。交叉引用 §33 的
+`EmueraConsole.cs:1829-1857`（depth 0 正文槽）与 `:2916-2925`（逃逸块登记），本条不另立版面判据。
+
+**判据**：一帧里存在逃逸 div 且其 `depth` 键**全为负**时，移植侧正文行（`PRINTBUTTON`、HTML 正文链接、
+`<nonbutton title=…>` 的提示）仍无条件参与命中与提示扫描。不得以「原版同形」为由把整片正文行判死。
+定案来源 = 主人判词第 7 条「跟原版冲突时优先更好更优雅的一方」（本 lane 契约
+`<internal-workdir>/CONTRACT-HTMLDIV7.md`，判词见 m00130 第 7 条）；台账 = `docs/UPSTREAM-BUG-PR.md:96`。
+
+**原版口径（逐条行号，反编译树只读）**
+
+- 1.824 基线 `reference/emuera-cs/MinorShift.Emuera.GameView/EmueraConsole.cs`：
+  - `:186` `private int[] dummy = new int[1];`（空键表替身，值 0 ⇒ 无逃逸块时正文行照扫）
+  - `:2342` `int[] array = ((escapedParts == null || escapedParts.Keys.Count == 0) ? dummy : escapedParts.Keys.ToArray());`
+  - `:2343` `Array.Sort(array);`（升序 ⇒ 负键先过）
+  - `:2344-2346` `num5 = 0; bool flag3 = false; num6 = MainPicBox.Height - Config.LineHeight;`
+  - `:2347` `while (num5 < array.Length)` → `:2349` `int num7 = array[num5];`
+  - **`:2350` `if (!flag3 && num7 >= 0)`** → `:2352-2353` `num7 = 0; flag3 = true;`（门闸只开一次，且只为首个非负键开）
+  - `:2354-2396` 正文行那趟扫描（`:2360` 逆序 Buttons、`:2361` PointX/Width 判、`:2366-2382` StrArray 逐 part、
+    `:2377` `IsButton` 才 `goto IL_03e0`、`:2389` `pointingStrings.Add`、`:2392-2395` 超 100 行 break）
+  - `:2398` `if (num5 >= array.Length || array[num5] != num7) continue;` → `:2403` `if (num7 != 0 || escapedParts.ContainsKey(num7))`
+    → `:2405-2428` 逃逸 part 命中（`:2410` `TestChildHitbox`）→ `:2430` `num5++` → `:2432-2433` `end_IL_0561: break`
+  - 登记面 `ConsoleEscapedParts.cs:66`（`Add(AConsoleDisplayNode part, int line, int depth, int top, int bottom)`）、
+    `:77` `dataRow[5] = ((!consoleDivPart.IsRelative) ? 2 : 0) | 1`
+  - ⇒ 结论：键全负 ⇒ `flag3` 永不置真 ⇒ `:2354-2396` 整趟不执行 ⇒ `pointing` 恒 null ⇒ **正文行点不动**。
+- 蛇版 4.981 `reference/emuera-skia-4.981/Emuera/UI/Game/EmueraConsole.cs`（同形，仅改名）：
+  - `:2516-2518` `#region EM_私家版_描画拡張 int[] dummy = [0];`
+  - `:2604` `var edepth = escapedParts == null || escapedParts.Keys.Count == 0 ? dummy : escapedParts.Keys.ToArray();`
+  - `:2605` `Array.Sort(edepth);` → `:2606-2608` `int eidx = 0; bool zeroTested = false; var bottomLineBase = …`
+  - `:2609` while → `:2611` `var depth = edepth[eidx];` → **`:2612` `if (!zeroTested && depth >= 0)`** → `:2614-2615` `depth = 0; zeroTested = true;`
+  - `:2617-2663` 正文行扫描（`:2635` `foreach part in button.StrArray`、`:2643-2654` pointing/`pointingStrings.Add` + break、
+    `:2659-2662` 超 100 行 break）
+  - `:2665` `if (eidx < edepth.Length && edepth[eidx] == depth)` → `:2669` `if (depth != 0 || escapedParts.ContainsKey(depth))`
+    → `:2670-2698` 逃逸 part（`:2676` lineY 公式、`:2680` 蛇版私有 Y±200px 容错剪枝、`:2683` `TestChildHitbox`）→ `:2699` `eidx++`
+  - 与 1.824 的差集只有 `:2680` 的 Y±200 容错与 `:2647-2654` 的 `canSelect` 支 ⇒ **门闸语义一致，不构成豁免理由**。
+- 正文链接登记面 `HtmlManager.cs:723-739`；非按钮 part 也带 Title 的口径 `HtmlManager.cs:841-847`。
+
+**移植侧落地（本波未改行为）**
+
+- `render/src/main/kotlin/com/eratw/port/render/button/ButtonLayer.kt`：`attachDiv` `:764-783`（`:776` `sortBy { it.hit.depth }` 升序，
+  Kotlin 稳定排序 ⇒ 同 depth 保登记序）、`hitAt` `:825-843`（`:829-834` 负键先扫 → **`:836` 无门闸正文行让位** → `:837-841` 非负键 → `:842` null）、
+  `tooltipAt` `:855-876`（`:858-864` 负键 → **`:865-869` 无门闸正文行** → `:870-874` 其余键）、`rowTargetAt` `:962-972`、
+  `pixelRowTooltip` `:975-983`、`divContains` `:952-959`。
+- 点击面兜底：`render-canvas/src/main/kotlin/com/eratw/port/render/canvas/CanvasConsoleView.kt` `hitOnCurrentView` `:1453-1484`
+  （`:1464` 取 `divHitAt`，非空则 `:1468-1471` 直接提交 div；**null 才** `:1473` 走像素→格→`ButtonLayer.hit` `:462`）。
+
+**回归锁（`--tests "*ButtonLayer*" --tests "*DivFrame*" --tests "*ComOptionPopup*"`）**
+
+- `render/src/test/kotlin/com/eratw/port/render/button/ButtonLayerDivHitTest.kt` ⑥ 节 `:281-400`，三条：
+  - `:321` `键全负的一帧里正文行按钮仍可点` —— 钉「帧内只有一个 `depth=-1` 键 ⇒ `hitAt` 让位回 null（`:836`）+ `hit(2,0)` 仍命到正文按钮」。
+  - `:349` `键全负的一帧里正文行提示仍查得到` —— 钉 `:865-869` 的无门闸正文行提示（**突变探针 A 的唯一红点**）。
+  - `:368` `混合正负键的一帧按负键到正文行到零键到正键落位` —— 钉 `-1 / 0 / 2` 三键帧的优先链：负键赢正文行（与官方一致，
+    官方升序键表 `:2343` / `:2605` 也是负键先过）、正文行赢 `depth=2`（`:836` 承重）、空正文列时零键块照常命中。
+- `render/src/test/kotlin/com/eratw/port/render/view/DivFrameHitTest.kt` `:85-164`，一条：
+  `真语料负 depth 弹窗在场时正文行按钮仍可点` —— 用语料原形 `<div rect='20px, -81px, 248px, 71px' … depth='-1' padding='10px,10px'>`
+  （`QOL_USERCOM.ERB:284` / `UI_Container_Framework.ERB:275` 同串）过 `ConsoleFrame` 每帧喂参，钉「键表全负 ⇒ 正文行像素
+  `divHitAt` 回 null、`click` 仍提交 301、弹窗自身子行按钮像素仍命中 div（防空转对照）」。
+- 首轮定向读数：69 例 0 失败；`ButtonLayerDivHitTest` 11 例（既有 8 + 新 3）、`DivFrameHitTest` 4 例（既有 3 + 新 1）。
+- 收口读数（探针复原 + fixture 收参之后）：定向闸 69 例 0 失败（`BUILD SUCCESSFUL in 36s`），根工程 `detekt` 绿
+  （`BUILD SUCCESSFUL in 59s`）。中途一笔 detekt 红 = `LongParameterList 6/6`（本 fixture 加了两个几何形参后触阈），
+  按闸门纪律**不改阈值、不加 Suppress**，改法是把 `pointYPx`/`xOffsetPx` 收成一个 `At(yPx, xPx)` 形参（`:57`）。
+
+**与原版差异（有意保留，不追平）**：原版键全负时正文行整片失效（1.824 `:2350` / 4.981 `:2612` 门闸），
+移植侧正文行恒参与扫描。差异只在「逃逸键表存在且全负」这一形状上可观测；其余形状（无逃逸块、含非负键）两版同解。
+
+**反向证明（突变探针，2026-11-26 本机 HOMEJIA-MAYBE；两次探针后均已 `git checkout --` 复原，生产码 sha256
+`b109e63c71d6db455020c391d126b02b16d18a7cb484a8088a8f191ea3e03ffd` 与开工前逐字节一致）**
+
+- 探针 A = 改回官方形（`:836` 与 `:865-869` 都补 `divHits.any { it.depth >= 0 }` 门闸）⇒ 69 例 **1 红**：
+  `键全负的一帧里正文行提示仍查得到`，报 `正文行提示无条件参与（:865-869）；官方门闸形在此整趟跳过，该处无提示
+  ==> expected: <素质说明> but was: <null>`。断言的是基准 `EmueraConsole.cs:2350` / `4.981 :2612` 那道门闸本身。
+- **等价性（为何 hitAt 面翻不动，这是本条的承重结论）**：键全负时 `:829-834` 的负键循环要么已 `return hit`
+  （命中即赢，与官方一致），要么该像素不在任何块内；无论哪种，走到 `:837` 时待遍历的非负键集合为空，
+  加不加门闸都落到 `:842` `return null` ⇒ hitAt 两种写法同解。移植侧「键全负仍可点」在点击面由
+  「hitAt 回 null」+「`CanvasConsoleView.kt:1473` 像素→格兜底」两段共同保证，`:836` 只在**含非负键**的帧里承重
+  （官方在有非负键时同样先扫正文行，故那半截本就同形）。⇒ 单测必须钉提示面才能锁住这笔定案；只钉点击面会假绿。
+- 探针 B = 删掉 `:836` 的正文行让位 ⇒ 同闸 69 例 **2 红**：既有 `正文行按钮盖住 depth 0 的 div` +
+  新增 `混合正负键的一帧按负键到正文行到零键到正键落位` ⇒ 证明 `:836` 不是死码、混合键链确实被钉。
+
+**TODO(verify)**
+
+- `render-canvas` 的兜底半段（`:1473`）**无行为闸**：`render-canvas/src/test/…/CanvasTapOutcomeAuditTest.kt` 只做源码文本
+  检查（`:86` / `:121` 的 `indexOf("hitOnCurrentView")`），改坏兜底不会让它红。卡点 = 本 lane 无 `render-canvas` 文件所有权
+  ⇒ 已写进交付「需组长接线」。
+- 语料侧 `@COMPONENT_POPUP` 的动态调用面（`CALLFORM` / `CALLSTR` 按名调用）未排查，普查脚本口径覆盖不到。
+- `QOL_USERCOM.ERB` 负 depth 段所属函数表头行号未取到（脚本的函数名归属回落 `(top-level)`）；不影响处数。
+
+
+## 36. 事件桶登记：一个成员可落多桶（B23 引擎侧直修 · wave/bucketfix · 2026-11-26）
+
+**判据**：`#PRI` 与 `#LATER` 同体的事件成员**并列进桶 1 与桶 3**，派发两次；`#ONLY` 进桶 0 **也**进桶 2。
+排他单选（`when { isOnly -> 0; isPri -> 1; isLater -> 3; else -> 2 }`）是移植侧自造形，官方两棵树都无此形。
+
+**权威锚（反编译树只读）**
+
+- 4.981 `reference/emuera-skia-4.981/Emuera/Runtime/Script/Data/LabelDictionary.cs:228-235` 四个**平行** if：
+  `IsOnly 进桶 0`、`IsPri 进桶 1`、`IsLater 进桶 3`、`!IsPri && !IsLater 进桶 2`；`:233` 原注「//#PRIかつ#LATERなら二重に登録する。eramakerの仕様」。
+  同文件 `:134-141`（SortLabel 同四平行 if）、`:243-246`（eventLabels[0..3] = only / prilist / normal / laterlist）。
+- 1.824 基线同形 `reference/emuera-cs/MinorShift.Emuera.Runtime.Script.Data/LabelDictionary.cs:90-105`。
+- 派发链：1.824 `reference/emuera-cs/MinorShift.Emuera.Runtime.Script/CalledFunction.cs:228-243`（ShiftNext 桶 0-1-2-3 推进）、
+  `:245-257`（ShiftNextGroup 只截本桶）、`:259-264`（FinishEvent 整链终止）；
+  4.981 `reference/emuera-skia-4.981/Emuera/Runtime/Script/Process.State.cs:505-510`
+  `if (called.IsOnly) called.FinishEvent(); else if (called.HasSingleFlag && ret == 1) called.ShiftNextGroup(); else called.ShiftNext();`
+  ⇒ **`#ONLY` 与 `#SINGLE` 同体时取 ONLY 优先**（`:505` 先判 IsOnly，`:507` 才看 SINGLE）。
+- 旗标解析 `reference/emuera-skia-4.981/Emuera/Runtime/Script/Parser/LogicalLineParser.cs:109-147`：`#ONLY` 清 PRI/LATER/SINGLE
+  ⇒ 语料内二者互斥；位域直喂（BootMetadata 的 FLAG_ONLY / FLAG_PRI / FLAG_LATER 任意组合）才可达 ⇒ 移植侧不按「官方遇不到」收敛。
+
+**PC 真跑实证（判词 = `<internal-workdir>/PC-CMP-VERDICT.md`）**
+
+- 宿主 = `eraTW4.981-261017-EAGLOV3/Emuera_skiaV16_x64.exe --CliDebug`；夹具 `fixtures/pc-cmp/PC-CMP-01-BUCKETS.ERB`；
+  证据 = `<internal-workdir>/evidence/pc-cmp/20261125-232749-live-buckets.pc-markers.txt`。
+- 实测派发序 = `PCMARK-1-PL, 2-P, 3-N, 5-SINGLE0, 6-AFTER-SINGLE, 7-SINGLE1, 1-PL(第二次), 4-L`；`8-AFTER-SINGLE1` 缺席。
+- 装载期引擎原话：`警告Lv1:PC-CMP-01-BUCKETS.ERB:第43行:同时使用#PRI和#LATER是重复的(这个函数会被调用2次)`。
+
+**移植侧落地（本波）**
+
+- 登记面 = 根因层：`core-vm/src/main/kotlin/com/eratw/port/core/proc/FuncMeta.kt:232-238`（`eventBuckets: List<Int>` 四平行 if）、
+  `:533-542`（`eventDispatchOrder` 外层桶 0..3、内层装载序 ⇒ 与 Map 迭代序无关）、`:548`（`eventCallOrder` = 其 `first`，含重复项）；
+  `core-vm/src/main/kotlin/com/eratw/port/core/code/EventRegistry.kt:101-109`（每 meta 按桶集合展开成多条 `Member(bucket = …)`）+
+  `:113` 稳定 `sortBy { it.bucket }`（相等桶位保链接序）；
+  `core-vm/src/main/kotlin/com/eratw/port/core/frontend/Symbols.kt:447-453`（`LabelDef.eventBuckets`）、`:456`（`eventGroupIndexes`）、
+  `:611-617`（双层投桶循环，每 def 按其桶集合各投一次）、`:620-621`（`eventCallOrder` flatten 含重复项）。
+- 派发面**零改动**（组长裁决，实测逐字节未动）：`ProcessRuntime.kt:4394`（PRI 到 LATER 桶推进）、
+  `:4423`（`dispatchOnlyBucket` 的 ONLY 终止整链）、`:4439`（`dispatchBucketMembers` 段扫描按 `order[i].bucket` 分组）+
+  `:4451`（`truncated = member.isSingle && ret == 1L`）。重复项天然分段 ⇒ 只修登记面即得两次派发。
+- 事件入口合成吃展开后的重复成员：`ErbProgramCompiler.kt:553-578`（`:568` 逐条 `_CALL`）⇒ 重复成员合成两条 `_CALL` 即想要的语义
+  （锁在 `ErbProgramCompilerTest.事件入口重复成员名合成两条call`）。
+- `.erbc` 产物格式不变：`core-vm/src/main/kotlin/com/eratw/port/core/code/ErbcWriter.kt:393-438` 每条函数只写
+  `nameIdx/entryPc/arity/slotCount/u32(0) 函数标志/labelNames+labelPcs`，桶位不进段；旗标位在
+  `core/proc/CalledFunctionTable.kt:213-217`（FLAG_EVENT / ONLY / PRI / LATER / SINGLE）⇒ 桶值仍是派生量（结案 B23 的在册 TODO）。
+- specs 权威面**零改动**：`specs/*.yaml` 内 eventBucket / eventCallOrder / eventBuckets / #ONLY / #SINGLE / #PRI / #LATER
+  七类模式实测零命中（grep 原文 = `<internal-workdir>/evidence/specs-bucket-grep.txt`）；`specs/isa.yaml:1515` 只说四桶推进
+  （`CalledFunction.cs:228-257` 的 `group < 4`），不含「一成员只进一桶」口径 ⇒ 无权威值可同波改。
+
+**两条结构判据（装置 selfcheck 的 expansion_selfcheck，`devtools/pc_cmp/run.py:1016-1037`）**
+
+- 同桶内不得重名：一个成员在同一桶里只出现一次（否则 = 建模自己把它投了两遍）。
+- 跨桶重数必须等于该成员旗标决定的桶数：`#PRI+#LATER` 为 2、`#ONLY` 为 2（桶 0 + 桶 2）、普通为 1。
+  这两道闸不依赖期望序列，建模跑偏时装置自己响（反向证明枚 #1 就是它先叫的）。
+
+**证人分工（勿混）**
+
+- 桶并列的证人 = `PCMARK-1-PL` **出现两次**（装置的 `expect_counts` + 全列表逐行相等）。
+- `#SINGLE` 截桶尾的证人 = `PCMARK-8-AFTER-SINGLE1` **缺席**；退成排他单桶时它照样缺席（`#SINGLE` 仍在桶 2 截掉尾成员）
+  ⇒ 它与投桶口径无关，不能充当 B23 的反向证明。
+
+**反向证明（全档案 = `<internal-workdir>/evidence/b23-reverse-proof.md`，2026-11-26 本机 HOMEJIA-MAYBE）**
+
+- 枚 #1 装置建模退回排他（新开关 `--reverse-proof-exclusive`，只喂建模层，永不进生产读数）：port seq 掉到 7 marker
+  （第二次 `PCMARK-1-PL` 消失）+ 对账闸独立响（model 8 条 vs erbcc printed 9 条）+ `PORT-vs-EXPECTED : DIFF`；
+  同装置正测 = 8 marker `same`（`<internal-workdir>/logs/rig-buckets-7.log`）。
+- 枚 #2 生产码真退排他（`FuncMeta.kt:232-238` 与 `Symbols.kt:447-453` 的 buildList 换回 `when` 单选）：
+  core 定向四套 12 红（FuncMetaShapeGateTest 10/3、EventRegistryTest 6/4、EventDispatchWireTest 11/4、FuncKeyInternTest 10/1，
+  XML timestamp 2026-11-25T21:32:17Z 与 21:32:18Z；用例名与断言行逐条见档案 `#2` 段）+ erbcc `SymbolsTest` 20/1
+  （`双旗标事件成员投两桶且执行序出现两次(Path)` 报 `#LATER → 桶 3（并列加桶，不是排他单选） ==> expected: <1> but was: <0>`，断言行 `tools/erbcc/src/test/kotlin/com/eratw/port/erbcc/SymbolsTest.kt:109`，ts 2026-11-25T21:39:00Z）；
+  两文件 cp 复原后 sha256 与退化前逐字节一致（`1e3a3fa2abf9133b…` / `7aa2e601f2358960…`），未用任何 git checkout/stash。
+
+**TODO(verify)**
+
+- 「同函数两次派发之间发生 TRY 回滚 / MANUALRESET」只做了**端口侧断言**
+  （`EventDispatchWireTest.端口侧断言_两次派发之间链中断则第二次不再发生`），PC 侧未证，不许当作已验。
+- `devtools/pc_cmp` 的 `bt-walk` / `bt-only` 两格 port 侧 DIFF = 端口事件名白名单缺 `BEFORE_THROW` / `BEFORE_ERROR`
+  （`Symbols.kt:65-67` 的 `EVENT_LABEL_NAMES` 由 9 项到 11 项），归 `wave/bthook`，不在本波。
+- `app/src/main/baseline-prof.txt:1575` 与 `:1582-1586` 仍钉 `getEventBucket()I` 旧签名（归 app 面，已进组长接线台账）；
+  `PatchCompiler.kt:1349`、`BootMetadata.kt:529`、`specs/loader.md:412/:422` 的桶位散文同批接线。
+---
+---
+
+## 37. 行位图纵向对齐：屏侧底对齐 / 像素桩顶对齐（CANVASTAP2 夹具读数口径，2026-11-26）
+
+- 屏侧「像素 → 正文行」是**底对齐**：`render/src/main/kotlin/com/eratw/port/render/button/ButtonLayer.kt:962-972`
+  的 `rowTargetAt`，行顶公式 `rowTopPx(row) = canvasHeight - (rowCount - row) * lineHeight`（`:966-969` 的
+  `fromBottom = (canvasHeightPx - 1 - yPx) / lineHeight`，前置三闸在 `:964`）。render 层行表贴画布底边，
+  最后一行的行顶在 `canvasHeight - lineHeight`。
+- `render-canvas` 新夹具 `CanvasPixelCellFallbackBehaviorTest` 的像素桩是**顶对齐**（`row * lineHeight`，
+  口径写在该文件 `:67-72` 的 KDoc）。两种口径只在 **`rowCount * lineHeight == canvasHeightPx`** 时逐像素重合。
+  ⇒ 夹具要让「按钮落位的正文行」在屏侧仍可命中，窗口空行数必须铺满整屏：`BLANK_LINES = WINDOW_ROWS`（22，
+  `:348-349`），不是随手 12 —— 12 行只占 12 行高，底对齐换算会把按钮行算到可见区之外，`hit` / `hitInline`
+  双双取到 null。这是 2026-11-26 首跑「8 例 1 红」的成因，处置 = 改夹具几何，生产码与断言一字未动。
+- 本条只登记**移植侧夹具几何口径**，不是官方语义结论 ⇒ 不配 C# 锚（铁律 1 的锚要求不适用），也不改动 §35 的判据。
+- 同波附带一条流程事实：P1「逐字搬」把 cellHitAt / tapFallback 挪进 PixelTapMetrics 扩展后，detekt 的 ReturnCount 违例随签名漂移出旧 freeze 的 ID（旧 ID 正躺在 config/detekt/baseline.xml:7775，:7787 的 hitOnCurrentView 条目因 View 侧只剩 2 return 变孤儿），属 AGENTS §3.2.4 的**结构性 ID 刷新**，按 2026-11-26 组长裁决由组长落两条新 ID，本 lane 未动 baseline.xml、未加 @Suppress、未改阈值。

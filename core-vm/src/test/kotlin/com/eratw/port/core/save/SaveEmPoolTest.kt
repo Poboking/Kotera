@@ -256,7 +256,7 @@ class SaveEmPoolTest {
     /**
      * `VarExt*.csv` 的六条指令（大小写敏感精确匹配、后段 Trim、`;` 注释跳过、
      * `TEST.ERB` 这类非 `VarExt` 前缀的文件不读）。语料真实文件的生效行按根取列
-     * （4.980 两条 / 4.981 三条 `SAVE_DTS`，见 [真语料的 VarExt SAVE_DTS 按根取列]）。
+     * （4.980 两条 / 4.981 六条 `SAVE_DTS`，见 [真语料的 VarExt SAVE_DTS 按根取列]）。
      */
     @Test
     fun `VarExt 六条指令解析`(@org.junit.jupiter.api.io.TempDir root: Path) {
@@ -307,9 +307,11 @@ class SaveEmPoolTest {
     /**
      * 真语料读数：`ERATW_GAMEDIR/CSV/VarExtGameData.csv`（带 BOM、末尾无换行）的生效行按根取列：
      * - **4.980**：2 条 `SAVE_DTS`（`:37 DT_UFUFU_LOG`、`:38 DT_UFUFU_M_LOG`），38 段 / 34 非空 / 32 注释；
-     * - **4.981**：3 条（多 `:39 SAVE_DTS, QOL_FISH_INSTANCE`，生活系统大修 DLC 的钓鱼实例表，
-     *   `ERB/DLC/生活系统大修/0_生活系统_变量.ERH:139` 注明「随存档，见 VarExtGameData.csv」），
-     *   39 段 / 35 非空 / 32 注释。
+     * - **4.981（261111 出货根，2026-11-17 重采）**：6 条 `SAVE_DTS`（`:37/:38 DT_UFUFU_LOG`、
+     *   `DT_UFUFU_M_LOG`，`:39 QOL_FISH_INSTANCE`——生活系统大修 DLC 的钓鱼实例表，
+     *   `ERB/DLC/生活系统大修/0_生活系统_变量.ERH:139` 注明「随存档，见 VarExtGameData.csv」；
+     *   另有 `:40-42 QOL_CARD_OWN / QOL_CARD_EQUIP / QOL_CARD_CHARA` 三张卡片表），
+     *   42 段 / 38 非空 / 32 注释。
      *
      * 两根的注释行布局逐字相同（`SAVE_MAPS`/`SAVE_XMLS`/`GLOBAL_*`/`STATIC_*` 全是 `;` 注释）
      * ⇒ 后三条断言（maps/xmls 空、global 空）两根同值，实读。
@@ -333,8 +335,19 @@ class SaveEmPoolTest {
         val (segments, nonEmpty, dts) = when (profile) {
             // 4.980 列：本路 2026-11-06 逐行实读（37 个 LF、末尾无换行 ⇒ 38 段；生效行 :37/:38）
             CorpusProfile.V4_980 -> Triple(38, 34, listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG"))
-            // 4.981 列：39 段 / 35 非空，生效行 :37/:38/:39
-            CorpusProfile.V4_981 -> Triple(39, 35, listOf("DT_UFUFU_LOG", "DT_UFUFU_M_LOG", "QOL_FISH_INSTANCE"))
+            // 4.981 列（261111 出货根，2026-11-17 重采 42 段）：生效行 :37-:42 六条
+            CorpusProfile.V4_981 -> Triple(
+                42,
+                38,
+                listOf(
+                    "DT_UFUFU_LOG",
+                    "DT_UFUFU_M_LOG",
+                    "QOL_FISH_INSTANCE",
+                    "QOL_CARD_OWN",
+                    "QOL_CARD_EQUIP",
+                    "QOL_CARD_CHARA",
+                ),
+            )
         }
 
         val lines = String(Files.readAllBytes(file), Charsets.UTF_8)

@@ -134,18 +134,23 @@ class BuiltinDispatchMemoTest {
     @Test
     fun `参数个数 - 文案逐字且记忆命中后每次调用都检查`() {
         val ctx = env()
-        // ABS：minArgs=1, maxArgs=1（无省略位）
+        // ABS：minArgs=1, maxArgs=1（无省略位）⇒ 官方走定长形参表分支 ArgsCountNotMatches
+        // （spec: FunctionMethod.cs:314），不是 TooMany/NotEnough 那两支。
         val e1 = assertFailsWith<CodeEE> { ctx.callFunction("ABS", emptyList()) }
-        assertEquals("函数 ABS 的参数个数不匹配（需要 1 个）：实际 0 个", e1.message)
+        assertEquals("ABS函数: 需要1个参数，但传入了0个", e1.message)
         val e2 = assertFailsWith<CodeEE> { ctx.callFunction("ABS", emptyList()) }
-        assertEquals("函数 ABS 的参数个数不匹配（需要 1 个）：实际 0 个", e2.message)
-        // MIN：maxArgs=-1（可变参）
+        assertEquals("ABS函数: 需要1个参数，但传入了0个", e2.message)
+        // MIN：maxArgs=-1（可变参）⇒ 只有下界一支，NotEnoughArgs（spec: FunctionMethod.cs:283）
         val e3 = assertFailsWith<CodeEE> { ctx.callFunction("MIN", emptyList()) }
-        assertEquals("函数 MIN 的参数个数不足（至少 1 个）：实际 0 个", e3.message)
+        assertEquals("MIN函数: 至少需要1个参数", e3.message)
         // 记忆命中路径上同样不免检：先成功调用一次 ABS，再错参调用仍报
         assertEquals(5L, il(ctx.callFunction("ABS", listOf(iv(-5)))))
         val e4 = assertFailsWith<CodeEE> { ctx.callFunction("ABS", listOf(iv(1), iv(2))) }
-        assertEquals("函数 ABS 的参数个数不匹配（需要 1 个）：实际 2 个", e4.message)
+        assertEquals("ABS函数: 需要1个参数，但传入了2个", e4.message)
+        // 零形参表却传了实参：官方是**另一枚独立键** ArgsNotNeeded，不并进「个数不匹配」
+        // （spec: FunctionMethod.cs:316 的 `argumentTypeArray.Length == 0` 支）
+        val e5 = assertFailsWith<CodeEE> { ctx.callFunction("GETTIMES", listOf(iv(1))) }
+        assertEquals("GETTIMES函数: 不需要参数", e5.message)
     }
 
     // ------------------------------------------------------------------

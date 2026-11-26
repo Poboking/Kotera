@@ -58,13 +58,66 @@ class FuncMetaShapeGateTest {
         val later = meta(4, "EV", isEvent = true, isLater = true, defIndex = 4)
         val only = meta(5, "EV", isEvent = true, isOnly = true, defIndex = 5)
         val table = FunctionTable(listOf(normal2, normal1, later, only, pri))
-        // ONLY=0 → PRI=1 → NORMAL=2 → LATER=3；NORMAL 桶内按 defIndex 升序（装载序）。
+        // 外层 ONLY=0 → PRI=1 → NORMAL=2 → LATER=3；同桶内按 defIndex 升序（装载序）。
+        // 并列加桶（4.981 LabelDictionary.cs:228-235 四个平行 if；:233 原注「#PRIかつ#LATERなら
+        // 二重に登録する。eramakerの仕様」；1.824 同形 LabelDictionary.cs:90-105；在册 B23）：
+        // #ONLY 除桶 0 外还落桶 2 ⇒ only 在序里出现两次。桶 2 那份在真 VM 上因 #ONLY 命中即
+        // FinishEvent（ProcessState.cs:312-347）不可达，但投桶必须照 C# —— 否则 #PRI+#LATER
+        // 同体会丢桶，PC 实测「这个函数会被调用2次」就对不上。
         assertEquals(
-            listOf(only, pri, normal1, normal2, later),
+            listOf(only, pri, normal1, normal2, only, later),
             table.eventCallOrder("EV"),
-            "桶序 + 同桶装载序必须与改造前一致",
+            "桶序 + 同桶装载序 + 双桶成员重复出现",
+        )
+        assertEquals(
+            listOf(5 to 0, 3 to 1, 1 to 2, 2 to 2, 5 to 2, 4 to 3),
+            table.eventDispatchOrder("EV")?.map { it.first.index to it.second },
+            "(成员, 桶) 逐位：只有 #ONLY 成员重复，其余各一次",
         )
         assertEquals(FunctionTable.TargetKind.EVENT, table.classify("ev"), "事件名 IGNORE CASE 分类")
+    }
+
+    /**
+     * 装载序扰动（B23 收口判据②）：同一批成员换进 [FunctionTable] 的构造次序，
+     * 展开序必须逐行不变 —— 序只由「外层桶序 + 内层 defIndex 装载序」决定，
+     * 不靠 eventMembersByKey 那张 HashMap 的迭代次序碰运气。
+     */
+    @Test
+    fun `装载序扰动_展开序只由桶序与defIndex决定`() {
+        val pl = meta(1, "EV", isEvent = true, isPri = true, isLater = true, defIndex = 1)
+        val pri = meta(2, "EV", isEvent = true, isPri = true, defIndex = 2)
+        val norm = meta(3, "EV", isEvent = true, defIndex = 3)
+        val later = meta(4, "EV", isEvent = true, isLater = true, defIndex = 4)
+        val only = meta(5, "EV", isEvent = true, isOnly = true, defIndex = 5)
+        val single = meta(6, "EV", isEvent = true, isPri = true, isLater = true, isSingle = true, defIndex = 6)
+        val forward = listOf(pl, pri, norm, later, only, single)
+        // 桶 0：only；桶 1：pl, pri, single；桶 2：norm, only（isPri 真 ⇒ 第四个 if 不进）；
+        // 桶 3：pl, later, single
+        val expected = listOf(
+            5 to 0,
+            1 to 1, 2 to 1, 6 to 1,
+            3 to 2, 5 to 2,
+            1 to 3, 4 to 3, 6 to 3,
+        )
+        val permutations = listOf(
+            "正序" to forward,
+            "逆序" to forward.reversed(),
+            "乱序" to listOf(single, norm, only, pl, later, pri),
+        )
+        for ((label, input) in permutations) {
+            val t = FunctionTable(input)
+            assertEquals(
+                expected,
+                t.eventDispatchOrder("EV")?.map { it.first.index to it.second },
+                "$label 建表的 (成员, 桶) 展开序必须与正序逐行一致",
+            )
+            assertEquals(
+                expected.map { it.first },
+                t.eventCallOrder("EV")?.map { it.index },
+                "$label 建表的调用序投影同样逐行一致（双桶成员各出现两次）",
+            )
+        }
+        assertEquals(9, FunctionTable(forward).eventCallOrder("EV")!!.size, "6 成员展开成 9 次调用")
     }
 
     @Test
@@ -152,10 +205,18 @@ class FuncMetaShapeGateTest {
         FunctionTable(flags)
         val a = flags[0]
         assertTrue(a.isEvent && a.isMethod && a.isOnly && a.isPri && a.isLater && a.isSingle && a.returnsStr)
-        assertEquals(0, a.eventBucket, "ONLY 优先（LabelDictionary.cs:90-105 排他桶）")
-        assertEquals(2, flags[1].eventBucket, "非事件不参与桶")
-        assertEquals(2, flags[2].eventBucket, "isSingle 不改桶位（SINGLE 只影响派发跳过）")
-        assertEquals(2, flags[3].eventBucket)
+        // 桶位是集合不是标量（4.981 LabelDictionary.cs:228-235 四平行 if；1.824 同形
+        // LabelDictionary.cs:90-105；在册 B23）。四旗标全真只是位域直喂形态：
+        // 装载期 #ONLY 会清 PRI/LATER/SINGLE（LogicalLineParser.cs:109-147），语料不可达。
+        assertEquals(listOf(0, 1, 3), a.eventBuckets, "isPri 真 ⇒ 桶 2 不进；ONLY/PRI/LATER 并列")
+        assertEquals(listOf(2), flags[1].eventBuckets, "无旗标成员只落普通桶（非事件成员该值不参与派发）")
+        assertEquals(listOf(2), flags[2].eventBuckets, "isSingle 不改桶位集合（SINGLE 只截本桶，ProcessState.cs:336-340）")
+        assertEquals(listOf(2), flags[3].eventBuckets)
+        val priLater = meta(6, "F", isEvent = true, isPri = true, isLater = true)
+        val onlyAlone = meta(7, "G", isEvent = true, isOnly = true)
+        // 双旗标同体 = PC 装载期警告原文「同时使用#PRI和#LATER是重复的(这个函数会被调用2次)」
+        assertEquals(listOf(1, 3), priLater.eventBuckets, "#PRI+#LATER 并列落桶 1 与 3")
+        assertEquals(listOf(0, 2), onlyAlone.eventBuckets, "#ONLY 并列落桶 0 与 2（第四个 if 不看 isOnly）")
         assertEquals(FunctionTable.TargetKind.NON_EVENT, FunctionTable(flags).classify("d"))
         assertTrue(flags[4].returnsFloat && flags[4].isMethod)
         assertEquals(false, flags[4].returnsStr, "浮点为第三种 MethodType，与字符串位互斥")

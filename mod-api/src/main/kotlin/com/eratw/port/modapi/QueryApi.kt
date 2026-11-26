@@ -72,6 +72,9 @@ data class IntFieldCmp(
     val op: IntCompareOp,
     val value: Long,
 ) : QueryExpr {
+    /** 键形态：字段名只由 `<X>Keys` 提供，调用点不再出现字符串字面量。 */
+    constructor(field: FieldKey<Long>, op: IntCompareOp, value: Long) : this(field.name, op, value)
+
     init {
         require(field.isNotBlank()) { "IntFieldCmp 的字段名不能为空" }
     }
@@ -87,6 +90,9 @@ data class StrFieldCmp(
     val op: StrCompareOp,
     val value: String,
 ) : QueryExpr {
+    /** 键形态；理由同 [IntFieldCmp] 的键构造器。 */
+    constructor(field: FieldKey<String>, op: StrCompareOp, value: String) : this(field.name, op, value)
+
     init {
         require(field.isNotBlank()) { "StrFieldCmp 的字段名不能为空" }
     }
@@ -105,6 +111,14 @@ data class EntityRefFieldCmp(
     val other: EntityId,
     val aliveOnly: Boolean = false,
 ) : QueryExpr {
+    /** 键形态；理由同 [IntFieldCmp] 的键构造器。 */
+    constructor(
+        field: FieldKey<EntityId>,
+        op: EntityRefCompareOp,
+        other: EntityId,
+        aliveOnly: Boolean = false,
+    ) : this(field.name, op, other, aliveOnly)
+
     init {
         require(field.isNotBlank()) { "EntityRefFieldCmp 的字段名不能为空" }
     }
@@ -121,6 +135,9 @@ data class HasRelation(
     val outgoing: Boolean,
     val other: EntityId? = null,
 ) : QueryExpr {
+    /** 键形态；理由同 [IntFieldCmp] 的键构造器。 */
+    constructor(kind: RelationKey, outgoing: Boolean, other: EntityId? = null) : this(kind.name, outgoing, other)
+
     init {
         require(kind.isNotBlank()) { "HasRelation 的关系类型名不能为空" }
     }
@@ -163,6 +180,11 @@ class QueryPlanBuilder {
     fun archetype(name: String) {
         require(name.isNotBlank()) { "archetype 名不能为空" }
         archetypes += name
+    }
+
+    /** 键形态；理由同 [IntFieldCmp] 的键构造器。 */
+    fun archetype(key: ArchetypeKey) {
+        archetypes += key.name
     }
 
     /** 追加生命周期状态（重复声明去重；不调用 = 不限状态）。 */

@@ -15,9 +15,10 @@ import kotlin.test.assertTrue
  *
  * ## oracle
  * * 官方判据只有一条：`Config.InfiniteLoopAlertTime > 0` 且 `state.lineCount % 10000 == 0`
- *   时比 `startTime.ElapsedMilliseconds`（`Process.cs:470-489`、`:989-992`）；撞线弹 YesNo，
- *   答「否」⇒ `state.lineCount = 0` + `startTime.Restart()` 继续跑（`:486-487`），
- *   答「是」才 `throw CodeEE`（`:484`）。
+ *   时比 `startTime.ElapsedMilliseconds`（skia `Process.cs:481-515`、采样 skia
+ *   `Process.ScriptProc.cs:34-36`／官方 1.824 `Process.cs:1012-1014`）；撞线弹 YesNo，
+ *   答「否」⇒ `state.lineCount = 0` + `startTime.Restart()` 继续跑（skia `:512-513`、1.824 `:509-510`），
+ *   答「是」才 `throw CodeEE`（skia `:508`、1.824 `:507`）。
  * * **本移植有意偏离的两处**（都不改上面那条结构，只改「量什么时间」与「问多密」）：
  *   1. 时间只量 **VM 真在跑** 的时长（[VmConfig.monotonicMs] 可注入，宿主扣掉后台累计）；
  *   2. 答「继续」后**同 run 内阈值翻倍**（`escalatedLoopAlertMs`，封顶
@@ -35,7 +36,7 @@ import kotlin.test.assertTrue
 class InfiniteLoopWallClockTest {
 
     private companion object {
-        /** 原版采样频率（`Process.cs:990` 的 `state.lineCount % 10000 == 0`）。 */
+        /** 原版采样频率（`Process.ScriptProc.cs:35`（官方 `Process.cs:1012`）的 `state.lineCount % 10000 == 0`）。 */
         const val CHECK_LINES = 10_000
 
         /** 本轮出厂缺省（`PortFactoryConfig.INFINITE_LOOP_ALERT_MS`）= 6 分钟。 */
@@ -331,7 +332,7 @@ class InfiniteLoopWallClockTest {
     // ⑤ 0 = 关闭的语义逐字不变
     // ------------------------------------------------------------------
 
-    /** 阈值 0 仍是整条判据的开关位（`Process.cs:989`），连时钟都不读。 */
+    /** 阈值 0 仍是整条判据的开关位（`Process.ScriptProc.cs:35`、官方 `Process.cs:1012`），连时钟都不读。 */
     @Test
     fun `阈值 0 时不读时钟也不问`() {
         val host = FakeClockHost(readout = { k -> k * 1_000_000L })

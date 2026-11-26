@@ -282,7 +282,9 @@ class CharaFullDomainDehydrateTest {
         assertEquals(4, r2)
         assertRowFace(f2.store, r1, e1Cells)
         assertRowFace(f2.store, r2, e2Cells)
-        assertEquals(10_001L, f2.store.readInt("NO", longArrayOf(r2.toLong())), "e2 虚拟 NO 随档")
+        // e2 在存档前已退场：行删除漏斗回收其虚拟 NO（旧号作废、nextCandidate 不回退），
+        // 故 .rt2 里没有 e2 的号；重投射按恢复后的续发游标拿新号 10002（10001 不复用）。
+        assertEquals(10_002L, f2.store.readInt("NO", longArrayOf(r2.toLong())), "e2 重投射拿新号")
     }
 
     // ------------------------------------------------------------------
@@ -317,15 +319,18 @@ class CharaFullDomainDehydrateTest {
         val f2 = Fixture()
         assertIs<SaveService.RestoreOutcome.Applied>(f2.saveService().restoreBundle(bundle, binding))
         val r1 = f2.projector.project(e1)
-        f2.projector.project(e2)
+        val r2 = f2.projector.project(e2)
+        // e2 退场时虚拟 NO 已回收（行生命周期终点 = 绑定终点），旧列键 10001 作废；
+        // 关系格列键按重投射后的活 NO 现取（持久身份是 EntityId，不是 NO）。
+        val key2b = requireNotNull(f2.reg.virtualNoOf(e2)).toLong()
         assertEquals(
             200L,
-            f2.projector.readCell(r1, key2),
+            f2.projector.readCell(r1, key2b),
             "重投射进场：图边值写回原生格，度数无损",
         )
         assertEquals(
             f2.store.config.relationDef,
-            f2.projector.readCell(f2.projector.charIndexOf(e2), key1),
+            f2.projector.readCell(r2, key1),
             "反方向格保持默认",
         )
     }

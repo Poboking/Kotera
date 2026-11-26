@@ -40,8 +40,9 @@ import kotlin.test.assertEquals
  * * 对照锚（**不再作为复刻依据**）：`reference/emuera-cs` 1.824
  *   `MinorShift.Emuera.Runtime.Script/CalledFunction.cs:137-142`。
  *
- * 本文件锁两条真实调用形态：语句位 `CALL`（VM 建帧）与表达式位 `#FUNCTIONS` 方法调用
- * （`_CALL` 家族的另一条编译面）。宿主 API 通道（`callF` / `invokeUserMethod`）的同类用例
+ * 本文件锁三条真实调用形态：语句位 `CALL`（VM 建帧）、表达式位 `#FUNCTIONS` 方法调用
+ * （`_CALL` 家族的另一条编译面）、以及名字带插值的 `TRYCALLFORM`（运行期 `_CALL_BY_NAME`，
+ * 口上侧函数派发走的通道）。宿主 API 通道（`callF` / `invokeUserMethod`）的同类用例
  * 见 `FuncArgConvertTest` 第 6 节。
  */
 class ExtraArgToleratedTest {
@@ -61,6 +62,8 @@ class ExtraArgToleratedTest {
             .declareVariable("PA", OperandType.INT, 1)
             .declareVariable("OUT", OperandType.INT, 1)
             .declareVariable("OUTS", OperandType.STR, 1)
+            // 动态名通道的名字插值面（`TRYCALLFORM F%RESULTS%(…)`）需要一个可解析的串变量。
+            .declareVariable("RESULTS", OperandType.STR, 1)
             // 表达式位用户方法必须在符号表里登记返回类型，否则降级表认不出它。
             .declareFunction("GET_MONTH", OperandType.STR),
     )
@@ -206,6 +209,50 @@ class ExtraArgToleratedTest {
         assertEquals(
             "春之月", store.userVar("OUTS", "MAIN")!!.readStr(0, 0),
             "ARG 取第 1 个实参 1；多余的实参 1 丢弃",
+        )
+        assertEquals(0, store.callDepth(), "帧必须全部退出")
+    }
+
+    // ------------------------------------------------------------------
+    // 3. 动态名通道（`TRYCALLFORM` ⇒ `_CALL_BY_NAME`）：语料里口上侧函数派发走的通道
+    // ------------------------------------------------------------------
+
+    /**
+     * 玩家反馈形态（弾幕勝負口上）：调用点
+     * `ERB/口上・メッセージ関連/KOJO_MESSAGE.ERB:769`
+     * `TRYCALLFORM M_KOJO%RESULTS%_MESSAGE_COM_K{NO:TARGET}_DANMAKU(ARGS:1, ARG:1, ARG:4)`
+     * —— 名字带插值，编译期不折叠成常量名，运行期才由 [_CALL_BY_NAME] 解析；被调
+     * `ERB/口上・メッセージ関連/個人口上/051 Nitori [にとり]/Nitori/M_KOJO_K51_danmaku_match.ERB:5`
+     * 只有 **2 个形参**（`ARGS` 与具名私有变量 `相手残機`），实参却给了 3 个。
+     *
+     * 上面两例钉的是静态 `CALL` 与表达式位；本例钉第三条通道 —— 建帧点与判据同一条
+     * （`Vm.callInto` 的 `min(argcRaw, arity, slotCount)` + `ProcessRuntime.bindCallArgs`
+     * 的按位绑定），但它经运行期名字解析，旧 arity 闸一旦回归只会在这里露出来。
+     */
+    @Test
+    fun `动态名 TRYCALLFORM 实参多于形参静默丢弃`() {
+        val pb = compile(
+            Fn(
+                "MAIN",
+                arrayOf(
+                    "@MAIN",
+                    // 名字 = F + RESULTS（未赋值 ⇒ 空）= "F"；带插值就不进编译期常量折叠，
+                    // 由运行期 _CALL_BY_NAME 解析 —— 与语料 KOJO_MESSAGE.ERB:769 同一形态。
+                    "TRYCALLFORM F%RESULTS%(\"a\", 7, 99)",
+                    "RETURN",
+                ),
+            ),
+            Fn("F", arrayOf("@F(ARGS, PA)", "#DIM OUT", "OUTS '= ARGS", "OUT = PA", "RETURN")),
+        )
+        val store = VariableStore()
+        store.declareUserVar(strVar("OUTS"), "F")
+        store.declareUserVar(intVar("OUT"), "F")
+        store.declareUserVar(intVar("PA"), "F")
+        run(pb, store)
+        assertEquals("a", store.userVar("OUTS", "F")!!.readStr(0, 0), "第 1 位照常落 ARGS")
+        assertEquals(
+            7L, store.userVar("OUT", "F")!!.readInt(0, 0),
+            "第 2 位照常落具名形参 PA；第 3 个实参 99 丢弃（不抛「参数过多」）",
         )
         assertEquals(0, store.callDepth(), "帧必须全部退出")
     }

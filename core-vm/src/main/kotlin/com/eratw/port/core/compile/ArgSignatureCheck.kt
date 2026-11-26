@@ -9,6 +9,7 @@ import com.eratw.port.core.expr.FuncCall
 import com.eratw.port.core.fn.Builtins
 import com.eratw.port.core.fn.CompileBuiltinView
 import com.eratw.port.core.fn.FullRegistryView
+import com.eratw.port.core.lexer.LangKey
 import com.eratw.port.core.stmt.Argument
 import com.eratw.port.core.stmt.CaseExpression
 import com.eratw.port.core.stmt.MixedIntegerExprTerm
@@ -370,8 +371,11 @@ object ArgSignatureCheck {
                     kind = ArgSignatureWarningKind.VARIADIC_GROUP,
                     caller = null, line = line, callee = fc.name, position = 0,
                     argc = n, arity = vg.fixedPrefix,
-                    message = "${fc.name} 函数: 参数个数不成对（:$line：实参 $n 个，" +
-                        "需要 ${vg.fixedPrefix}+${vg.groupSize}n 或数组形态 ${vg.exactFormArgs} 个）",
+                    // 官方基串 = ArgsNotFitExpr（`{0}函数: 参数数量({1})不满足{2}+{3}n`，
+                    // spec: FunctionMethod.cs:191 的实参表 name / count / 组起点 / 组长）；
+                    // 数组形态的另一条合法签名是移植侧读数，作取证后缀留在括号里。
+                    message = LangKey.ArgsNotFitExpr.renderZhs(fc.name, n, vg.fixedPrefix, vg.groupSize) +
+                        "（:$line：数组形态另可给 ${vg.exactFormArgs} 个）",
                 ),
             )
             return
@@ -383,10 +387,12 @@ object ArgSignatureCheck {
                 // 有省略位：个数下界 = OmitStart，上界 = 槽位数（BuiltinMethod.checkArity 同口径）
                 if (m.maxArgs >= 0 && n > m.maxArgs) {
                     kind = ArgSignatureWarningKind.TOO_MANY
-                    message = "${fc.name} 函数: 参数过多（:$line：最多 ${m.maxArgs} 个，实参 $n 个）"
+                    message = LangKey.TooManyFuncArgs.renderZhs(fc.name) +
+                        "（:$line：最多 ${m.maxArgs} 个，实参 $n 个）"
                 } else if (n < m.omitStart) {
                     kind = ArgSignatureWarningKind.TOO_FEW
-                    message = "${fc.name} 函数: 至少需要 ${m.omitStart} 个参数（:$line：实参 $n 个）"
+                    message = LangKey.NotEnoughArgs.renderZhs(fc.name, m.omitStart) +
+                        "（:$line：实参 $n 个）"
                 } else return
             }
             m.maxArgs >= 0 -> {
@@ -396,16 +402,17 @@ object ArgSignatureCheck {
                     // 触发条件 `argumentTypeArray.Length == 0`）且实参非空时，官方文案是
                     // 独立的「不需要参数」，不是通用「个数不匹配」（ArgsCountNotMatches）。
                     message = if (m.maxArgs == 0 && m.minArgs == 0 && n > 0) {
-                        "${fc.name} 函数: 该函数不需要参数（:$line：实参 $n 个）"
+                        LangKey.ArgsNotNeeded.renderZhs(fc.name) + "（:$line：实参 $n 个）"
                     } else {
-                        "${fc.name} 函数: 需要 ${m.minArgs} 个参数，但传入了 $n 个（:$line）"
+                        LangKey.ArgsCountNotMatches.renderZhs(fc.name, m.minArgs, n) + "（:$line）"
                     }
                 } else return
             }
             else -> {
                 if (n < m.minArgs) {
                     kind = ArgSignatureWarningKind.TOO_FEW
-                    message = "${fc.name} 函数: 至少需要 ${m.minArgs} 个参数（:$line：实参 $n 个）"
+                    message = LangKey.NotEnoughArgs.renderZhs(fc.name, m.minArgs) +
+                        "（:$line：实参 $n 个）"
                 } else return
             }
         }

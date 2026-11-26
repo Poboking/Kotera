@@ -4,10 +4,19 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 /**
- * 玩家可写数据源：命中后使用写根里的稳定 target，target 一旦存在就**永不**用随包 seed 回滚
+ * 玩家可写数据源：命中后使用写根里的稳定 target，target 一旦存在就**永不**用随包 seed 刷新
  * （种子只用于首次建档）。路径口径与 [SqlitePathLayout] 一致：统一 `/` 分隔、相对种子根/写根。
+ *
+ * 默认空集（2026-11-17 主人裁定）：`plugins/qol_data.db` 曾在此列，但经全量取证
+ * （`specs/verify-notes.md` 2026-11-17 做菜报错章节）其 12 张表全部由启动注册
+ * `QOL_DB_INIT`（`ERB/TITLE.ERB:28` → `qol_db.ERB:47` → 各 `*_DATA_REGISTER`）从语料常量
+ * `INSERT OR REPLACE` 全量重建，`is_custom` 是 mod 作者标记、`gettable` 是捕捉条件键、
+ * `_meta` 是版本戳 —— **没有任何不可重建的玩家私有数据**，mutable 保护无数据可保，
+ * 只会把随包新 seed 挡在老设备外（性能/推广面缺口）。机制本身保留（构造可注入）：
+ * 将来真出现存玩家私有状态的库，把它的相对路径加进 [SqlitePathLayout] 的
+ * `mutableDataSources` 实参即可恢复「永不回滚」语义。
  */
-internal val DEFAULT_MUTABLE_DATA_SOURCES: Set<String> = setOf("plugins/qol_data.db")
+internal val DEFAULT_MUTABLE_DATA_SOURCES: Set<String> = emptySet()
 
 /** 一次 `SQL_CONNECT` 解析后的打开目标：内存库，或写根里的稳定文件 + 可选种子文件。 */
 internal sealed interface SqliteOpenTarget {
@@ -44,9 +53,10 @@ internal sealed interface SqliteOpenTarget {
  *
  * 本类不 import 任何 AndroidX / Android 类型，也不做文件复制：复制属于 A1 驱动层。
  *
- * [mutableDataSources] 是数据版本刷新策略：命中的路径（默认 `plugins/qol_data.db`）解析为
- * [SqliteOpenTarget.File.mutable] = true，A1 只在首次打开时复制 seed，之后即使随包 seed 更新也
- * 保留玩家写入；其余 seed 库按 seed 与 target 的修改时间决定是否原子刷新。
+ * [mutableDataSources] 是数据版本刷新策略：命中的路径解析为 [SqliteOpenTarget.File.mutable] =
+ * true，A1 只在首次打开时复制 seed，之后即使随包 seed 更新也保留写入（默认空集，见
+ * [DEFAULT_MUTABLE_DATA_SOURCES] 的取证记录）；其余 seed 库按 seed 与 target 的修改时间
+ * 决定是否原子刷新。
  */
 internal class SqlitePathLayout(
     seedRoot: Path,

@@ -79,9 +79,15 @@ class ExprEvalTest {
         assertEquals(1L, evalInt(parseOrThrow(listOf(op("-"), lp(), i(2), op("-"), i(3), rp()))))
         val ctx = TestContext()
         val e = parseOrThrow(listOf(op("-"), lp(), i(0), op("-"), i(Long.MIN_VALUE), rp()))
-        assertEquals(Long.MIN_VALUE, evalInt(e, ctx))
-        // spec: OperatorMethodManager.cs:561-564 —— MIN_VALUE 取负打印系统行
-        assertEquals(1, ctx.systemLines.size)
+        // f7a3270c3 随 4.981 SafeArithmetic 饱和钳制改钉（SafeArithmetic.cs:22-35/:52-65）：
+        // 内层 `0 - MIN` 溢出按**左操作数**判向（a=0 不 > 0 → 钳 MIN），外层 negate(MIN)
+        // 是唯一溢出形态、饱和**恒 MAX** ⇒ 终值 = +MAX。旧断言的 Long.MIN_VALUE 是
+        // 1.824 unchecked 回绕时代的期望（曾随 L13 GATE-TRIAGE 同族漏改钉，S9 波顺清）。
+        assertEquals(Long.MAX_VALUE, evalInt(e, ctx))
+        // 4.981 饱和链路溢出告警两行：内层 subtract(0, MIN)（SafeArithmetic.cs:30-34 溢出
+        // 打印）+ 外层 negate(MIN)（spec: OperatorMethodManager.cs:561-564 的「MIN_VALUE
+        // 取负打印系统行」即后者）；旧断言只预期一行 = 回绕时代内层不告警的形态。
+        assertEquals(2, ctx.systemLines.size)
     }
 
     // ---------- `+` 重载与字符串 ----------

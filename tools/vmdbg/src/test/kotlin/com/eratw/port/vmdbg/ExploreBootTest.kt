@@ -109,41 +109,40 @@ class ExploreBootTest {
 
     @Test
     fun builtinStartRecipeShapeMatchesFlow() {
-        // 内置链与 FLOW.md §2 的 START 数字串对应（headless 差异：无存档确认步、
-        // 设定完毕/私室前后有真机没有的 PRINTW——三个 Enter 步吸收；尾部按 2026-11-01 取证补一枚
-        // 「可选立绘」步），18 步 + 终点「第1日」。
+        // 内置链 = 261111 语料换代重取证版（2026-11-18，见 ExploreBoot 类 KDoc「261111 语料
+        // 换代重取证」；种子 20260226 实测全通落 seed.dbg，anchor=Shop_CallShowShop）。
+        // 15 步 + 终点「第1日」。换代变化面逐条见类 KDoc。
         val r = ExploreBoot.BUILTIN_START
-        assertEquals(18, r.steps.size)
+        assertEquals(15, r.steps.size)
         assertEquals("第1日", r.terminal)
         assertEquals(
-            listOf("Enter", "0", "0", "Enter", "9999", "0", "1100", "3", "1999", "Enter", "Enter", "0", "Enter", "100", "1", "1", "0", "0"),
+            listOf("Enter", "0", "999", "9999", "0", "0", "1", "1999", "0", "Enter", "100", "1", "1", "0", "0"),
             r.steps.map { it.input },
         )
-        // FLOW.md §2 引注过的屏文钉在期望里；未引屏文的步骤留空（不检查）
-        assertEquals("请选择游戏模式", r.steps[2].expect)
-        assertEquals("设定完毕", r.steps[4].expect)
-        assertEquals("设定完毕", r.steps[9].expect)
-        assertEquals("请选择地图的种类", r.steps[7].expect)
-        assertEquals("完成自定义阶段", r.steps[13].expect)
+        // 期望只钉 2026-11-18 boot-steps.jsonl 取证过的屏上原文；重绘面/屏文未取证步留空
         assertEquals("", r.steps[0].expect)
-        // 第 15 步（obs-bootrecipe 甲类裁定）：期望串 = 屏上面头原文，不是 FLOW.md 的转述
-        assertEquals(
-            "素質技能の変更", r.steps[14].expect,
-            "2026-11-01 屏上取证：该面选项是 [0]-保留/[1]-変更/[2]-不変更，「全部覆盖」四字屏上零出现",
-        )
-        assertEquals("1", r.steps[14].input, "输入位不变：[1]-変更 就是 FLOW.md 想按的那一刀")
-        // 第 16/17 步：转述串零命中 / 面按条件开火 ⇒ 只推进不判定（留空），取证后再钉回
-        assertEquals("", r.steps[15].expect, "口上版本选择面的真实屏文未取证，不许拿转述当屏文钉")
-        assertEquals("1", r.steps[15].input)
-        assertEquals("", r.steps[16].expect, "本局实际落在魔眼路线选择等 mod 面上，位次不可钉")
-        assertEquals("0", r.steps[16].input)
-        // 第 18 步 = 2026-11-01 boot-steps.jsonl 取证到的「可选立绘」ASK_YN 面（原记在第 17 位是位次错）
-        assertEquals("可选立绘", r.steps[17].expect)
-        assertEquals("0", r.steps[17].input, "[0] 是 = 缄默跳过此次立绘更新")
+        assertEquals("请选择游戏模式", r.steps[1].expect)
+        assertEquals("正式开始游戏前", r.steps[2].expect)
+        assertEquals("", r.steps[3].expect, "角色面板是重绘面：菜单项文本台账取不出，不许脑补")
+        assertEquals("这样真的可以吗", r.steps[4].expect)
+        assertEquals("", r.steps[5].expect, "口上选择 QOL_KOJO_SELECTION 重绘面，屏文未取证")
+        assertEquals("请选择地图的种类", r.steps[6].expect)
+        assertEquals("", r.steps[7].expect, "主地图 60 行重绘，面头滑出尾窗 30 行")
+        assertEquals("", r.steps[8].expect, "居所细选 QOL_SET_HIKKOSHI_ROOM 重绘面")
+        assertEquals("将仓库设定为了你的私室", r.steps[9].expect)
+        assertEquals("变更游戏各种的设定", r.steps[10].expect)
+        assertEquals("", r.steps[11].expect, "口上版本 ASK_M 屏文未取证（沿用 2026-11-01 口径只推进不判定）")
+        assertEquals("当你第一次遇到幽幻魔眼", r.steps[12].expect)
+        assertEquals("更新完力", r.steps[13].expect)
+        assertEquals("可选立绘", r.steps[14].expect, "计数 60→160 随语料漂，钉串不带计数")
         // 全链只允许「有出处的屏文」进期望：逐条非空期望必须是本仓取证过的串
         val pinned = r.steps.map { it.expect }.filter { it.isNotEmpty() }
         assertTrue("全部覆盖" !in pinned, "转述串不得再进配方（期望只钉屏上取证过的原文）：" + pinned)
         assertTrue("用新的" !in pinned, "同上：" + pinned)
+        assertTrue(
+            "素質技能の変更" !in pinned,
+            "261111 开局段已无素质技能面（其选项自述「会在版本変更的时候再登場」），不得钉回开局链：" + pinned,
+        )
     }
 
     // ------------------------------------------------------------------

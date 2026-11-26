@@ -9,7 +9,8 @@ import com.eratw.port.core.proc.FunctionTable
 
 /**
  * 链接产物的**运行期四视图**（P1-5 余量一：`program` / `FunctionTable` / `functionDispatch`
- * 三表一致替换 + M2-6 第四视图 `EventRegistry` 四桶表）。
+ * 三表一致替换 + M2-6 第四视图 `EventRegistry` 四桶表）。SUPCAT-W 起另随链保留 [catalog]
+ * 只读快照——它不是第五张视图，是 HAS_SUPER 判据源的供给面（见字段 KDoc）。
  *
  * ## 单一真源
  *
@@ -61,6 +62,15 @@ class ModChainRuntimePlan private constructor(
      * 无该消费线）。`of(LinkedProgram)` 直派生路径（无 descriptor）恒空表。
      */
     val privateDims: List<BootMetadata.PrivateDim>,
+    /**
+     * Mod 链接产物 [SymbolCatalog] 的**随链只读快照**（SUPCAT-W 判据 1）：派生处保留、
+     * 不再弃——HAS_SUPER 判据源（specs/builtin-functions.yaml 的 HAS_SUPER 条目）经宿主
+     * attach inputs 供给 `EntityRuntime.catalog`（乙形裁定：产物随链走）。快照只被共享
+     * 引用：不复制、不二次装配、不改写链接语义（W2-SUPCAT 判据 3 口径原样）；生命周期
+     * 随会话。它是链接产物的派生物、非声明输入，**不进 LinkFingerprint**（指纹面 /
+     * 序列化面零变化）。旁路没有 plan，关态语义不经本字段承担。
+     */
+    val catalog: SymbolCatalog?,
 ) {
 
     companion object {
@@ -93,7 +103,7 @@ class ModChainRuntimePlan private constructor(
         private fun ModChainRuntimePlan.withPrivateDims(
             dims: List<BootMetadata.PrivateDim>,
         ): ModChainRuntimePlan = ModChainRuntimePlan(
-            program, functionTable, functionDispatch, hasOverrides, eventRegistry, dims,
+            program, functionTable, functionDispatch, hasOverrides, eventRegistry, dims, catalog,
         )
 
         /**
@@ -135,6 +145,7 @@ class ModChainRuntimePlan private constructor(
                 hasOverrides = catalog.hasOverrides,
                 eventRegistry = eventRegistry ?: EventRegistry.of(catalog),
                 privateDims = emptyList(),
+                catalog = catalog,
             )
         }
 

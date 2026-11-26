@@ -3,6 +3,7 @@ package com.eratw.port.core.proc
 import com.eratw.port.core.audio.SoundChannelTable
 import com.eratw.port.core.code.CallArg
 import com.eratw.port.core.code.EventRegistry
+import com.eratw.port.core.code.HookedCallReturn
 import com.eratw.port.core.code.InfiniteLoopAlert
 import com.eratw.port.core.code.InfiniteLoopAnswer
 import com.eratw.port.core.code.RuntimeCallArg
@@ -12,7 +13,9 @@ import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.SlotAddr
 import com.eratw.port.core.code.VmConfig
 import com.eratw.port.core.code.VmHost
+import com.eratw.port.modapi.ModValue
 import com.eratw.port.core.code.VirtualMachine
+import com.eratw.port.core.compile.CallDefaults
 import com.eratw.port.core.compile.EXPR_STR_TEMP_PREFIX
 import com.eratw.port.core.compile.EXPR_TEMP_PREFIX
 import com.eratw.port.core.err.CodeEE
@@ -25,6 +28,9 @@ import com.eratw.port.core.expr.ExprEvalException
 import com.eratw.port.core.expr.ExprParseException
 import com.eratw.port.core.expr.ExprParser
 import com.eratw.port.core.expr.FormStringTerm
+import com.eratw.port.core.expr.FloatLiteral
+import com.eratw.port.core.expr.IntLiteral
+import com.eratw.port.core.expr.StrLiteral
 import com.eratw.port.core.expr.IdentifierResolver
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.ParserConfig
@@ -34,6 +40,7 @@ import com.eratw.port.core.expr.VarInfo
 import com.eratw.port.core.expr.VarRef
 import com.eratw.port.core.expr.VariableReader
 import com.eratw.port.core.expr.toCodeEE
+import com.eratw.port.core.frontend.EventBucket
 import com.eratw.port.core.fn.BuiltinEvalContext
 import com.eratw.port.core.fn.BuiltinHost
 import com.eratw.port.core.fn.Builtins
@@ -53,6 +60,7 @@ import com.eratw.port.core.host.GRAPHICS_SLOT
 import com.eratw.port.core.host.GraphicsPool
 import com.eratw.port.core.host.GraphicsSink
 import com.eratw.port.core.host.InputSink
+import com.eratw.port.core.host.LineBufferConsoleSink
 import com.eratw.port.core.host.NoopGraphicsSink
 import com.eratw.port.core.host.NoopInputSink
 import com.eratw.port.core.host.NoopSoundSink
@@ -68,6 +76,11 @@ import com.eratw.port.core.lexer.LexError
 import com.eratw.port.core.lexer.LexEndWith
 import com.eratw.port.core.lexer.LexerConfig
 import com.eratw.port.core.lexer.StrEndWith
+import com.eratw.port.core.mod.FunctionHookWiring
+import com.eratw.port.core.mod.ModEventTriggerTarget
+import com.eratw.port.core.mod.ModEventTriggerWiring
+import com.eratw.port.core.mod.NestedHookGate
+import com.eratw.port.core.mod.ModEventWiring
 import com.eratw.port.core.rand.Sfmt19937
 import com.eratw.port.core.sem.DataSections
 import com.eratw.port.core.sem.ExecContext
@@ -84,6 +97,7 @@ import com.eratw.port.core.stmt.Statement
 import com.eratw.port.core.stmt.toExprTokens
 import com.eratw.port.core.vars.RefUserVar
 import com.eratw.port.core.vars.Storage
+import com.eratw.port.core.vars.UserVar
 import com.eratw.port.core.vars.VarDef
 import com.eratw.port.core.vars.VarType
 import com.eratw.port.core.vars.VariableStore
@@ -127,7 +141,7 @@ import java.util.IdentityHashMap
  *   （str→int 直接报错，int→str 按 CompatiFuncArgAutoConvert 包 TOSTR），故两口径等价。
  *   spec: CalledFunction.cs:143-200。
  * - 缺省实参在**调用点**替换为默认值表达式后传满全部形参（spec: CalledFunction.cs:165-173，
- *   Def[i] 替换）；`ARG`/`ARGS`/私有形参的隐式默认 0/"" 由 [bindImplicitArgDefault]
+ *   Def[i] 替换）；`ARG`/`ARGS`/私有形参的省略位默认由 [bindOmittedArgDefault]
  *   在绑定点补写（spec: ErbLoader.cs:714-722）。实参类型失配与省略位的报错/写值同属
  *   原版 ConvertArg 的分派，逐条见 [bindCallArgs] 的 KDoc。
  *   实参**多于**形参**不报错**：蛇版 4.981 的 `ConvertArg` 已移除 1.824 的
@@ -323,6 +337,24 @@ class ProcessRuntime(
      * 负控），绝不退回旧表造出第二套派发源。
      */
     val eventRegistry: EventRegistry? = null,
+    /**
+     * 装载期形参默认值表（函数键大写 → 逐位默认值，[CallDefaults]）：**被调侧**的
+     * `Def[i]`，由 [GameSession] 从侧车 `BootMetadata.paramDefaults` 单路注入。
+     *
+     * 为什么运行期还要吃这张表：原版 `Def[i]` 存在 `CalledFunction`（被调定义）上
+     * （`reference/emuera-skia-4.981/Emuera/Runtime/Script/Loader/ErbLoader.cs:728`
+     * `def = term.Restructure(exm) as SingleTerm`；进帧补位 `Process/CalledFunction.cs:167`），
+     * 与调用点是**静态名还是 `CALLFORM` 动态名无关**。编译期 `padOmittedArgs` 只能补
+     * 「编译期能定名」的调用点（`ErbProgramCompiler.kt:2049-2050` 的既有 TODO），
+     * `CALLFORM`/`TRYCALLFORM`/`TRYCCALLFORM` 的被调名是运行期表达式 ⇒ 只能由绑定点
+     * 按本表顶替，否则省略位静默落成隐式 0/""（与 PC 实测的 `dynDefaultInt=7` 不符）。
+     *
+     * 缺省空表 = 只走既有隐式默认（装置/测试/未接线宿主零改动）。
+     *
+     * 只对 `ARG`/`ARGS`/私有形参生效（[bindOmittedArgDefault] 的三条目标分支）；表里
+     * 折不出值的位（[CallDefaultsCollector.unsupported]）保持 null，仍落隐式 0/""。
+     */
+    private val callDefaults: CallDefaults = emptyMap(),
 ) : VmHost {
 
     private val table: FunctionTable = functionTable
@@ -420,6 +452,13 @@ class ProcessRuntime(
 
     internal fun lastTotalNestedStepsForTest(): Long = lastTotalNestedSteps
 
+    /**
+     * 嵌套调用 hook 的**实参解码次数**（测试旁路证明用）：只有「无接线 / 该键无槽」两道
+     * 快判都通过、且实参投影成功时才自增 —— 无 hook 的嵌套调用必须恒为 0，
+     * 即**没有构造过实参数组**。
+     */
+    internal var nestedHookArgDecodes: Int = 0
+
     /** 测试用逐函数步数归因：name -> [calls, rootSteps]。 */
     @Volatile var stepAttributionEnabled: Boolean = false
     internal val stepAttribution = LinkedHashMap<String, LongArray>()
@@ -499,9 +538,13 @@ class ProcessRuntime(
             } else {
                 0
             }
-            if (m.localSize == 0 && m.localsSize == 0 && m.floatLocalSize == 0 &&
-                arg == 0 && args == 0 && floatArg == 0
-            ) {
+            // 全零行判据拆层（B2 结构修消 ComplexCondition，阈值 3）：整数三面
+            // （LOCAL/LOCALS/LOCALF）与实参三面（ARG/ARGS/ARGF 声明长）各 3 条件，
+            // 再 2 条件组合 —— 判断序与原短路链一致；两段谓词均为纯字段/局部 val
+            // 读取、无副作用，拆层后两段都完整求值属不可观察差异。
+            val integerFacesZero = m.localSize == 0 && m.localsSize == 0 && m.floatLocalSize == 0
+            val argFacesZero = arg == 0 && args == 0 && floatArg == 0
+            if (integerFacesZero && argFacesZero) {
                 continue
             }
             lengths[i] = VariableStore.LocalLengths(
@@ -796,6 +839,17 @@ class ProcessRuntime(
 
     /** 是否正处于根级 [VirtualMachine.run] 中（重入保护）。 */
     private var inRun = false
+
+    /**
+     * VM 线程身份（AE 车 `events.trigger` 的线程闸）：首次根级 [runEntry] 进入时记录
+     * `Thread.currentThread()`，`events.trigger` 拿同一线程对象身份比对。
+     *
+     * 用对象身份而不是线程名/threadLocal 猜测：VM 线程就是「真正执行过根级 run 的那条线程」，
+     * 首次 run 之前为 null（此时 trigger 显式 fail-closed，不猜）。@Volatile 只因写入在 run 入口、
+     * 读取在 mod 调用点（同线程为主），不承载并发协议。
+     */
+    @Volatile
+    private var vmThread: Thread? = null
 
     override fun print(text: String) {
         // 契约 C6：VM `_PRINT_*` 内部指令与 sem 语句共用同一桥接出口（[consoleBridge]），
@@ -1680,6 +1734,19 @@ class ProcessRuntime(
         backgroundMsProvider?.let { runCatching { it() }.getOrNull() } ?: 0L
 
     /**
+     * 见 [VmHost.loopGuardProgressStamp]：死循环「无进展」判据的进展信号 =
+     * [LineBufferConsoleSink.revision]（屏上可见变更的累计计数，自增点 = appendGroup /
+     * deleteLine，见该类 KDoc）。真计数只存在于这个 sink：core 层纯 JVM，渲染侧看不到
+     * 「屏上长没长行」，只能经 [VmHost] 边界把行数注回 VM（QB-A3，2026-11-25）。
+     *
+     * 宿主未接该 sink（无头装置、假 sink、`consoleSink = null`）⇒ 恒 0 ⇒ 判据退化为
+     * 升级前的段落墙钟口径 = 官方同形（1.824 `Process.cs:495-499` 只看段落墙钟，
+     * 4.981 skia `Process.cs:494-496` 同），保护不因此消失，只是失去「有进展免问」豁免。
+     */
+    override fun loopGuardProgressStamp(): Long =
+        (consoleSink as? LineBufferConsoleSink)?.revision ?: 0L
+
+    /**
      * 见 [VmHost.infiniteLoopSourceName]：取当前语句的源文件显示名。
      *
      * 当前帧就是 VM 问这一句时正在跑的函数（[functionKey] 与 `activeVm.currentFunctionKey`
@@ -1899,6 +1966,16 @@ class ProcessRuntime(
                 out.add(RuntimeCallArg(false, 0L, null))
             } else if (term.operandType == OperandType.STR) {
                 out.add(RuntimeCallArg(true, 0L, term.getStrValue(evalContext)))
+            } else if (term.operandType == OperandType.FLOAT) {
+                // `#DIMF` 形参的浮点实参（4.981 作者面）：值随 [RuntimeCallArg.floatValue]
+                // 交 VM，由 `_CALL_STR` 按位型写进 int 桶（帧槽没有浮点列）。
+                out.add(
+                    RuntimeCallArg(
+                        false, 0L, null,
+                        isFloat = true,
+                        floatValue = term.getFloatValue(evalContext),
+                    ),
+                )
             } else {
                 out.add(RuntimeCallArg(false, term.getIntValue(evalContext), null))
             }
@@ -1931,6 +2008,131 @@ class ProcessRuntime(
      * （与「函数体只有一句 `RETURN 0`」逐位等价，见 `Vm.callInto`）。
      */
     override fun isStubbedFunction(funcIndex: Int): Boolean = stubTable.hit(funcIndex)
+
+    /**
+     * 嵌套调用（VM 指令级 `CALL`）的函数钩子接管点：[VmHost.dispatchNestedHookCall] 的实现。
+     *
+     * 与顶层「宿主按名调用」走**同一条** [FunctionHookWiring.dispatchCall]：函数键 = 目标函数的
+     * 运行期键（[Program.functions] 的 cached upper key，与 [FunctionTable] 的 `meta.key` 同口径），
+     * 原函数由 [runHookedNested] 在借出的嵌套 VM 上执行，故 PREFIX/POSTFIX 顺序、Replace 短路、
+     * SkipOriginal、实参隔离/回流、返回值投影全部复用既有语义，没有第二套实现。
+     *
+     * 旁路判据全部收在 [resolveNestedHookTarget]（任一道假就返回 null、**连实参数组都不构造**）：
+     * ① [NestedHookGate.installed] 无接线；② 目标函数无 meta；③ 该键无声明槽；④ 实参投影不安全
+     * （省略位 / 桶不连续，见 [decodeNestedHookArgs]——运行期调用点的元数据由 VM 构造恒连续，
+     * 判据④实际只在静态调用点可触发）。
+     *
+     * 2026-11-26 B1：旧三道旁路拆除——① 字符串返回位（`isStrRet`，CALLF 家族）按位交割
+     * （[runHookedNested] 从嵌套 VM 的 [Vm.stringResult] 取串返回）；② `CALL_STR` 运行期调用点
+     * （实参元数据在宿主槽，确定接管才消费表，见 [resolveNestedHookTarget]）；③ `depth == 0`
+     * 尾跳（[Vm] 侧哨兵携值交回 run，见 `earlyExitJumpPc` 的 KDoc）。
+     */
+    override fun dispatchNestedHookCall(
+        funcIndex: Int,
+        argc: Int,
+        isStrRet: Boolean,
+        pc: Int,
+    ): HookedCallReturn? {
+        val target = resolveNestedHookTarget(funcIndex, argc, pc) ?: return null
+        nestedHookArgDecodes++
+        val value = FunctionHookWiring.dispatchCall(
+            store,
+            target.key,
+            target.args.intArgs,
+            target.args.strArgs,
+            strRet = isStrRet,
+        ) { ints, strs ->
+            runHookedNested(target.meta, ints, strs, isStrRet)
+        }
+        return if (isStrRet) {
+            HookedCallReturn(0L, (value as? ModValue.StrValue)?.value ?: "")
+        } else {
+            HookedCallReturn((value as? ModValue.IntValue)?.value ?: 0L)
+        }
+    }
+
+    /**
+     * 解析「本次嵌套调用是否/如何被钩子接管」；null = 完全旁路（判据顺序见
+     * [dispatchNestedHookCall] 的 KDoc，前几道都落在解实参之前）。
+     *
+     * `CALL_STR` 运行期调用点（`_CALL_BY_NAME` / `_CALL_STR`）的实参元数据在宿主槽
+     * （[onRuntimeCallArgs]，消费式）：**只有确定接管才消费**——先验完 meta/键/槽三道，
+     * 接管已定局才 [takeRuntimeCallArgs] 取表投影；不走接管时表原样留给 [bindCallArgs] 的
+     * 原生绑定（旧实现「见到运行期调用点一律旁路」的保守闸由此拆除）。运行期表的元数据由
+     * VM 构造（位置连续、无省略位），投影判据④实际不可触发；若因宿主缺陷触发，显式
+     * [CodeEE] 失败优于静默走原生（表已被消费，原生绑定拿不到元数据，静默会把实参绑错）。
+     */
+    // ReturnCount：四道旁路/失败出口各自语义独立（闸未装 / 目标无槽 / 实参投影失败 / 接管），
+    // KDoc 逐道绑定判据顺序，硬拆伤可读性（先例 CellWidth.kt 同款）。
+    @Suppress("ReturnCount")
+    private fun resolveNestedHookTarget(funcIndex: Int, argc: Int, pc: Int): NestedHookTarget? {
+        if (!NestedHookGate.installed(store)) return null
+        val functions = program.functions
+        val meta = if (funcIndex in functions.indices) table.byFunctionIndex(funcIndex) else null
+        val key = meta?.let { functions[funcIndex].upperKey }
+        // 旁路后两道：目标无 meta / 该键无声明槽 ⇒ 不解实参、不建数组（与 dispatchCall 同口径）；
+        // argc 已在 VM 侧按 arity/slotCount 夹取（与原生帧复制的上界同一条）。
+        if (meta == null || key == null || !NestedHookGate.hasHooks(store, key)) return null
+        val isRuntimeCall = runtimeCallArgsPc == pc
+        val callArgs: List<CallArg>? = if (isRuntimeCall) takeRuntimeCallArgs(pc) else program.callArgsAt(pc)
+        val args = decodeNestedHookArgs(
+            callArgs,
+            argc,
+            { activeVm.getInt(SlotAddr.local(it)) },
+            { activeVm.getStr(SlotAddr.local(it)) },
+        ) ?: run {
+            if (isRuntimeCall) {
+                // 运行期表被本函数消费后才走到这里 = 宿主缺陷（VM 构造的表恒连续、无省略位）。
+                // 显式失败：静默走原生会让原生绑定拿到 null 元数据退化为 v1 类型桶，可能绑错。
+                throw CodeEE("嵌套 hook 实参投影失败（运行期调用点 key=$key pc=$pc）：运行期元数据表应恒可投影")
+            }
+            return null
+        }
+        return NestedHookTarget(meta, key, args)
+    }
+
+    /**
+     * 在借出的嵌套 VM 上执行一次「被钩原函数」（[dispatchNestedHookCall] 的 original 通道）。
+     *
+     * 机制与 [invokeUserMethod] 同源：借 [nestedVmPool]、`activeVm` 指过去、
+     * `pendingRoot*` 交给 [onFunctionEnter] 分桶绑参、跑完归还；因此实参绑定与返回值投影和
+     * 顶层 `doCall → runEntry(rootBindSlot.bindBuckets)` 逐条一致。
+     *
+     * 与 [runEntry] 的差异：不设 `inRun`（嵌套 VM 可重入）；stub 判定照旧先短路成 0；
+     * 深度上限复用方法栈口径 [METHOD_STACK_LIMIT]（每层钩子换一台派生 VM，VM 自身的
+     * `maxCallDepth` 不会增长，必须自带上限，否则钩子链递归会一路顶到 JVM 栈）。
+     *
+     * 返回通道（2026-11-26 B1/B2）：`strRet` = true 时被调是字符串返回位（`#FUNCTIONS` 家族），
+     * 结果取**嵌套 VM 顶层帧** `_RETS` 写入的 [Vm.stringResult]（与 [invokeUserMethod] /
+     * `executeMethod` 取 `#FUNCTIONS` 返回值同一条通道）；被调掉尾（编译器尾声 `_RET NONE`，
+     * `ErbProgramCompiler.kt:350`）没写串寄存器 → 折 `""`，与原版掉尾 `ReturnF(null)` 的
+     * 消费侧空串口径一致。int 通道取 [Vm.run] 的 Long，与旧实现逐位一致。
+     */
+    private fun runHookedNested(meta: FuncMeta, intArgs: LongArray, strArgs: Array<String>, strRet: Boolean): ModValue {
+        // 引擎级函数屏蔽：与 runEntry 的 stub 短路同语义（钩子照跑，原函数按空体 RETURN 0）。
+        if (stubTable.hit(meta.index)) {
+            return if (strRet) ModValue.StrValue("") else ModValue.IntValue(0L)
+        }
+        if (methodDepth >= METHOD_STACK_LIMIT) throw CodeEE(OVERFLOW_FUNC_STACK_MES)
+        methodDepth++
+        val nested = nestedVmPool.removeFirstOrNull() ?: vm.deriveNestedVm(this, vmConfig)
+        val prevActive = activeVm
+        activeVm = nested
+        try {
+            pendingRoot = rootBindSlot.bindBuckets(intArgs, strArgs)
+            pendingRootBind = true
+            val ret = nested.run(meta.index)
+            lastNestedSteps = nested.executedSteps
+            lastTotalNestedSteps += nested.executedSteps
+            return if (strRet) ModValue.StrValue(nested.stringResult ?: "") else ModValue.IntValue(ret)
+        } finally {
+            pendingRoot = null
+            pendingRootBind = false
+            activeVm = prevActive
+            methodDepth--
+            nestedVmPool.addFirst(nested)
+        }
+    }
 
     override fun onFunctionEnter(funcIndex: Int) {
         val meta = table.byFunctionIndex(funcIndex)
@@ -2310,18 +2512,13 @@ class ProcessRuntime(
             // 安全性与 [bindCallArgs] 的 `bindIdx1` 同一条：`writeInt`/`writeStr` 只读不持有。
             val i0 = if (idx.isEmpty()) 0L else idx[0]
             if (plan.isArg) {
-                val iv = v as? Value.IntV ?: throw strToIntArgError(meta.name, argNo)
+                val iv = intOfValue(meta, argNo, v)
                 bindIdx1[0] = i0
-                store.writeInt(ARG_VAR, bindIdx1, iv.v)
+                store.writeInt(ARG_VAR, bindIdx1, iv)
                 continue
             }
             if (plan.isArgs) {
-                val sv = when (v) {
-                    is Value.StrV -> v.v
-                    is Value.IntV -> intToStrArgValue(meta.name, argNo, v.v)
-                    // TODO(verify): 浮点实参写字符串形参的格式化口径无 C# 证据（1.824 无浮点）
-                    is Value.FloatV -> v.v.toString()
-                }
+                val sv = strOfValue(meta, argNo, v)
                 bindIdx1[0] = i0
                 store.writeStr(ARGS_VAR, bindIdx1, sv)
                 continue
@@ -2342,16 +2539,11 @@ class ProcessRuntime(
                 LongArray(dims).also { arr -> for (k in idx.indices) arr[k] = idx[k] }
             }
             if (param.spec.isStr) {
-                val sv = when (v) {
-                    is Value.StrV -> v.v
-                    is Value.IntV -> intToStrArgValue(meta.name, argNo, v.v)
-                    // TODO(verify): 同 [bindPositionalValues] 的浮点口径（无 C# 证据）
-                    is Value.FloatV -> v.v.toString()
-                }
-                store.writeStr(baseName, indices, sv)
+                store.writeStr(baseName, indices, strOfValue(meta, argNo, v))
+            } else if (param.spec.isFloat) {
+                store.writeFloat(baseName, indices, floatOfValue(meta, argNo, v))
             } else {
-                val iv = v as? Value.IntV ?: throw strToIntArgError(meta.name, argNo)
-                store.writeInt(baseName, indices, iv.v)
+                store.writeInt(baseName, indices, intOfValue(meta, argNo, v))
             }
         }
         return true
@@ -2436,14 +2628,14 @@ class ProcessRuntime(
     ): Boolean {
         val pc = activeVm.lastCallPc
         if (pc < 0) return false
+        // 形参表**先取**：没有头部形参名就直接退回类型桶路径，**不消费**运行期表
+        //（2026-11-26 卫生修正——旧序先 takeRuntimeCallArgs 再判 plans，无形参名时表被
+        // 消费后丢弃：消费式单槽被白白清掉，同 pc 的重查/诊断面拿不到元数据）。
+        val plans = paramPlansOf(meta) ?: return false
         // 运行期字符串调用点没有静态 callArgs 表：优先读 VM 投递的单槽运行期表
         //（pc 匹配即用、用后清），否则退回既有 program.callArgsAt 的类型桶路径。
         val runtimeArgs = takeRuntimeCallArgs(pc)
         val args = runtimeArgs ?: program.callArgsAt(pc) ?: return false
-        // 形参表**只在首次调用该函数时取一次**（[paramPlansOf] 缓存），热路径上不再
-        // 每调用一次 `program.paramNames(meta.index)`（一次虚调用 + 一次惰性函数表查）。
-        // null = 该函数没有头部形参名 ⇒ 与旧实现的 `paramNames.isEmpty() → false` 同口径。
-        val plans = paramPlansOf(meta) ?: return false
         // 原版 ConvertArg 对被调**全部**头部形参位校验（CalledFunction.cs:143-200）：
         // 实参数不足的位置（i >= srcArgs.Count）落到 REF 形参上是硬错误 CanNotOmitRefArg
         // （:150-153，CompatiFuncArgOptional 分支管不到 REF）。本侧调用点元数据只覆盖到
@@ -2451,7 +2643,8 @@ class ProcessRuntime(
         // 默认值（原版装载期 RefArgCanNotInitialize 拒绝，ErbLoader.cs:756-758），故
         // 尾部被裁掉的 REF 位必须在这里补查 —— 否则省略的 REF 会静默留空、推迟到
         // 被调首次读时才报 EmptyRefVar，与原版「调用点即报」的时点与文案都不符。
-        // 非 REF 的尾部位由 [bindImplicitArgDefault] 补装载期隐式默认（ARG/ARGS/私有形参），
+        // 非 REF 的尾部位由 [bindOmittedArgDefault] 补装载期默认（被调 `Def[i]` 优先，
+        // 否则隐式 0/""，ARG/ARGS/私有形参），
         // 其余才落到省略配置分支。
         if (args.size < plans.size) {
             val paramNames = program.paramNames(meta.index)
@@ -2469,7 +2662,7 @@ class ProcessRuntime(
                 // 非 REF 的尾部省略：ARG/ARGS/私有形参有装载期隐式默认 0/""（ErbLoader.cs:714-722）；
                 // 其余形参 Def 必为 null，CompatiFuncArgOptional 关 ⇒ CanNotOmitArgWithMessage
                 // （CalledFunction.cs:168-172），开 ⇒ 保持 `Arguments[i] == null` 的跳过语义（:437）。
-                if (bindImplicitArgDefault(paramNames[p], meta)) continue
+                if (bindOmittedArgDefault(paramNames[p], meta, p)) continue
                 if (!funcArgCompat(ConfigKey.CompatiFuncArgOptional)) {
                     throw cannotOmitArgError(meta.name, p + 1)
                 }
@@ -2489,9 +2682,10 @@ class ProcessRuntime(
                 if (refUserParamAt(paramName, meta) != null) {
                     throw CodeEE.keyed(LangKey.CanNotOmitRefArg, meta.name, a.position + 1)
                 }
-                // ARG/ARGS/私有形参的省略 = 隐式默认 0/""（ErbLoader.cs:714-722），写回后
-                // 与原版 `Def[i]` 顶替等价；其余形参才落到 CompatiFuncArgOptional 分支。
-                if (bindImplicitArgDefault(paramName, meta)) continue
+                // ARG/ARGS/私有形参的省略 = 被调 `Def[position]`（装载期显式默认值优先，
+                // 否则隐式 0/""，ErbLoader.cs:714-728），写回后与原版顶替等价；
+                // 其余形参才落到 CompatiFuncArgOptional 分支。
+                if (bindOmittedArgDefault(paramName, meta, a.position)) continue
                 if (!funcArgCompat(ConfigKey.CompatiFuncArgOptional)) {
                     throw cannotOmitArgError(meta.name, a.position + 1)
                 }
@@ -2506,6 +2700,9 @@ class ProcessRuntime(
             val idx = plan.constIdx
             // ---- 1) ARG / ARGS 系形参：写系统数组对应元素 ----
             if (plan.isArg || plan.isArgs) {
+                // 浮点实参没有 ARG（long）/ARGS（string）通道：原版装载期直接拒绝
+                // （CanNotConvertFloatToInt / CanNotConvertFloatToStr）。
+                if (a.isFloat) throw floatArgTypeError(meta.name, a.position + 1, plan.isArgs)
                 val index = if (idx.isEmpty()) 0L else idx[0]
                 val argNo = a.position + 1
                 if (plan.isArg) {
@@ -2550,6 +2747,10 @@ class ProcessRuntime(
                 bindRef(param as RefUserVar, src, a.isStr, callee, argNo)
                 continue
             }
+            if (a.isFloat && !param.spec.isFloat) {
+                // 浮点实参只能进浮点形参（原版 ConvertArg 装载期拒绝，CalledFunction.cs:174-198）。
+                throw floatArgTypeError(meta.name, a.position + 1, param.spec.isStr)
+            }
             if (param.spec.isStr != a.isStr) {
                 // 原版 ConvertArg 的类型失配分派（CalledFunction.cs:174-198）：
                 // str 实参 → int 形参一律拒绝（:176-179）；int 实参 → str 形参按
@@ -2568,6 +2769,11 @@ class ProcessRuntime(
             }
             if (param.spec.isStr) {
                 store.writeStr(baseName, indices, strArgValue(meta.name, a.position + 1, a, slot))
+            } else if (param.spec.isFloat) {
+                // `#DIMF` 浮点形参（4.981 fork 的第三型变量）：浮点实参按位型从整型桶
+                // 重解释（[floatArgValue]）；int 实参则是原版允许的提升
+                // （CalledFunction.cs:174-198 的 `Int to Float: auto-promote`，:186-190）。
+                store.writeFloat(baseName, indices, floatArgValue(a, slot))
             } else {
                 store.writeInt(baseName, indices, activeVm.getInt(slot))
             }
@@ -2609,9 +2815,13 @@ class ProcessRuntime(
         val indices = shapeSystemParamIndices(def, idx) ?: return
         val argNo = a.position + 1
         if (def.type == VarType.STR) {
+            if (a.isFloat) throw floatArgTypeError(meta.name, argNo, true)
             store.writeStr(baseName, indices, strArgValue(meta.name, argNo, a, slot))
+        } else if (def.type == VarType.FLOAT) {
+            // 浮点系统/局部形参位（`#DIMF` 同名内建变量）：同一浮点通道。
+            store.writeFloat(baseName, indices, floatArgValue(a, slot))
         } else {
-            if (a.isStr) throw strToIntArgError(meta.name, argNo)
+            requireIntSlotArg(meta.name, argNo, a)
             store.writeInt(baseName, indices, activeVm.getInt(slot))
         }
     }
@@ -2631,16 +2841,11 @@ class ProcessRuntime(
         val def = store.registry.def(baseName) ?: return
         val indices = shapeSystemParamIndices(def, idx) ?: return
         if (def.type == VarType.STR) {
-            val sv = when (v) {
-                is Value.StrV -> v.v
-                is Value.IntV -> intToStrArgValue(meta.name, argNo, v.v)
-                // TODO(verify): 同上，浮点写字符串形参的格式化口径无 C# 证据
-                is Value.FloatV -> v.v.toString()
-            }
-            store.writeStr(baseName, indices, sv)
+            store.writeStr(baseName, indices, strOfValue(meta, argNo, v))
+        } else if (def.type == VarType.FLOAT) {
+            store.writeFloat(baseName, indices, floatOfValue(meta, argNo, v))
         } else {
-            val iv = v as? Value.IntV ?: throw strToIntArgError(meta.name, argNo)
-            store.writeInt(baseName, indices, iv.v)
+            store.writeInt(baseName, indices, intOfValue(meta, argNo, v))
         }
     }
 
@@ -2812,12 +3017,14 @@ class ProcessRuntime(
      * @return true = 已按隐式默认写回（省略合法，调用方继续下一位）；
      *   false = 该位没有默认值可用，省略合法性由配置决定。
      */
-    private fun bindImplicitArgDefault(paramName: String, meta: FuncMeta): Boolean {
+    private fun bindOmittedArgDefault(paramName: String, meta: FuncMeta, position: Int): Boolean {
         // 形参项原文 `NAME[:n[:m]]`：与 [bindCallArgs] 主循环同一解析口径。
         val parts = paramName.removeSuffix("$").split(':')
         val baseName = parts[0].trim()
         val idx = foldParamSubscripts(parts.drop(1), meta.name)
-        return bindImplicitArgDefault(baseName, idx, meta)
+        // 被调侧 `Def[position]` 优先（PC: CALLFORM 族同样按它顶替，
+        // 见 ctor 的 [callDefaults] KDoc）；null 才落隐式 0/""。
+        return bindOmittedArgDefault(baseName, idx, meta, explicitDefaultAt(meta, position))
     }
 
     /**
@@ -2836,55 +3043,136 @@ class ProcessRuntime(
         for (p in plans.indices) {
             val plan = plans[p]!!
             val idx = plan.constIdx
+            // 零参调用同样按被调 `Def[p]` 顶替（PC: CalledFunction.cs:167 与名字形态无关）
+            val def = explicitDefaultAt(meta, p)
             if (plan.isArg) {
                 bindIdx1[0] = if (idx.isEmpty()) 0L else idx[0]
-                store.writeInt(ARG_VAR, bindIdx1, 0L)
+                store.writeInt(ARG_VAR, bindIdx1, intDefaultOf(def))
                 continue
             }
             if (plan.isArgs) {
                 bindIdx1[0] = if (idx.isEmpty()) 0L else idx[0]
-                store.writeStr(ARGS_VAR, bindIdx1, "")
+                store.writeStr(ARGS_VAR, bindIdx1, strDefaultOf(def))
                 continue
             }
             if (refUserParamAt(plan.baseName, meta) != null) {
                 throw CodeEE.keyed(LangKey.CanNotOmitRefArg, meta.name, p + 1)
             }
-            if (bindImplicitArgDefault(plan.baseName, idx, meta)) continue
+            if (bindOmittedArgDefault(plan.baseName, idx, meta, def)) continue
             if (!funcArgCompat(ConfigKey.CompatiFuncArgOptional)) {
                 throw cannotOmitArgError(meta.name, p + 1)
             }
         }
     }
 
-    /** [bindImplicitArgDefault] 的已解析形态（形参名与常量下标来自 [ParamPlan] / 调用点原文）。 */
-    private fun bindImplicitArgDefault(baseName: String, idx: LongArray, meta: FuncMeta): Boolean {
+    /**
+     * 被调 `Def[i]` 的整型取值（null / 非整型形态 ⇒ 0 = 原版 `SingleLongTerm(0)`，
+     * spec: ErbLoader.cs:714-722）。
+     */
+    private fun intDefaultOf(default: Expr?): Long = when (default) {
+        is IntLiteral -> default.value
+        // 浮点默认值只会出现在 `ARGF` 形参上（本函数不写浮点桶），这里按 PC 的
+        // 整型转换口径取整，不引入 `EvalContext`（本层没有求值上下文）。
+        is FloatLiteral -> default.value.toLong()
+        else -> 0L
+    }
+
+    /** 被调 `Def[i]` 的字符串取值（null / 非字符串形态 ⇒ "" = 原版 `SingleStrTerm("")`）。 */
+    private fun strDefaultOf(default: Expr?): String = (default as? StrLiteral)?.value ?: ""
+
+    /**
+     * 被调 `Def[i]` 的浮点取值（只用于 `ARGF` 形参）：null / 非浮点形态 ⇒ 0.0
+     * （原版 `SingleFloatTerm(0.0)`）。折出的 [FloatLiteral] 在 [LineParser.foldLiteralDefault]
+     * 已按原版 `Restructure` 定值；这里只把它写进每函数一份的浮点局部槽。
+     */
+    private fun floatDefaultOf(default: Expr?): Double = (default as? FloatLiteral)?.value ?: 0.0
+
+    /** [bindOmittedArgDefault] 的已解析形态（形参名与常量下标来自 [ParamPlan] / 调用点原文）。 */
+    private fun bindOmittedArgDefault(
+        baseName: String,
+        idx: LongArray,
+        meta: FuncMeta,
+        default: Expr? = null,
+    ): Boolean {
+        // 原版 `Def[i]` 就是装载期折定的 `SingleTerm`（ErbLoader.cs:728）；这里已由
+        // [CallDefaults] 收到字面量形态，直接取它的值，缺省（null）才落隐式 0/""。
+        val intValue = intDefaultOf(default)
+        val strValue = strDefaultOf(default)
         val sysName = baseName.uppercase()
         if (sysName == ARG_VAR) {
             bindIdx1[0] = if (idx.isEmpty()) 0L else idx[0]
-            store.writeInt(ARG_VAR, bindIdx1, 0L)
+            store.writeInt(ARG_VAR, bindIdx1, intValue)
             return true
         }
         if (sysName == ARGS_VAR) {
             bindIdx1[0] = if (idx.isEmpty()) 0L else idx[0]
-            store.writeStr(ARGS_VAR, bindIdx1, "")
+            store.writeStr(ARGS_VAR, bindIdx1, strValue)
+            return true
+        }
+        // ARGF（浮点实参桶）：省略位取装载期折出的 FloatLiteral，写进每函数一份的
+        // 1 维浮点局部槽（VariableStore.builtinFloatEntry 的 L_FLOAT 支，spec:
+        // VariableLocal.cs 的 ARGF 支只读 func.ArgFloatLength）。 ARG/ARGS 各自独占
+        // 整型/字符串桶，ARGF 是独立的一列 —— 不能借用 ARG 的 intDefaultOf 取整。
+        // 构造期已按 declaredLength(refs, ARGF_VAR, …) 登记长度，这里按位写不越界。
+        if (sysName == ARGF_VAR) {
+            bindIdx1[0] = if (idx.isEmpty()) 0L else idx[0]
+            store.writeFloat(ARGF_VAR, bindIdx1, floatDefaultOf(default))
             return true
         }
         val param = store.userVar(baseName, meta.key) ?: return false
-        if (param.spec.isConst) return false
-        // REF 位在调用方先判（CanNotOmitRefArg），且装载期禁止给 REF 形参默认值
-        // （ErbLoader.cs:756-758 → RefArgCanNotInitialize）；这里不再写值。
-        if (param.spec.isRef) return false
-        if (!param.spec.isPrivate) return false
-        val dims = param.def.dims.size
-        if (idx.size > dims) return true
-        val indices = LongArray(dims)
-        for (k in idx.indices) indices[k] = idx[k]
-        if (param.spec.isStr) {
-            store.writeStr(baseName, indices, "")
-        } else {
-            store.writeInt(baseName, indices, 0L)
+        return bindPrivateArgDefault(param, baseName, idx, OmittedValues(intValue, strValue, default))
+    }
+
+    /** 省略位的三态取值：整型列值 / 字符串列值 / 原始默认值表达式（浮点列要按表达式取 Double）。 */
+    private class OmittedValues(val int: Long, val str: String, val default: Expr?)
+
+    /**
+     * [bindOmittedArgDefault] 的**私有用户变量形参位**尾段（`#DIM`/`#DIMS`/`#DIMF` 私有形参）。
+     *
+     * 判序与 [com.eratw.port.core.vars.DimSpec] 的 KDoc 同源（`isFloat` 优先于 `isStr`）：
+     * `#DIMF` 私有形参要写浮点列，落进 `writeInt` 会抛「变量 … 是浮点变量，不能写入整数」。
+     *
+     * 不写值（返回 false，交调用方落旧口径）的三种位：
+     * - `CONST`：装载期就不许给常量形参默认值；
+     * - `REF`：REF 位在调用方先判（CanNotOmitRefArg），且装载期禁止给 REF 形参默认值
+     *   （ErbLoader.cs:756-758 → RefArgCanNotInitialize）；
+     * - 非私有：`@Pt01(LOCAL, …)` 一类内建变量形参由 [writeSystemParam] 另有通道。
+     *
+     * 下标位多于声明维数（`idx.size > dims`）时**不写也不报**，只报「已接手」= true：
+     * 原版省略位就是 `Def[i]` 定值，多余下标属于调用点本身越界，由运行期读该位时再判。
+     */
+    private fun bindPrivateArgDefault(
+        param: UserVar,
+        baseName: String,
+        idx: LongArray,
+        values: OmittedValues,
+    ): Boolean {
+        val writable = !param.spec.isConst && !param.spec.isRef && param.spec.isPrivate
+        if (writable && idx.size <= param.def.dims.size) {
+            val indices = LongArray(param.def.dims.size)
+            for (k in idx.indices) indices[k] = idx[k]
+            when {
+                param.spec.isFloat -> store.writeFloat(baseName, indices, floatDefaultOf(values.default))
+                param.spec.isStr -> store.writeStr(baseName, indices, values.str)
+                else -> store.writeInt(baseName, indices, values.int)
+            }
         }
-        return true
+        return writable
+    }
+
+    /**
+     * 某个形参位的**装载期显式默认值**（原版 `TopLabel.Def[i]`，spec: ErbLoader.cs:728）。
+     *
+     * null = 该位没有可注入的默认值（表里为空位 / 函数不在表里 / 未接线）⇒ 调用方落
+     * [bindOmittedArgDefault] 的隐式 0/""（等价于原版 `Def[i]` 的 `SingleLongTerm(0)` /
+     * `SingleStrTerm("")`，ErbLoader.cs:714-722）。
+     *
+     * 只在**省略位**上调用（`present == false` 或超出调用点实参数），热路径的
+     * 已给实参位不付这次查表成本。
+     */
+    private fun explicitDefaultAt(meta: FuncMeta, position: Int): Expr? {
+        if (callDefaults.isEmpty()) return null
+        return callDefaults[meta.key]?.getOrNull(position)
     }
 
     /**
@@ -3018,6 +3306,63 @@ class ProcessRuntime(
     private fun strArgValue(callee: String, argNo: Int, a: CallArg, slot: Int): String {
         if (a.isStr) return activeVm.getStr(slot)
         return intToStrArgValue(callee, argNo, activeVm.getInt(slot))
+    }
+
+    /**
+     * 实参位的**浮点值**（`#DIMF` 形参通道）。
+     *
+     * 帧槽没有浮点列，浮点实参由编译相位以 `doubleToRawLongBits` 位型落进 int 桶
+     * （[CallArg.isFloat]，见 `ErbProgramCompiler.evalTempFloatBits` / `Vm._EVAL_FLOAT`），
+     * 这里按位型重解释；非浮点实参则按原版 `Int to Float: auto-promote`
+     * （CalledFunction.cs:174-198，`:186-190`）提升。
+     */
+    private fun floatArgValue(a: CallArg, slot: Int): Double {
+        val raw = activeVm.getInt(slot)
+        return if (a.isFloat) java.lang.Double.longBitsToDouble(raw) else raw.toDouble()
+    }
+
+    /**
+     * 浮点实参 → 非浮点形参的类型失配（原版 `CanNotConvertFloatToInt` /
+     * `CanNotConvertFloatToStr`，装载期即报；本侧在绑定点报，是可观察行为的等价落点
+     * —— 两边都中止执行，见 [bindCallArgs] 的 KDoc）。
+     */
+    private fun floatArgTypeError(callee: String, argNo: Int, toStr: Boolean): CodeEE =
+        CodeEE(
+            if (toStr) {
+                "不能将\"@$callee\"的第${argNo}个参数从浮点型转换为字符串型"
+            } else {
+                "不能将\"@$callee\"的第${argNo}个参数从浮点型转换为整型"
+            },
+        )
+
+    /** 帧槽实参 → 整型形参位的失配前置检查（str/浮点实参都按原版口径拒）。 */
+    private fun requireIntSlotArg(callee: String, argNo: Int, a: CallArg) {
+        if (a.isStr) throw strToIntArgError(callee, argNo)
+        if (a.isFloat) throw floatArgTypeError(callee, argNo, false)
+    }
+
+    /**
+     * 已求值实参（[Value]）→ 整型形参位：与帧槽通道的 [strToIntArgError] /
+     * [floatArgTypeError] 同一套失配口径（`CalledFunction.cs:174-198`）。
+     */
+    private fun intOfValue(meta: FuncMeta, argNo: Int, v: Value): Long = when (v) {
+        is Value.IntV -> v.v
+        is Value.FloatV -> throw floatArgTypeError(meta.name, argNo, false)
+        is Value.StrV -> throw strToIntArgError(meta.name, argNo)
+    }
+
+    /** 已求值实参 → 字符串形参位（int 走 `TOSTR` 兼容档；float 按原版拒绝）。 */
+    private fun strOfValue(meta: FuncMeta, argNo: Int, v: Value): String = when (v) {
+        is Value.StrV -> v.v
+        is Value.IntV -> intToStrArgValue(meta.name, argNo, v.v)
+        is Value.FloatV -> throw floatArgTypeError(meta.name, argNo, true)
+    }
+
+    /** 已求值实参 → 浮点形参位（`Int to Float: auto-promote`，CalledFunction.cs:186-190）。 */
+    private fun floatOfValue(meta: FuncMeta, argNo: Int, v: Value): Double = when (v) {
+        is Value.FloatV -> v.v
+        is Value.IntV -> v.v.toDouble()
+        is Value.StrV -> throw strToIntArgError(meta.name, argNo)
     }
 
     /**
@@ -3340,6 +3685,9 @@ class ProcessRuntime(
         // 不经过 VM 的 callInto —— 被屏蔽函数在这里短路，语义与 VM 内一致（空体 `RETURN 0`）：
         // 不建帧、不进 VM、不触发 onFunctionEnter/Exit，直接返回 0。
         if (stubTable.hit(targetIndex)) return 0L
+        // AE 车：记录「VM 线程」身份（首次根级 run 入口）。events.trigger 的线程闸不猜线程名，
+        // 只认同一条真正执行过根级 run 的线程对象；在 run 之前 trigger 会显式 fail-closed。
+        vmThread = Thread.currentThread()
         pendingRoot = bind
         pendingRootBind = bind != null
         inRun = true
@@ -3349,6 +3697,8 @@ class ProcessRuntime(
             inRun = false
             pendingRoot = null
             pendingRootBind = false
+            // AG 车：run 收尾在 VM 线程上按入队序派发 run 内积压的延迟触发（空队列近零开销）。
+            ModEventTriggerWiring.flushDeferred(store)
         }
     }
 
@@ -3357,6 +3707,12 @@ class ProcessRuntime(
      * code/lines/池"。生产代码不应依赖此访问器。
      */
     internal fun vmProgramForTest(): Program = activeVm.program
+
+    /**
+     * 当前指令流 VM 的 [Vm.stringResult]（测试可见）：depth==0 尾跳钩子接管的串返回值
+     * 经哨兵写进该寄存器，宿主按名调用（int 通道）拿不到，只能从 VM 读。生产代码不应依赖。
+     */
+    internal fun vmStringResultForTest(): String? = activeVm.stringResult
 
     // ------------------------------------------------------------------
     // CALL 家族（CALL / CALLFORM / JUMP / TRYCALL / TRYCALLFORM）
@@ -3419,8 +3775,23 @@ class ProcessRuntime(
         strArgs: Array<String> = emptyArray(),
     ): Long = callFunction(name, intArgs, strArgs)
 
-    private fun doCall(meta: FuncMeta, intArgs: LongArray, strArgs: Array<String>): Long =
-        runEntry(meta.index, rootBindSlot.bindBuckets(intArgs, strArgs))
+    /**
+     * 宿主按名调用的执行漏斗（`callFunction` / `tryCall` / `callForm` 共用）。
+     *
+     * §20.1 函数 hook 接在这里：**宿主侧**调用才有介入点（ERB 内部 `CALL` 是 VM 指令内 callInto，
+     * 走 [VmHost.dispatchNestedHookCall] 嵌套接管点，B1 起三类调用点全接管）。槽未安装 / 该键无
+     * 声明槽时 [FunctionHookWiring.dispatchCall] 直接调原路径，连实参数组都不构造（golden 零变化）。
+     * 本漏斗恒整数通道（`resolveForCall` 拒 #FUNCTION 方法，见其 KDoc）；投影保证 int 通道，
+     * null/错配已由接线层折 0。
+     */
+    private fun doCall(meta: FuncMeta, intArgs: LongArray, strArgs: Array<String>): Long {
+        val value = FunctionHookWiring.dispatchCall(
+            store, meta.key, intArgs, strArgs, strRet = false,
+        ) { ints, strs ->
+            ModValue.IntValue(runEntry(meta.index, rootBindSlot.bindBuckets(ints, strs)))
+        }
+        return (value as? ModValue.IntValue)?.value ?: 0L
+    }
 
     /**
      * `CalledFunction.CallFunction` 的名字解析（`:87-115`）。顺序照原版：
@@ -3773,7 +4144,6 @@ class ProcessRuntime(
             throw CodeEE(OVERFLOW_FUNC_STACK_MES)
         }
         // 实参多于形参不报错：同 [executeMethod]（GETMETH 族经本通道调用户方法，4.981 同一条 ConvertArg 口径）。
-        methodDepth++
         // REF 形参的名字要在**调用方**作用域解析（enterFunction 之后 currentFunction 已换人）。
         val callerKey = store.currentFunction
         val refs = buildPendingRefBindings(meta, args, refArgs, callerKey)
@@ -3781,6 +4151,15 @@ class ProcessRuntime(
         val prevActive = activeVm
         activeVm = nested
         try {
+            // `methodDepth++` 必须是 try 里**第一句**：上面四行（`store.currentFunction` 读、
+            // [buildPendingRefBindings] 的形参名/REF 源解析、[VirtualMachine.deriveNestedVm] 的
+            // VM 分配）任何一处抛 —— 真机 512 MiB 堆上 OOM 完全可能 —— 都不许吃掉配额。
+            // `methodDepth` 与 [executeMethod] **共用**同一条 100 上限（spec: Process.cs:502-506），
+            // 且 GETMETH/GETMETHS/CALLF 全走本通道：泄漏累计到上限即本局所有方法调用永久抛
+            // OverflowFuncStack，只能重开游戏。配额只由下面 finally 的**唯一**一处
+            // `methodDepth--` 无条件归还（配对在同一个 try/finally 里，不设标志位）。
+            // 形状与 [executeMethod] 的 :3797-:3831 同一条（那里 `methodDepth++` 紧跟 try）。
+            methodDepth++
             pendingRoot = rootBindOf(args, args)
             pendingRootBind = true
             pendingRefBindings = refs
@@ -3961,7 +4340,10 @@ class ProcessRuntime(
      *
      * **在场即接管，不静默回落**：四桶表在场而该事件无成员时返回 null（按「事件不存在」
      * 处理），绝不退回旧表造出第二套派发源。两条路的成员形状归一到 [EventMemberRef]，
-     * 调用方只认物理下标 + 桶位 + 旗标。
+     * 调用方只认物理下标 + 桶位 + 旗标。两条路都按 C# 的**并列加桶**展开（在册 B23）：
+     * 成员命中几个桶就出现几条引用（`#PRI`+`#LATER` 两次、`#ONLY` 桶 0 与桶 2 各一条），
+     * 序 = 外层桶序 + 同桶装载序，由 [FunctionTable.eventDispatchOrder] /
+     * [com.eratw.port.core.code.EventRegistry.of] 单源给出，不依赖 Map 迭代次序。
      */
     private fun resolveEventMembers(name: String): List<EventMemberRef>? {
         val registry = eventRegistry
@@ -3971,8 +4353,8 @@ class ProcessRuntime(
                 EventMemberRef(it.physicalIndex, it.bucket, it.isOnly, it.isSingle)
             }
         }
-        return table.eventCallOrder(name)?.map {
-            EventMemberRef(it.index, it.eventBucket, it.isOnly, it.isSingle)
+        return table.eventDispatchOrder(name)?.map { (meta, bucket) ->
+            EventMemberRef(meta.index, bucket, meta.isOnly, meta.isSingle)
         }
     }
 
@@ -4001,7 +4383,13 @@ class ProcessRuntime(
             // spec: CalledFunction.cs:69-76 —— GetEventLabels 为空但 GetNonEventLabel 命中
             // ⇒ CalleventToNonEventFunc（官方 zhs 文案，含被命中非事件 label 的文件:行号）。
             table.nonEvent(name)?.let { throw nonEventAsEventError(name, it) }
-            return false
+            // A1（2026-11-26）：mod 自定义事件域（EventDispatchRegistry.declare）的键在构建期
+            // EventRegistry 里没有成员链，但已声明且运行期有处理器时必须照常派发——否则
+            // declare → register → trigger 全链在引擎侧静默无效果（旧形态：成员链 null 直接
+            // false，连 Kotlin 处理器都不跑）。空成员表进同一派发体：四桶序 / SINGLE 截断 /
+            // hook 包裹逐位同口径，ERB 成员循环自然为零趟。
+            if (!ModEventWiring.hasHandlers(store, name)) return false
+            emptyList()
         }
         if (eventActive) {
             // 官方 zhs CalleventBeforeFinishEvent（lang.emuera-zhs.xml:735 / Lang.cs:3122）。
@@ -4009,10 +4397,17 @@ class ProcessRuntime(
         }
         eventActive = true
         try {
-            dispatchEventMembers(order)
-            return true
+            // §20.1 事件 hook：按**事件名**查槽（无槽 = 直接派发，逐位不变）；SkipOriginal 时
+            // 整个事件成员链不跑、Postfix 照常，返回值经 [FunctionHookWiring] 折回 Boolean。
+            return FunctionHookWiring.dispatchEvent(store, name) {
+                dispatchEventMembers(order, name)
+                true
+            }
         } finally {
             eventActive = false
+            // AL 车：事件派发收尾 flush —— 四桶与 hook 全部跑完、eventActive 已清、尚未返回
+            // 调用方，此刻才允许派发「处理器里 events.trigger 入队」的事件（不嵌套、不乱序）。
+            ModEventTriggerWiring.flushDeferred(store)
         }
     }
 
@@ -4030,26 +4425,94 @@ class ProcessRuntime(
      * SaveLoadHandoff 新落下的待消费系统状态位（SAVEGAME/LOADGAME/LOADDATA 的脚本链作废信号）。
      * 入口快照用于区分「本就挂着待消费状态」（不该由本循环认领）与「本循环内新落下」。
      */
-    private fun dispatchEventMembers(order: List<EventMemberRef>) {
+    private fun dispatchEventMembers(order: List<EventMemberRef>, eventKey: String) {
         val handoff = SaveLoadHandoff.of(store)
         val handoffAtEntry = handoff?.systemState
-        var i = 0
-        while (i < order.size) {
-            val member = order[i]
-            val ret = runEntry(member.physicalIndex, null)
-            if (quitRequested || handoff?.systemState?.let { it != handoffAtEntry } == true) {
-                return
+        // 桶 0（#ONLY）：执行完即终止整个派发。运行期注册硬拒 ONLY 桶
+        // （见 EventDispatchRegistry.register），故这里只可能是 ERB 成员。
+        val start = dispatchOnlyBucket(order)
+        // 桶 1..3（PRI → NORMAL → LATER）：同桶内先 ERB 成员（链接序），再运行期处理器（注册序）。
+        if (start >= 0) dispatchRemainingBuckets(order, start, eventKey, handoff, handoffAtEntry)
+    }
+
+    /**
+     * 跑 PRI / NORMAL / LATER 三桶（`#ONLY` 已由 [dispatchOnlyBucket] 处理）。
+     *
+     * 整链终止读数一旦为真就跳出循环：`QUIT` 或脚本链作废时余下桶一律不跑。
+     */
+    private fun dispatchRemainingBuckets(
+        order: List<EventMemberRef>,
+        start: Int,
+        eventKey: String,
+        handoff: SaveLoadHandoff?,
+        handoffAtEntry: SystemStateCode?,
+    ) {
+        var i = start
+        var bucket = EventBucket.PRI.index
+        var aborted = false
+        while (!aborted && bucket <= EventBucket.LATER.index) {
+            val outcome = dispatchBucketMembers(order, i, bucket, handoff, handoffAtEntry)
+            i = outcome.nextIndex
+            aborted = outcome.chainAborted
+            // §6.1 事件贡献点：本桶的运行期 Kotlin 处理器（未安装接线 / 无注册 = 完全旁路）。
+            // 与 ERB 的 #SINGLE 同口径：本桶已被截断时就不再跑本桶余下成员（含这些处理器）。
+            if (!aborted && !outcome.truncated && ModEventWiring.hasHandlers(store, eventKey)) {
+                ModEventWiring.runBucket(store, eventKey, bucket)
+                aborted = chainAborted(handoff, handoffAtEntry)
             }
-            if (member.isOnly) return
-            if (member.isSingle && ret == 1L) {
-                val bucket = member.bucket
-                i++
-                while (i < order.size && order[i].bucket == bucket) i++
-                continue
-            }
-            i++
+            bucket++
         }
     }
+
+    /**
+     * 跑 `#ONLY` 桶（桶 0）。
+     *
+     * @return 后续桶的起始下标；`-1` = ONLY 成员已把整条事件链终止，调用方直接收尾。
+     */
+    private fun dispatchOnlyBucket(order: List<EventMemberRef>): Int {
+        if (order.isEmpty() || order.first().bucket != EventBucket.ONLY.index) return 0
+        runEntry(order.first().physicalIndex, null)
+        // ONLY 成员执行完即终止整条派发（spec ProcessState.cs:326-333）。
+        return -1
+    }
+
+    /** 一个可注册桶（PRI/NORMAL/LATER）的派发读数：下一个下标 / 是否被 #SINGLE 截断 / 整链是否终止。 */
+    private class BucketOutcome(val nextIndex: Int, val truncated: Boolean, val chainAborted: Boolean)
+
+    /**
+     * 跑某桶的 ERB 成员（同桶链接序），并在每次成员 run 之后按「整链终止读数」收尾。
+     *
+     * [truncated] 只截断本桶余下成员（`#SINGLE` 语义），跨桶照派；[BucketOutcome.chainAborted]
+     * 一旦为真，调用方必须立即结束整个派发。已截断时本桶余下成员连 run 都不做。
+     */
+    private fun dispatchBucketMembers(
+        order: List<EventMemberRef>,
+        start: Int,
+        bucket: Int,
+        handoff: SaveLoadHandoff?,
+        handoffAtEntry: SystemStateCode?,
+    ): BucketOutcome {
+        var i = start
+        var truncated = false
+        while (i < order.size && order[i].bucket == bucket) {
+            val member = order[i]
+            i++
+            if (!truncated) {
+                val ret = runEntry(member.physicalIndex, null)
+                if (chainAborted(handoff, handoffAtEntry)) return BucketOutcome(i, truncated, chainAborted = true)
+                truncated = member.isSingle && ret == 1L
+            }
+        }
+        return BucketOutcome(i, truncated, chainAborted = false)
+    }
+
+    /**
+     * 整链终止读数（逐成员 run 之后取）：`QUIT` 粘滞位置位，或 `SaveLoadHandoff` 新落下了
+     * 待消费系统状态（SAVEGAME/LOADGAME/LOADDATA 使本条脚本链作废）。
+     * 入口快照区分「本就挂着待消费状态」（不该由本循环认领）与「本循环内新落下」。
+     */
+    private fun chainAborted(handoff: SaveLoadHandoff?, handoffAtEntry: SystemStateCode?): Boolean =
+        quitRequested || handoff?.systemState?.let { it != handoffAtEntry } == true
 
     // ------------------------------------------------------------------
     // GOTOFORM / TRYGOTOFORM（$ 标签运行期解析）
@@ -4424,6 +4887,22 @@ class ProcessRuntime(
         // Train_DoTrain 都在 [BeginFlow] 里（spec: Process.cs:1931-1954）。
         // 见 [ExecContext.doTrainHook] 的 KDoc（语料 USERCOM → DOTRAIN 999 主链）。
         execContext.doTrainHook = { no -> beginFlow.doTrain(no) }
+        // AE 车：把「引擎事件派发」作为 mod 面 `events.trigger` 的派发目标挂进 store.aux。
+        // 装配点在 core-vm 内自接线（生产 app 装配不允许本车改动）；ModEventWiring.install 在
+        // 装配期把它桥进 EventDispatchRegistry.trigger。无 mod 会话只多一次 aux 槽登记，
+        // 不参与任何热路径。
+        ModEventTriggerWiring.install(
+            store,
+            object : ModEventTriggerTarget {
+                override fun isOnVmThread(): Boolean = vmThread === Thread.currentThread()
+
+                override fun isInEventDispatch(): Boolean = eventActive
+
+                override fun isInVmRun(): Boolean = inRun
+
+                override fun triggerEvent(eventKey: String): Boolean = executeEvent(eventKey)
+            },
+        )
     }
 
     /**

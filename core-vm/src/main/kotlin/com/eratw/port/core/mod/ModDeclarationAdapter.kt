@@ -19,17 +19,27 @@ import com.eratw.port.core.patch.JobDeclaration
 import com.eratw.port.core.patch.JobTemplateDeclaration
 import com.eratw.port.core.patch.ModuleDescriptor
 import com.eratw.port.core.patch.PhaseDeclaration
+import com.eratw.port.core.patch.SettingDeclaration
+import com.eratw.port.core.patch.WriteGrantDeclaration
+import com.eratw.port.core.patch.BoolSettingDeclaration
+import com.eratw.port.core.patch.EnumSettingDeclaration
+import com.eratw.port.core.patch.IntSettingDeclaration
+import com.eratw.port.core.patch.StrSettingDeclaration
 import com.eratw.port.core.vars.DimSpec
 import com.eratw.port.modapi.ArchetypeDecl
+import com.eratw.port.modapi.BoolSettingDecl
 import com.eratw.port.modapi.CharaRouteDecl
 import com.eratw.port.modapi.ComponentDecl
 import com.eratw.port.modapi.CsvKeywordDecl
 import com.eratw.port.modapi.CsvOp
 import com.eratw.port.modapi.CsvValueDecl
 import com.eratw.port.modapi.DimType
+import com.eratw.port.modapi.WriteGrantDecl
+import com.eratw.port.modapi.EnumSettingDecl
 import com.eratw.port.modapi.FieldType
 import com.eratw.port.modapi.GlobalDimDecl
 import com.eratw.port.modapi.HookDecl
+import com.eratw.port.modapi.IntSettingDecl
 import com.eratw.port.modapi.InteractionHookDecl
 import com.eratw.port.modapi.JobCatchUp as ModJobCatchUp
 import com.eratw.port.modapi.JobDecl
@@ -38,6 +48,8 @@ import com.eratw.port.modapi.ModManifest
 import com.eratw.port.modapi.PhaseDecl
 import com.eratw.port.modapi.PrivateDimDecl
 import com.eratw.port.modapi.RelationshipDecl
+import com.eratw.port.modapi.SettingDecl
+import com.eratw.port.modapi.StrSettingDecl
 import com.eratw.port.modapi.HookPhase as ModHookPhase
 import com.eratw.port.modapi.InteractionPhase as ModInteractionPhase
 
@@ -100,6 +112,7 @@ object ModDeclarationAdapter {
     private fun toDescriptorUnchecked(manifest: ModManifest): ModuleDescriptor = ModuleDescriptor(
         packageId = manifest.packageId,
         version = manifest.version,
+        minApi = manifest.minApi,
         requires = manifest.requires,
         loadAfter = manifest.loadAfter,
         entityRefs = manifest.entityRefs,
@@ -120,6 +133,12 @@ object ModDeclarationAdapter {
         exportedMacros = manifest.exportedMacros,
         artifactSha256 = manifest.artifactSha256,
         charaRoutes = manifest.charaRoutes.map { toCharaRouteDeclaration(it) },
+        displayName = manifest.displayName,
+        author = manifest.author,
+        description = manifest.description,
+        settings = manifest.settings.map { toSettingDeclaration(it) },
+        declarationPositions = manifest.declarationPositions,
+        writeGrants = manifest.writeGrants.map { toWriteGrantDeclaration(it) },
     )
 
     /**
@@ -217,6 +236,7 @@ object ModDeclarationAdapter {
             mayMutateArgs = decl.mayMutateArgs,
             mayMutateReturn = decl.mayMutateReturn,
             runOnFailure = decl.runOnFailure,
+            continueOnHandlerFailure = decl.continueOnHandlerFailure,
         )
 
     private fun toInteractionHookDeclaration(decl: InteractionHookDecl): InteractionHookDeclaration =
@@ -262,4 +282,92 @@ object ModDeclarationAdapter {
      */
     private fun toCharaRouteDeclaration(decl: CharaRouteDecl): CharaRouteDeclaration =
         CharaRouteDeclaration(variable = decl.variable, cells = decl.cells)
+
+    /**
+     * 写授权直译（MODDX4-B1 组长接线）：`DimType.INT|STR` 折成 descriptor 侧的 `isStr`
+     * 位（与 [toSettingDeclaration] 同款「只搬字段不二次校验」——键非空与包内唯一在
+     * `ModManifest` init 已拒，descriptor 侧 init 再兜一道）。
+     */
+    private fun toWriteGrantDeclaration(decl: WriteGrantDecl): WriteGrantDeclaration =
+        WriteGrantDeclaration(name = decl.name, isStr = decl.type == DimType.STR)
+
+    /**
+     * 设置项声明直译（RT2 per-mod 配置）：四类密封子类型逐一映射。
+     *
+     * 只搬字段、不做第二套校验：键字符集 / 枚举默认值在候选里 / min ≤ max 等不变量由
+     * core `*SettingDeclaration` 的 init 在构造期拒载（这里会抛 IllegalArgumentException，
+     * 装载期整包拒绝而不是吞掉一个非法声明让设置页渲染出怪控件）。
+     */
+    private fun toSettingDeclaration(decl: SettingDecl): SettingDeclaration = when (decl) {
+        is IntSettingDecl -> IntSettingDeclaration(
+            key = decl.key,
+            default = decl.default,
+            min = decl.min,
+            max = decl.max,
+            title = decl.title,
+            description = decl.description,
+        )
+        is StrSettingDecl -> StrSettingDeclaration(
+            key = decl.key,
+            default = decl.default,
+            title = decl.title,
+            description = decl.description,
+        )
+        is BoolSettingDecl -> BoolSettingDeclaration(
+            key = decl.key,
+            default = decl.default,
+            title = decl.title,
+            description = decl.description,
+        )
+        is EnumSettingDecl -> EnumSettingDeclaration(
+            key = decl.key,
+            default = decl.default,
+            candidates = decl.candidates,
+            title = decl.title,
+            description = decl.description,
+        )
+    }
+
+    /**
+     * 设置项声明的反向投影（core `SettingDeclaration` → mod-api `SettingDecl`；host 读数面
+     * `ModRuntimeHost.declaredSettings` 专用）。
+     *
+     * 单一真源口径：宿主登记面（[ModRuntimeHost.settings] 里的 `ModSettingsSnapshot`）持有的是
+     * 装载期翻译产物（core 形态，[toSettingDeclaration] 的输出）；读数缝要还给消费方的是作者面
+     * 形态（与 `DeclDslSettings` 声明的同一套类型），本函数就是那段唯一的反向翻译，与
+     * [toSettingDeclaration] 成对 —— 四型映射知识只落在这一个文件，不出第二份。
+     *
+     * 只搬字段、不做第二套校验：两边的构造期不变量逐条一致（键字符集 / min≤max / 默认值在界内 /
+     * 枚举候选非空去重且默认值在候选里），能通过 core 侧 init 的合法声明在 mod-api 侧重构必然
+     * 同样合法，不会二次抛。
+     */
+    fun toSettingDecl(declaration: SettingDeclaration): SettingDecl = when (declaration) {
+        is IntSettingDeclaration -> IntSettingDecl(
+            key = declaration.key,
+            default = declaration.default,
+            min = declaration.min,
+            max = declaration.max,
+            title = declaration.title,
+            description = declaration.description,
+        )
+        is StrSettingDeclaration -> StrSettingDecl(
+            key = declaration.key,
+            default = declaration.default,
+            title = declaration.title,
+            description = declaration.description,
+        )
+        is BoolSettingDeclaration -> BoolSettingDecl(
+            key = declaration.key,
+            default = declaration.default,
+            title = declaration.title,
+            description = declaration.description,
+        )
+        is EnumSettingDeclaration -> EnumSettingDecl(
+            key = declaration.key,
+            default = declaration.default,
+            candidates = declaration.candidates,
+            title = declaration.title,
+            description = declaration.description,
+        )
+    }
 }

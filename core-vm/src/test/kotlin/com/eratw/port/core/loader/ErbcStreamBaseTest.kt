@@ -22,6 +22,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -133,6 +134,40 @@ class ErbcStreamBaseTest {
         // 禁整段物化：拼接与对拍全程之后，base 的指令流堆驻留仍为 0
         //（CompositeCodeSource 只按页向 base 取数，不产生整段拷贝）
         assertEquals(0L, mmapBase.codeResidentBytes, "拼接对拍全程 base 指令流不许落堆")
+    }
+
+    // ==================================================================
+    // 3.5 带基线窗口池的钉住折减（堆压回收的身份契约前提）
+    // ==================================================================
+
+    /**
+     * 窗口池的 pinStatementIdentities 必须把**绝对**下标折成窗口下标再下发。
+     *
+     * 不折的失效是静默的：续段惰性池按 `it < limit`（= 续段条数）过滤，绝对下标被整片丢掉 ⇒
+     * 之后条目缓存逐出 / 堆压回收清掉真正该留的槽，同一下标重解出第二个实例，数据节
+     * （以实例为键）与对象树 CALLSHARP 行键一起 miss。本用例钉住折减后的读数与身份。
+     */
+    @Test
+    fun `带基线窗口池的钉住先折 statementBase 再下发：回收后同一下标恒同一实例`(@TempDir dir: Path) {
+        val counts = countsOf(baseProgram())
+        val base = counts.toProgramBase()
+        val f = dir.resolve("patch-pin.erbc")
+        Files.write(f, ErbcWriter.encode(segmentProgram(counts, withCallArgs = true)))
+        val windowed = loadMapped(f, base)
+        assertTrue(windowed.holdsLazyStatementPool, "映射档必须是惰性池，否则折减分支踩不到")
+        val absolute = counts.statements
+        assertEquals(1, windowed.statementCount - absolute, "样题续段恰一条语句")
+        val pinned = windowed.statement(absolute)
+        windowed.pinStatementIdentities(intArrayOf(absolute))
+        assertEquals(
+            1,
+            windowed.codeCacheCensus!!.stmtPins,
+            "绝对下标不折 statementBase 会被续段的 limit 整片过滤（钉住 silently 失效）",
+        )
+        // 回收是空读数也无所谓：本用例钉的是「折减让钉住真的生效」，身份在回收前后都必须成立。
+        windowed.releaseRuntimeCodeCaches()
+        assertSame(pinned, windowed.statement(absolute), "回收后钉住下标必须仍是同一实例")
+        assertEquals(1, windowed.codeCacheCensus!!.stmtPins, "钉住表本身跨回收不变")
     }
 
     // ==================================================================

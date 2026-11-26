@@ -221,7 +221,7 @@ class ArgSignatureCheckTest {
         assertEquals("POWER", w.callee)
         assertEquals(3, w.argc)
         assertEquals(2, w.arity, "arity 读数 = 注册表 minArgs")
-        assertTrue(w.message.contains("需要 2 个参数，但传入了 3 个"), "文案：${w.message}")
+        assertTrue(w.message.contains("POWER函数: 需要2个参数，但传入了3个"), "官方 ArgsCountNotMatches：${w.message}")
 
         val exact = compile(Fn("CALLER", listOf("@CALLER", "A = POWER(2, 3)", "RETURN")))
         assertTrue(ArgSignatureCheck.checkProgram(exact).isEmpty(), "2 个实参命中 [2, 2] 区间")
@@ -250,8 +250,11 @@ class ArgSignatureCheckTest {
         assertEquals("DT_ROW_ADD", w.callee)
         assertEquals(2, w.argc)
         assertEquals(1, w.arity, "arity 读数 = 固定前缀")
-        assertTrue(w.message.contains("参数个数不成对"), "文案：${w.message}")
-        assertTrue(w.message.contains("1+2n"), "文案带成对口径：${w.message}")
+        assertTrue(
+            w.message.contains("DT_ROW_ADD函数: 参数数量(2)不满足1+2n"),
+            "官方 ArgsNotFitExpr 基串：${w.message}",
+        )
+        assertTrue(w.message.contains("数组形态另可给 4 个"), "第二份签名留取证后缀：${w.message}")
     }
 
     @Test

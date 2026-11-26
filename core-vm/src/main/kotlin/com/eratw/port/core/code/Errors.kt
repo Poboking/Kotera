@@ -41,17 +41,17 @@ open class VmException(
  * 死循环保护的**触发原因**（ENGFIX-3 · 2026-11-05）。
  *
  * ## oracle（两侧同源，只差一个变量名）
- * * skia `MinorShift.Emuera.GameProc/Process.cs:470-489` 的 `checkInfiniteLoop`：
- *   每 10000 **行**（`:989-992` 的 `state.lineCount % 10000 == 0`，且
- *   `Config.InfiniteLoopAlertTime > 0` 才检查）读一次 `startTime.ElapsedMilliseconds`（:472），
- *   不足阈值直接 return（:473-476）；达阈值 ⇒ 标题 `Lang.MessageBox.InfiniteLoop` +
- *   正文 `Lang.MessageBox.TooLongLoop`（四个实参：文件名 / 行号 / 已执行行数 / 墙钟毫秒，:480-481）
- *   交给 `Dialog.ShowPrompt`（:482）；玩家答「是」⇒ 抛 `CodeEE(Lang.Error.SelectExitInfiniteLoopMB.Text)`
- *   （:484）；答「否」⇒ `state.lineCount = 0` + `startTime.Restart()`（:486-487）继续跑；
- *   **没有可用 UI**（`view.Enabled`，:478；`EmueraConsole.cs:256` 的 `Enabled => window.Created`）
+ * * skia `Emuera/Runtime/Script/Process.cs:481-515` 的 `checkInfiniteLoop`：
+ *   每 10000 **行**（`Process.ScriptProc.cs:34-36` 的 `state.lineCount % 10000 == 0`，且
+ *   `Config.InfiniteLoopAlertTime > 0` 才检查）读一次 `startTime.ElapsedMilliseconds`（:494），
+ *   不足阈值直接 return（:495-496）；达阈值 ⇒ 标题 `Lang.MessageBox.InfiniteLoop` +
+ *   正文 `Lang.MessageBox.TooLongLoop`（四个实参：文件名 / 行号 / 已执行行数 / 墙钟毫秒，:502-505）
+ *   交给 `Dialog.ShowPrompt`（:506）；玩家答「是」⇒ 抛 `CodeEE(Lang.Error.SelectExitInfiniteLoopMB.Text)`
+ *   （:508）；答「否」⇒ `state.lineCount = 0` + `startTime.Restart()`（:512-513）继续跑；
+ *   **没有可用 UI**（`console.Enabled`，:500-501；skia `UI/Game/EmueraConsole.cs:341` 的 `Enabled => window.Created`）
  *   ⇒ 整个 if 块跳过：不弹框、不归零、更不中止。
  * * 官方 `reference/emuera-cs/MinorShift.Emuera.GameProc/Process.cs:493-512` 与 `:1012-1014`
- *   逐字同文（只有 `view` 写作 `console`）。
+ *   逐字同文（`checkInfiniteLoop` 与采样调用点 `:1012-1014`；`Enabled` 守卫两侧变量名同为 `console`）。
  *
  * ⇒ **原版从不因「跑了多少条指令」中止脚本**；中止只发生在玩家按下「是」那一次。
  *
@@ -67,7 +67,7 @@ open class VmException(
  *   `isRecoverableScriptError`），不是官方语义，需 ADR-005 例外登记。
  */
 enum class LoopGuardCause {
-    /** 玩家在墙钟告警里明确选了「退出/是」—— 官方唯一的中止路径（skia `Process.cs:482-484`）。 */
+    /** 玩家在墙钟告警里明确选了「退出/是」—— 官方唯一的中止路径（skia `Process.cs:506-508`）。 */
     PlayerChoseExit,
 
     /** 移植层预算撞线（[VmConfig.maxStepsPerRun] / [VmConfig.maxRunMillis]），与原版判据无关。 */
@@ -77,7 +77,7 @@ enum class LoopGuardCause {
 /**
  * 死循环告警的**现场**（ENGFIX-3）。
  *
- * 逐字段对应 skia `Process.cs:480-481` 那次格式化的四个实参与两个上下文量：
+ * 逐字段对应 skia `Process.cs:502-505` 那次格式化的四个实参与两个上下文量：
  * `currentLine.Position.Value.Filename` → [sourceName]、`currentLine.Position.Value.LineNo`
  * → [lineNo]、`state.lineCount` → [linesExecuted]、`startTime.ElapsedMilliseconds` → [elapsedMs]；
  * [alertTimeMs] 是本次触发用的阈值（原版 `Config.InfiniteLoopAlertTime`）。
@@ -131,10 +131,10 @@ data class InfiniteLoopAlert(
 /**
  * 宿主对死循环告警的答复（ENGFIX-3 的**回调切口**返回域）。
  *
- * 三支与 skia 的三个分支一一对应（`Process.cs:478-488`）：
+ * 三支与 skia 的三个分支一一对应（`Process.cs:497-513`）：
  * * [Exit] ≙ `Dialog.ShowPrompt(...)` 返回 true（玩家按「是」，`Dialog.cs:21-28` 的
  *   `MessageBox.Show(text, title, YesNo) == Yes`）⇒ VM 抛异常；
- * * [Continue] ≙ 返回 false（玩家按「否」）⇒ 行数与计时双双归零（:486-487）；
+ * * [Continue] ≙ 返回 false（玩家按「否」）⇒ 行数与计时双双归零（:512-513）；
  * * [NoUi] ≙ `view.Enabled == false`（没有可用 UI）⇒ **什么都不做**：既不弹框、也不归零，
  *   更绝不中止 —— 下一个 10000 行边界再按同样判据看一次墙钟。
  *
@@ -142,7 +142,7 @@ data class InfiniteLoopAlert(
  * 与改造前逐条一致，且永不因为「跑太久」被打死。
  */
 sealed interface InfiniteLoopAnswer {
-    /** 玩家选「继续」：行数与计时双双归零接着跑（skia `Process.cs:486-487`）。 */
+    /** 玩家选「继续」：行数与计时双双归零接着跑（skia `Process.cs:512-513`）。 */
     object Continue : InfiniteLoopAnswer
 
     /** 玩家选「退出」：VM 抛 [StepLimitExceeded]（cause = [LoopGuardCause.PlayerChoseExit]）。 */
@@ -204,7 +204,7 @@ object InfiniteLoopTexts {
     /** 对话框标题（无占位符）。 */
     fun title(variant: LangVariant): String = if (variant == LangVariant.JA) TITLE_JA else TITLE_ZHS
 
-    /** 对话框正文：四个占位符按 skia `Process.cs:481` 的实参序原位替换。 */
+    /** 对话框正文：四个占位符按 skia `Process.cs:505` 的实参序原位替换。 */
     fun message(alert: InfiniteLoopAlert, variant: LangVariant): String {
         val template = if (variant == LangVariant.JA) MESSAGE_TEMPLATE_JA else MESSAGE_TEMPLATE_ZHS
         return fill(
@@ -259,7 +259,7 @@ object InfiniteLoopTexts {
  *
  * ## 语义（ENGFIX-3 · 2026-11-05 起）
  * **主语义 = 玩家在死循环告警里选了「退出」**（[LoopGuardCause.PlayerChoseExit]）：
- * 这就是原版的 `CodeEE(Lang.Error.SelectExitInfiniteLoopMB.Text)`（skia `Process.cs:484`），
+ * 这就是原版的 `CodeEE(Lang.Error.SelectExitInfiniteLoopMB.Text)`（skia `Process.cs:508`（官方 `:507`）），
  * 发生在墙钟越过 `Config.InfiniteLoopAlertTime`、每 10000 行一次的采样点上；
  * 玩家选「继续」时**不产生任何异常**，选不了（没有 UI）时同样不产生。
  *
@@ -295,7 +295,7 @@ class StepLimitExceeded(
      * line/pc/funcName 是结构化字段、屏幕拿不到 —— 2026-10-21 真机首跑撞闸时失败屏
      * 只剩一句「疑似死循环」，循环位置只能靠事后反射猜（BOARD「行7」之争的根源）。
      *
-     * 玩家退出路径**不带**这个后缀：那句必须是官方 `CodeEE` 的原文上屏（skia `Process.cs:484`），
+     * 玩家退出路径**不带**这个后缀：那句必须是官方 `CodeEE` 的原文上屏（skia `Process.cs:508`（官方 `:507`）），
      * 现场由 [alert] / [line] / [pc] 这些结构化字段承担。
      */
     val callChain: String? = null,
@@ -311,7 +311,7 @@ class StepLimitExceeded(
      * 触发本闸的**墙钟毫秒**（段落口径：自上一次让出边界起）；-1 = 纯步数闸触发（既有路径）。
      *
      * 为什么要有这一维（2026-10-29）：原版根本没有「每段指令上限」这种东西 ——
-     * skia `Process.cs:470-489` 每 10000 行看一次**墙钟**，超过
+     * skia `Process.cs:481-515` 每 10000 行看一次**墙钟**，超过
      * `Config.InfiniteLoopAlertTime`（默认 5000 ms）就弹框问「是否中止」，玩家选「否」
      * 就 `state.lineCount = 0; startTime.Restart()` 继续跑。于是原版读长档的恢复演出
      * 只是「卡很久」，从不中止；移植层拿步数硬闸当同一件事，就把合法重负载判成了死循环
@@ -331,7 +331,7 @@ class StepLimitExceeded(
     scriptFile: String? = null,
 ) : VmException(
     when (guardCause) {
-        // 官方唯一中止路径：文案 = Lang.Error.SelectExitInfiniteLoopMB（skia Process.cs:484）。
+        // 官方唯一中止路径：文案 = Lang.Error.SelectExitInfiniteLoopMB（skia Process.cs:508，官方 :507）。
         LoopGuardCause.PlayerChoseExit -> InfiniteLoopTexts.exitError(
             alert?.textVariant ?: LangVariant.ZHS,
         )

@@ -37,6 +37,9 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
  * ./gradlew --configure-on-demand :core-vm:cleanTest :core-vm:test --tests "*SpritePoolBudgetProbe*" -i
  * ```
  * test worker 堆 3g（core-vm/build.gradle.kts），全落地驻留 ≈ 105 MiB + 瞬时份，挡位安全。
+ * **对 4.981 语料不成立**：261017 / 261111 根下这份 resources 表声明的负号段父图全落地约
+ * 10,098 MiB（2026-11-17 实测读数），本装置按「堆装不下就跳过」显式 assume 掉，
+ * 不落地一半去凑绿（那会让「驻留 == 尺寸算式」这条判据失效）；要量 4.981 用 `-PtestXmx=12g`。
  */
 class SpritePoolBudgetProbeTest {
 
@@ -119,6 +122,20 @@ class SpritePoolBudgetProbeTest {
         )
         assertTrue(parents.isNotEmpty(), "语料的 resources 下必须装得出父图")
 
+        // 装置前提：本用例要把负号段父图**全部落地**才能取稳态读数，需求 = 上面那一行体量。
+        // 本装置按 4.980 根校准（resources 313 MiB ⇒ 全落地 ≈ 105 MiB）；换 4.981 语料
+        // （261017 / 261111，resources 563/571 MiB，但 CSV 表声明的父图尺寸大得多）后实测
+        // 全落地 ≈ 10,098 MiB —— worker 堆 3g/4g 直接 OOM 掉整个 fork（2026-11-17 全量闸
+        // 唯一红就是它）。堆装不下就明确跳过，不改成「少落地几张」的假绿（那会让下面
+        // 「驻留 == 尺寸算式」这条判据永远成立不了）。
+        val workerHeapBytes = Runtime.getRuntime().maxMemory()
+        assumeTrue(
+            potentialBytes * 2 <= workerHeapBytes,
+            "负号段全落地需 ${potentialBytes / mib} MiB（×2 留瞬时份），worker 堆只有 " +
+                "${workerHeapBytes / mib} MiB ⇒ 跳过。量 4.981 语料请用 " +
+                "`-PtestXmx=12g` 或改用 4.980 根（本装置原校准口径）",
+        )
+
         // 全落地（真机上由 GDRAWSPRITE 合成读逐张触发；这里一次扫完拿稳态读数）。
         for (buffer in parents.values) buffer.pixels
         val resident = pool.resourceResidentPixelBytes()
@@ -130,7 +147,7 @@ class SpritePoolBudgetProbeTest {
             // —— 对照臂：无预算档（覆写成天文数字 ⇒ 判据恒不成立 = 加档前的旧行为）。
             System.setProperty(GraphicsPool.PIXEL_BUDGET_OVERRIDE_PROPERTY, (Long.MAX_VALUE / 2).toString())
             val decodesBefore = host.decodeCalls.get()
-            val freedNone = pool.evictDeferredPixelsWithinSharedBudget(0L)
+            val freedNone = pool.evictDeferredPixelsWithinSharedBudget(0L, usedHeapBytes = 0L, maxMemoryBytes = Long.MAX_VALUE)
             report(
                 "无预算档：退 ${freedNone / 262144L} MiB（应恒 0），驻留 ${pool.resourceResidentPixelBytes() / mib} MiB，" +
                     "解码计数 ${decodesBefore} → ${host.decodeCalls.get()}（旧行为零动作）",
@@ -140,7 +157,7 @@ class SpritePoolBudgetProbeTest {
 
             // —— 设备挡位臂：512 MiB 堆 ⇒ 共用预算 128 MiB（与正号段同一性质、同一算式）。
             System.setProperty(GraphicsPool.PIXEL_BUDGET_OVERRIDE_PROPERTY, (128L * mib).toString())
-            val freedIdle = pool.evictDeferredPixelsWithinSharedBudget(0L)
+            val freedIdle = pool.evictDeferredPixelsWithinSharedBudget(0L, usedHeapBytes = 0L, maxMemoryBytes = Long.MAX_VALUE)
             report(
                 "预算档 128 MiB·正号空载：退 ${freedIdle / 262144L} MiB，末态驻留 " +
                     "${pool.resourceResidentPixelBytes() / mib} MiB —— " +
@@ -156,7 +173,7 @@ class SpritePoolBudgetProbeTest {
             val sample = parents.values.first()
             val samplePixelsBefore = sample.pixels // 已驻留：拿住这一代数组做逐字对照
             val decodesBefore2 = host.decodeCalls.get()
-            val freedPress = pool.evictDeferredPixelsWithinSharedBudget(gfxWorksheetBytes)
+            val freedPress = pool.evictDeferredPixelsWithinSharedBudget(gfxWorksheetBytes, usedHeapBytes = 0L, maxMemoryBytes = Long.MAX_VALUE)
             val afterPress = pool.resourceResidentPixelBytes()
             val remainingBudgetMiB = (128L * mib - gfxWorksheetBytes) / mib
             report(

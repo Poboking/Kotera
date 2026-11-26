@@ -65,6 +65,15 @@ class PhaseRegistry private constructor(
     }
 
     /**
+     * 已绑定处理器的相位名（大写归一，空绑定的键不算）。
+     *
+     * 供回合边界读数区分两种 fired 同为 0 的情形：「本拍没到点的相位」
+     * （宿主记 SKIPPED / PHASE_NOT_DUE）与「到点但没有处理器」（派发记 SKIPPED / NO_HANDLERS）。
+     */
+    fun boundPhases(): Set<String> =
+        handlers.filterValues { it.isNotEmpty() }.keys.mapTo(LinkedHashSet()) { key -> key.phase }
+
+    /**
      * 派发一个相位。[time.phase] 为空 = 无相位，不派发。
      *
      * 顺序 = 包链接序（[packageRank]）+ 包内注册序；本轮处理器列表是派发时的快照。

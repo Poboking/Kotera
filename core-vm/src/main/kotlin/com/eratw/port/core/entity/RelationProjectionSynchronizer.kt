@@ -299,6 +299,21 @@ class RelationProjectionSynchronizer(
     }
 
     /**
+     * 世界重置：丢弃全部在册基线（整张角色表被世界级重置丢弃时用）。
+     *
+     * 与逐实体 [forget] 的差别是**不计 [lostWriteBacks]**：世界重置的语义是「这一局的
+     * 关系投影整体作废」，不是「因引擎直接删行而丢掉了脚本改动」；后者是事故诊断计数，
+     * 重置时按在册数刷高只会把真实损失淹进噪声。累计诊断（[unwrittenChanges] /
+     * [goneKeyCount] / [lastReport]）也不清 —— 历史读数不因重置消失。
+     *
+     * 整表清空时行已不存在，格子无从读取，差分回写不可达（同 [onCharacterRowDeleted]
+     * 的 ADR-005 即时语义：不假装无损）。幂等。
+     */
+    fun forgetAll() {
+        baselines.clear()
+    }
+
+    /**
      * 把 [columnKey] 从其它在册基线里摘掉（调用前本实体的基线已摘）。
      *
      * 退场清残留把该列键的两格写成了默认值；若别人的基线还留着这两格，他退场时会把

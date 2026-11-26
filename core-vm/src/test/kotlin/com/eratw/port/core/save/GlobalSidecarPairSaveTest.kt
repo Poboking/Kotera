@@ -18,6 +18,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.io.TempDir
 
@@ -56,6 +57,7 @@ class GlobalSidecarPairSaveTest {
         override fun syncFromCharaSlot(entityId: Long) = Unit
         override fun onCharacterRowsPermuted(oldToNewIndexMap: IntArray) = Unit
         override fun onCharacterRowDeleted(deletedIndex: Int) = Unit
+        override fun onWorldReset() = Unit
     }
 
     /**
@@ -285,6 +287,10 @@ class GlobalSidecarPairSaveTest {
         // ⇒ 端口抓取炸掉也必须收敛成 CodeEE(ErrorSavingGlobalData)，不能原样冒泡。
         val e = assertFailsWith<CodeEE> { f.fs.saveGlobal() }
         assertEquals(FileSystemOps.MES_SAVE_GLOBAL, e.message)
+        // 写路同族补账（2026-11-20）：官方文案逐字不变，根因经 initCause 进因果链
+        // ——口径同 526c667cf 的 loadData 两处，报告里能看出是「端口抓取」而不是「落盘」。
+        assertNotNull(e.cause, "根因必须挂进因果链（此前被整条吞掉）")
+        assertEquals("端口抓取炸了（注入）", e.cause!!.message)
     }
 
     // ------------------------------------------------------------------

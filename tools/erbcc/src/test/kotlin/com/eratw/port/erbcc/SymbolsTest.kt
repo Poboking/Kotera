@@ -2,6 +2,7 @@ package com.eratw.port.erbcc
 
 import com.erbcc.bridge.sizeConsts
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.isDirectory
@@ -9,6 +10,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -53,9 +55,13 @@ class SymbolsTest {
         assertEquals(56, plain.lineNo, "@G12_PLAIN 生效行（第三个定义）")
         assertTrue(!plain.isMethod, "@G12_PLAIN 是普通标签，不应是方法")
 
-        // spec: CalledFunction.cs:228-243 —— 桶序 PRI(1) → 普通(2) → LATER(3)，与定义序不同
+        // spec: CalledFunction.cs:228-243 桶序 PRI(1) → 普通(2) → LATER(3)，与定义序不同。
+        // 投桶口径自在册 B23 起为「并列加桶」（4.981 LabelDictionary.cs:228-235 四个平行 if）：
+        // 本 fixture 的三个 @EVENTTURNEND 各只带一枚旗标 ⇒ 成员数 == 执行序长度，无重叠。
+        // 双旗标重叠的形状由下面 [双旗标事件成员投两桶且执行序出现两次] 直接喂文本钉住。
         val eventOrder = table.eventCallOrder("EVENTTURNEND").map { it.lineNo }
         assertEquals(listOf(65, 61, 70), eventOrder, "@EVENTTURNEND 执行序应为 PRI→NORMAL→LATER")
+        assertEquals(3, table.defsOf("EVENTTURNEND").size, "夹具无 #PRI+#LATER 同体 ⇒ 展开不增项")
 
         // 标签名不得与系统语句名冲突（`BAR` 之类的名字会让原版多打一条装载告警）
         val conflicts = table.nameKeys.filter { it in ERB_INSTRUCTIONS }
@@ -68,6 +74,50 @@ class SymbolsTest {
         // 该 fixture 未声明 #LOCALSIZE
         assertEquals(0, plain.localSize)
         assertEquals(0, plain.localsSize)
+    }
+
+    /**
+     * 在册 B23：`#PRI`+`#LATER` 同体的事件标签在前端符号表投两个桶，flatten 出的执行序里
+     * 该成员出现两次 ⇒ erbcc 事件入口合成链自然发两条 `_CALL`（合成侧无去重）。
+     * spec: 4.981 `LabelDictionary.cs:228-235` 四个平行 if（`:233` 原注「#PRIかつ#LATERなら
+     * 二重に登録する。eramakerの仕様」）；1.824 同形 `LabelDictionary.cs:90-105`。
+     * PC 装载期原话：「同时使用#PRI和#LATER是重复的(这个函数会被调用2次)」
+     * （`<internal-workdir>/PC-CMP-VERDICT.md` 5.1）。夹具喂临时目录，不依赖也不改 fixtures/golden。
+     */
+    @Test
+    fun `双旗标事件成员投两桶且执行序出现两次`(@TempDir dir: Path) {
+        Files.writeString(
+            dir.resolve("B23.ERB"),
+            """
+            @EVENTTURNEND
+            #PRI
+            #LATER
+            	RETURN
+            @EVENTLOAD
+            #ONLY
+            	RETURN
+            @EVENTCOMEND
+            	RETURN
+            """.trimIndent(),
+        )
+        val table = LabelTable.build(dir, sizeConsts = { _, _ -> emptyMap() })
+        val dual = assertNotNull(table.eventBuckets("EVENTTURNEND"))
+        assertEquals(4, dual.size, "四桶结构不变（eventLabels[0..3] = only/prilist/normal/laterlist）")
+        assertEquals(0, dual[0].size)
+        assertEquals(1, dual[1].size, "#PRI → 桶 1")
+        assertEquals(0, dual[2].size, "isPri 为真 → 第四个 if 不进桶 2（LabelDictionary.cs:234）")
+        assertEquals(1, dual[3].size, "#LATER → 桶 3（并列加桶，不是排他单选）")
+        assertSame(dual[1][0], dual[3][0], "同一 def 在桶 1 与桶 3 各投一次")
+        assertEquals(2, table.eventCallOrder("EVENTTURNEND").size, "flatten 后执行序两次 → 合成两条 _CALL")
+        // #ONLY 除桶 0 外还落桶 2（第四个 if 只看 isPri/isLater）；真 VM 里桶 2 那份被 FinishEvent 截掉
+        val only = assertNotNull(table.eventBuckets("EVENTLOAD"))
+        assertEquals(1, only[0].size, "#ONLY → 桶 0")
+        assertEquals(1, only[2].size, "第四个 if 不看 isOnly → 桶 2 也进")
+        assertEquals(2, table.eventCallOrder("EVENTLOAD").size, "#ONLY 同样双投（派发期由整链终止裁决）")
+        // 无旗标成员只落桶 2
+        val plain = assertNotNull(table.eventBuckets("EVENTCOMEND"))
+        assertEquals(listOf(0, 0, 1, 0), plain.map { it.size }, "无旗标只进 NORMAL 桶")
+        assertEquals(1, table.eventCallOrder("EVENTCOMEND").size)
     }
 
     @Test

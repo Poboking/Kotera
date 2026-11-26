@@ -16,9 +16,12 @@ import com.eratw.port.core.code.OperandRelocation
 import com.eratw.port.core.code.PoolRef
 import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.ResolverPolicy
+import com.eratw.port.core.code.SymbolCandidate
 import com.eratw.port.core.code.SymbolCatalog
 import com.eratw.port.core.code.checkPoolIndexBounds
+import com.eratw.port.core.expr.StrLiteral
 import com.eratw.port.core.proc.FuncMeta
+import java.util.Locale
 
 /**
  * 链接产物（M2-1 单位 C 的出口形状，era-arch-v61u.md §1）。
@@ -69,6 +72,11 @@ data class LinkInputs(
     val policy: ResolverPolicy,
     val baseSignatureOf: (String) -> String = { "" },
     val linkOrder: LinkOrder = LinkOrder(),
+    /**
+     * 覆盖裁决告警收集口（2026-11-23 KI 改判，BOARD KI-2）：撞名三态告警的透传链。
+     * 缺省空实现 = 现有调用点零变化；生产装配层收集后汇进装配报告告警面。
+     */
+    val diagnostics: (String) -> Unit = {},
 )
 
 /**
@@ -87,6 +95,10 @@ data class LinkInputs(
  *   基线，分类面 = [OpcodeRelocation] 机器表，与 [checkPoolIndexBounds] 同源）。
  *   跳转是函数内相对偏移
  *   （Opcode.kt `_JUMP` 注释），指令流拼接不改变函数内相对距离，**不需要 rebase**；
+ * - **未解析导入改判**（S9，CONTRACT-S9-MISSING-CALL.md）：缺提供者 / 事件名的导入
+ *   不再整组拒绝——链接器按名合成「缺名残桩」（[MissingCallStub]，运行期按名解析，
+ *   报错时机与文案 = 原版），死 `_CALL` 改写跳残桩；TRY 族（`b` bit31）死链折
+ *   `_NOP`（同 TRY 族缺目标跳过语义）；
  * - **元数据 rebase**：[FunctionInfo.entryPc]/labelPcs/callArgs 键加指令偏移；
  *   [FuncMeta.index]/defIndex 由 [LinkCandidateAssembler] 改写（defIndex 随绝对
  *   下标走 = 跨模块事件桶序按链接序落定）。
@@ -125,7 +137,8 @@ object ModuleLinker {
      * @throws LinkOrderException 依赖缺失 / 包重名 / 显式排序配置重复 / 依赖环。
      * @throws com.eratw.port.core.code.SymbolConflictException MODERN 下未声明重名。
      * @throws com.eratw.port.core.code.OverrideSignatureException 覆盖签名不可验证。
-     * @throws ImportResolutionException 导入无法解析（缺提供者 / 重复 / 事件名）。
+     * @throws ImportResolutionException 导入表形状病态（空白 / 重复名 / packageId 重复）
+     *   ——缺提供者 / 事件名**不再拒绝**（S9 改判：缺名残桩 + 告警）。
      * @throws RelocationException `_CALL.a` 无法决议（super 缺失 / 导入越域）。
      */
     fun link(inputs: LinkInputs): LinkedProgram {
@@ -159,8 +172,38 @@ object ModuleLinker {
         val starts = LinkCandidateAssembler.functionStarts(base.functions.size, sorted)
         val candidates = LinkCandidateAssembler.baseCandidates(baseMetas, BASE_OWNER_ID, baseSignatureOf) +
             LinkCandidateAssembler.assemble(sorted, starts)
-        val catalog = SymbolCatalog.build(candidates, policy)
-        val imports = ExternalImportTable.resolve(sorted.map { it.descriptor }, catalog)
+        val catalog0 = SymbolCatalog.build(candidates, policy, diagnostics = inputs.diagnostics)
+        val imports = ExternalImportTable.resolve(sorted.map { it.descriptor }, catalog0, inputs.diagnostics)
+
+        // ---- S9 改判 L3：未解析导入的缺名残桩（CONTRACT-S9-MISSING-CALL.md）----
+        // 按大写名全域去重一份、sort 落尾（确定性 ⇒ LinkFingerprint 可复现）；rawName 取
+        // 链接序首个原文名（栈可读）。catalog 两遍构建：pass1 诊断 → resolve → 残桩候选
+        // 追加 → pass2——残桩键 = MissingCallStub.KEY_PREFIX 前缀，不与真名撞键、不改
+        // 任何既有胜者/super 链 ⇒ pass2 对既有键的裁决与 pass1 逐位相同；无未解析导入时
+        // 不重建（catalog = catalog0，既有组合链接产物字节零变化）。
+        val stubRawByKey = LinkedHashMap<String, String>()
+        for (pkgId in imports.packageIds) {
+            for (u in imports.importsOf(pkgId)!!.unresolved) {
+                stubRawByKey.putIfAbsent(u.key, u.name)
+            }
+        }
+        val stubKeys = stubRawByKey.keys.sorted()
+        val stubFuncBase = base.functions.size + sorted.sumOf { it.functions.size }
+        val stubIndexByKey = LinkedHashMap<String, Int>()
+        val catalog = if (stubKeys.isEmpty()) {
+            catalog0
+        } else {
+            val stubCandidates = stubKeys.mapIndexed { i, key ->
+                SymbolCandidate(
+                    meta = MissingCallStub.funcMeta(stubFuncBase + i, key, stubRawByKey.getValue(key)),
+                    declaredOverride = false,
+                    ownerPackageId = MissingCallStub.OWNER_ID,
+                    signatureHash = "",
+                )
+            }
+            stubKeys.forEachIndexed { i, key -> stubIndexByKey[key] = stubFuncBase + i }
+            SymbolCatalog.build(candidates + stubCandidates, policy, diagnostics = inputs.diagnostics)
+        }
 
         // 窗口分配：指令 pc/字与四池基线按链接序累加（稠密无空洞；Long 判溢出）。
         val count = sorted.size
@@ -199,8 +242,9 @@ object ModuleLinker {
             "链接产物池计数溢出 Int：long=$longBase string=$stringBase expr=$exprBase stmt=$stmtBase"
         }
 
-        // 模块级自检 + 指令改写 + tail 拼接。
-        val tailWords = IntArray(wordOff.toInt() - base.codeSource.wordCount)
+        // 模块级自检 + 指令改写 + tail 拼接（尾部预置残桩字空间：S9 改判 L3）。
+        val stubWordsTotal = stubKeys.size * MissingCallStub.WORDS
+        val tailWords = IntArray(wordOff.toInt() - base.codeSource.wordCount + stubWordsTotal)
         var tailPos = 0
         for ((mi, m) in sorted.withIndex()) {
             val p = m.program
@@ -219,10 +263,19 @@ object ModuleLinker {
                 stmtBase = stmtBases[mi],
                 imports = imports.importsOf(m.descriptor.packageId),
                 catalog = catalog,
+                stubIndexByKey = stubIndexByKey,
             )
             words.copyInto(tailWords, tailPos)
             tailPos += words.size
         }
+
+        // ---- S9 改判 L3：残桩指令字落尾（expr 下标 = 模块池累计完的 exprBase + i）----
+        val stubExprBase = exprBase.toInt()
+        for ((i, key) in stubKeys.withIndex()) {
+            MissingCallStub.words(stubExprBase + i)
+                .copyInto(tailWords, tailPos + i * MissingCallStub.WORDS)
+        }
+        tailPos += stubWordsTotal
 
         // 四池：组合池 + 各模块条目逐位追加（append*Direct 不去重，与补丁续段同口径）。
         val pool = ConstantPool(
@@ -239,9 +292,14 @@ object ModuleLinker {
             for (e in mp.exprList) pool.appendExprDirect(e)
             for (st in mp.statementList) pool.addStatement(st)
         }
+        // S9 改判 L3：残桩名字表达式落尾（StrLiteral 原文名；_EVAL_STR 求值即得名）。
+        // 下标与残桩指令字的 exprBase + i 一致（appendExprDirect 按序追加）。
+        for (key in stubKeys) {
+            pool.appendExprDirect(StrLiteral(stubRawByKey.getValue(key)))
+        }
 
         // 函数表 rebase（tail 段新建实例；base 段零物化走惰性组合表）。
-        val tailFns = ArrayList<FunctionInfo>(sorted.sumOf { it.program.functions.size })
+        val tailFns = ArrayList<FunctionInfo>(sorted.sumOf { it.program.functions.size } + stubKeys.size)
         for ((mi, m) in sorted.withIndex()) {
             val off = instrOffsets[mi]
             for (f in m.program.functions) {
@@ -251,6 +309,15 @@ object ModuleLinker {
                 }
                 tailFns += nf
             }
+        }
+        // S9 改判 L3：残桩函数记录落尾（entryPc = 模块指令累计完的绝对基 + i×3；
+        // name = 导入原文名可读栈）。
+        val stubEntryBase = instrOff.toInt()
+        for ((i, key) in stubKeys.withIndex()) {
+            tailFns += MissingCallStub.functionInfo(
+                stubRawByKey.getValue(key),
+                stubEntryBase + i * MissingCallStub.INSTRUCTIONS,
+            )
         }
         val functions: List<FunctionInfo> = CompositeFunctionTable(base.functions, tailFns)
 
@@ -332,6 +399,7 @@ object ModuleLinker {
         stmtBase: Int,
         imports: ExternalImportTable.PackageImports?,
         catalog: SymbolCatalog,
+        stubIndexByKey: Map<String, Int>,
     ) {
         val pkg = module.descriptor.packageId
         val fns = module.program.functions
@@ -386,6 +454,23 @@ object ModuleLinker {
                             words[w + 2] = 0
                             words[w + 3] = 0
                             continue
+                        }
+                        // S9 改判 L2/L4：未解析导入。TRY 家族死链（编译期置 b bit31，
+                        // ErbProgramCompiler.emitCall 的 tryBit）缺目标 = 整条折 NOP
+                        //（同 NoSuperNop 口径，spec: FunctionIdentifier.cs:3577-3588
+                        // isTry → return）；其余改写为跳缺名残桩（运行期按名解析，
+                        // 报错时机与文案 = 原版 NotDefinedFunc / CallToEventFunc）。
+                        is CallRelocation.Outcome.MissingByName -> {
+                            if (b and Opcode.TRY_FLAG != 0) {
+                                words[w] = Opcode._NOP
+                                words[w + 1] = 0
+                                words[w + 2] = 0
+                                words[w + 3] = 0
+                                continue
+                            }
+                            na = requireNotNull(stubIndexByKey[outcome.name.uppercase(Locale.ROOT)]) {
+                                "缺名残桩表没有 ${outcome.name}——残桩合成与改写脱节"
+                            }
                         }
                     }
                 } else {

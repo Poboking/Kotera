@@ -319,21 +319,7 @@ object CmdSweep {
         sb.append("\n")
 
         val failures = records.filter { it.failed }
-        val clusters = failures
-            .groupBy { Ledger.fingerprint(it.cls, it.fn, it.line, it.pc, it.msg) }
-            .entries
-            .sortedWith(compareByDescending<Map.Entry<String, List<SweptRecord>>> { it.value.size }.thenBy { it.key })
-            .take(50)
-        sb.append("## 失败指纹 TOP（${clusters.size} 簇，按次数降序；指纹口径见 Ledger.fingerprint）\n\n")
-        sb.append("| 次数 | 状态 | 异常类 | 函数 | 行 | pc | message(归一化) | 指纹 |\n")
-        sb.append("|---|---|---|---|---|---|---|---|\n")
-        for ((fp, group) in clusters) {
-            val head = group.first()
-            sb.append(
-                "| ${group.size} | ${head.status} | ${head.cls} | ${head.fn} | ${head.line} | ${head.pc} | " +
-                    Ledger.normalizeMessage(head.msg).take(80) + " | ${fp.take(12)} |\n",
-            )
-        }
+        appendFailureLayers(sb, failures)
 
         // 语句覆盖率仪表（DBG1 增量）：口径见本文件头「语句覆盖率」节。
         sb.append("\n## 语句覆盖率\n\n")
@@ -355,6 +341,62 @@ object CmdSweep {
             sb.append("- （本片无可测样本）\n")
         }
         return sb.toString()
+    }
+
+    /**
+     * 失败分层的渲染（DBG-TOOLING 波）：先按指纹聚簇，再按 NoisePolicy 把历轮结构性噪声
+     * （裸跑伪造空实参必然产出的越界/EmptyRefVar/#FUNCTION 拒调）分出去——它们只累计
+     * 计数不占 TOP 榜位，TOP 表留给 fresh 线索。判定只看簇首条（同簇同模板）。
+     */
+    private fun appendFailureLayers(sb: StringBuilder, failures: List<SweptRecord>) {
+        val (noiseGroups, freshGroups) = partitionClusters(failures)
+        sb.append(
+            "- 失败分层: fresh 线索 ${freshGroups.sumOf { it.second.size }} 条（${freshGroups.size} 簇） / " +
+                "已知噪声 ${noiseGroups.sumOf { it.second.size }} 条（${noiseGroups.size} 簇，见下表）\n\n",
+        )
+        val clusters = freshGroups
+            .sortedWith(compareByDescending<Pair<String, List<SweptRecord>>> { it.second.size }.thenBy { it.first })
+            .take(50)
+        sb.append("## 失败指纹 TOP（fresh 线索，${clusters.size} 簇，按次数降序；指纹口径见 Ledger.fingerprint）\n\n")
+        sb.append("| 次数 | 状态 | 异常类 | 函数 | 行 | pc | message(归一化) | 指纹 |\n")
+        sb.append("|---|---|---|---|---|---|---|---|\n")
+        for ((fp, group) in clusters) {
+            val head = group.first()
+            sb.append(
+                "| ${group.size} | ${head.status} | ${head.cls} | ${head.fn} | ${head.line} | ${head.pc} | " +
+                    Ledger.normalizeMessage(head.msg).take(80) + " | ${fp.take(12)} |\n",
+            )
+        }
+
+        // 已知噪声表：模式判定见 NoisePolicy；只累计计数供趋势核对，不进 TOP 榜。
+        // 表按次数降序，全列（噪声族通常个位数簇）。
+        if (noiseGroups.isNotEmpty()) {
+            sb.append("\n## 已知噪声（${noiseGroups.size} 簇，符合 NoisePolicy 模式的结构性失败；只累计，不占 TOP 榜位）\n\n")
+            sb.append("| 次数 | 状态 | 函数数 | message(归一化样例) |\n")
+            sb.append("|---|---|---|---|\n")
+            for ((_, group) in noiseGroups.sortedWith(
+                compareByDescending<Pair<String, List<SweptRecord>>> { it.second.size }.thenBy { it.first },
+            )) {
+                val head = group.first()
+                val fnCount = group.map { it.fn }.distinct().size
+                sb.append("| ${group.size} | ${head.status} | $fnCount | " +
+                    Ledger.normalizeMessage(head.msg).take(80) + " |\n")
+            }
+        }
+    }
+
+    /**
+     * 失败簇分层（DBG-TOOLING 波）：按指纹聚簇后按 [NoisePolicy] 分成 (noise, fresh) 两组。
+     * 判定只看簇首条（同簇同模板 ⇒ 同噪声性）；两组内部各按（首次出现序）保持输入稳定序，
+     * 排序由调用方做。internal 供单测直接喂合成记录验证分层与噪声模式。
+     */
+    internal fun partitionClusters(
+        failures: List<SweptRecord>,
+    ): Pair<List<Pair<String, List<SweptRecord>>>, List<Pair<String, List<SweptRecord>>>> {
+        val grouped = failures.groupBy { Ledger.fingerprint(it.cls, it.fn, it.line, it.pc, it.msg) }
+        return grouped.entries
+            .map { it.key to it.value }
+            .partition { NoisePolicy.isKnownNoise(it.second.first().cls, it.second.first().msg) }
     }
 }
 

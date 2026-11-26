@@ -389,3 +389,25 @@
 | `RESETGLOBAL` | `FunctionCode.RESETGLOBAL` | `resetGlobalValues()` + `EmDataPools.clear(global)` + `EmDataPools.clear(staticSets)`；**未认领 global 槽（顶层 + EM）的清理 = 已落 L32** | 4.981 树 `Instraction.Child.cs:1970-1982` → `VariableEvaluator.ResetGlobalData`（`:1746-1755`）；`RemoveEMGlobalData` / `RemoveEMStaticData`（`VariableData.cs:4031-4079`） | 已落（L32：变量/EM 池 + 槽清理） |
 | 回标题 / 新开一局 | 语料 `TITLE.ERB:115` 的 `RESETDATA` 可达（与「新局」同一复位面） | 同 `RESETDATA`：旧档 normal/char/em-normal 切片不进入新局 | 同上 `ResetData`（`StatementExecutor` 的 `RESETDATA` 分支注释锚） | 已落（靠 `lastLoadNo` 闸，无需额外接线） |
 | 宿主快照 / 会话重建 | `SessionVault` 接回同一活 store | aux 槽**不进** VM / 宿主快照；重建后按「没有切片」处理（安全方向 = 不回写） | 无 C# 锚（移植侧宿主面） | `TODO(verify)`：是否把槽并入快照段（L15 交付已登记，卡点：需宿主快照格式裁定） |
+
+## 11. mod 扩展数据不进 `.sav` 本体：`.rt2` 侧车交叉引用（2026-11-19，MODDX4-D1）
+
+> 本节是导航与边界声明，**不修改 §1-§10 的任何 `.sav` 语义**。mod 存档容器 ABI 的权威 =
+> `specs/mod-save.yaml`；mod 代码产物与 `mods/rt2` 盘面 = `specs/erbm-format.md`；
+> era-arch-v61u.md §8 只做叙事导航。
+
+- **mod 扩展数据不进 `.sav` 本体**：`saveNN.sav` / `global.sav` 保持 PC Emuera 兼容的原版结构
+  （§1-§3 与 §7-§10 的全部 `.sav` 语义不动）。mod 的每包存储、Mod CSV 注入值、实体图、注册表
+  快照、虚拟 NO 映射、决策/任务态全部走本体文件名后接 `.rt2` 的伴生容器（`saveNN.sav.rt2` /
+  `global.sav.rt2`），与本体组成一个逻辑存档单元、走同一配对事务。
+  锚：`core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt:385-386`（伴生路径）、
+  `:476-498`（两成员事务）；`core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:12`。
+- **PC 互通诚实口径（规约面）**：`.sav` 本体可被 PC Emuera 读写；随行的 `.rt2` 扩展数据 PC
+  不识别——**完整扩展存档（带 `.rt2`）在 PC Emuera 上不保证可继续游戏**。PC 玩过同一槽再传回
+  安卓 = 检测 `.rt2` 绑定失配/缺失 → 上警告（扩展状态可能滞后或丢失），不是静默应用；不存在
+  「100% 互通」（era-arch-v61u.md:223-231 兼容性矩阵，v6.2-c 起该表述作废）。
+  锚：`SidecarSaveBundle.kt:49-51`、`SaveService.kt:28-30`、`FileSystemOps.kt:514-552`。
+  玩家可见的三语文案归 D3 波，本节只落规约口径。
+- **实体数据严禁寄生 `.sav` 的 emData/MapValue**（审计 19.19 + sidecar 裁定）：§9 的 EM 段
+  未认领回写例外（B3-EM）只针对原版 EM 容器语义，与 `.rt2` 实体面无交集。
+  锚：`SidecarSaveBundle.kt:49`。

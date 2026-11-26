@@ -13,6 +13,7 @@ import com.eratw.port.core.compile.FunctionBytecode
 import com.eratw.port.core.compile.GlobalNameLayout
 import com.eratw.port.core.err.CodeEE
 import com.eratw.port.core.err.erbDisplayLine
+import com.eratw.port.core.frontend.DimKeyword
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.OperandType
 import com.eratw.port.core.expr.ParserConfig
@@ -50,6 +51,7 @@ import com.eratw.port.core.stmt.InstructionStmt
 import com.eratw.port.core.stmt.LineParser
 import com.eratw.port.core.stmt.ParamDefault
 import com.eratw.port.core.stmt.PrintDataStmt
+import com.eratw.port.core.stmt.ParamConsts
 import com.eratw.port.core.stmt.SharpStmt
 import com.eratw.port.core.stmt.Statement
 import com.eratw.port.core.stmt.IntAsignArgument
@@ -703,7 +705,17 @@ object CorpusCompile {
             // evalSharpInt（符号层 #LOCALSIZE→FuncMeta.localSize）吃同一份 constValues，
             // 两侧不许分叉。不注入则语句层把语料 2 处 `#LOCALSIZE 人物数量上限`
             // （fromEN/MISC.ERB:1246、M_KOJO_K63_独自関数.ERB:46）静默折成 0。
-            dimConsts = symbolTable.config.constValues,
+            consts = ParamConsts(
+                ints = symbolTable.config.constValues,
+                // 字符串标量 CONST 表（ERH `#DIMS CONST X = "..."`）：解析前就在符号表的
+                // erhDimConsts 里，先折成名→值表喂给本解析器，供 `@F(ARGS:1 = X)` 省略位折叠。
+                // 与下方 `foldStringConstants`（依赖解析后的 globalDimDecls）分开，避免时序倒置；
+                // 只取「标量 + CONST + 字符串字面量初值」的项，前向引用/非字面量初值留空不猜。
+                strs = foldErhStringConsts(symbolTable.erhDimConsts),
+                // 浮点标量 CONST 表（ERH `#DIMF CONST X = 1.5`）：同一条「解析前即在册」理由，
+                // 供 `@F(#DIMF 形参 = X)` 的省略位折叠。PC 判词见 ParamConsts.floats 的 KDoc。
+                floats = foldErhFloatConsts(symbolTable.erhDimConsts),
+            ),
         )
         // ENGC-3b：行首预识别的词法器（与 LineParser 内部同款配置；与 parseCodeLine 的分派
         // 同构：trimStart + readSingleIdentifier，识别失败交给 parser 自身既有错误路径）。
@@ -1701,9 +1713,9 @@ object CorpusCompile {
                         s.paramDefaults.getOrNull(i),
                     )
                 }
-                SignatureExport.Source(
+                com.eratw.port.core.frontend.SignatureExport.Source(
                     key = u.sigKey,
-                    signature = SignatureExport.FunctionSignature(
+                    signature = com.eratw.port.core.frontend.SignatureExport.FunctionSignature(
                         params = params,
                         returnChannel = SignatureExport.returnChannelOf(
                             scan.funcTypes[u.sigKey.uppercase(Locale.ROOT)],
@@ -1796,6 +1808,93 @@ object CorpusCompile {
     //   LoadLabelTitle 消费（CONFIG-WIRE U4）。报表本体不复刻 ⇒ 半接。
     // - ReduceArgumentOnLoad：仅 ArgumentParser.cs:44/58/125/235/248/284 三构建器的装载期
     //   Restructure 常量折叠，本仓有意不做这一遍（stmt/ArgBuilders.kt 类头）⇒ 纯数据不接。
+
+    /**
+     * ERH `#DIMS CONST` 的**字符串**常量预扫表（名大写 → 值）。
+     *
+     * 与 [foldStringConstants] 的区别 = 时序：本表只读符号表 [LabelTable.erhDimConsts]
+     * （[LabelTable.build] 阶段即在册的 ERH `#DIM` 原文 DimSpec），在 [LineParser] 装配前
+     * 就能算出；后者要等解析循环后的 `globalDimDecls`（含前向引用不动点）才算得出。
+     * `@F(ARGS:1 = MYSTR)` 的默认值在解析期就要折，故必须走本预扫表。
+     *
+     * 只收「CONST + 字符串 + 标量（`dims.size == 1`） + 字面量初值」的项：初值原文
+     * `initializer` 形如 `"abc"`（含引号），这里做最小的引号剥离与转义还原
+     * （口径同 `UserVariables` 的词法器：`\"`→`"`、`\\`→`\`、`\n`/`\t` 还原）。
+     * 初值不是字符串字面量（常量名前向引用 / 插值 / 多值）就不收 —— 不猜，
+     * 交给 [foldStringConstants] 的不动点那遍或运行期装载报告。
+     */
+    /**
+     * ERB 字符串字面量的转义表（词法层口径：`\n`/`\t`/`\"`/`\\`）。表外转义一律放弃折叠。
+     */
+    private val erhStrEscapes: Map<Char, Char> =
+        mapOf('n' to '\n', 't' to '\t', '"' to '"', '\\' to '\\')
+
+    private fun foldErhStringConsts(dimSpecs: List<com.eratw.port.core.frontend.DimSpec>): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        for (spec in dimSpecs) {
+            val value = erhStringConstValue(spec) ?: continue
+            out.putIfAbsent(spec.name.uppercase(Locale.ROOT), value)
+        }
+        return out
+    }
+
+    /** 单个 ERH `#DIMS CONST` 项的字符串初值（不合格 ⇒ null，**不猜**，见 [foldErhStringConsts]）。 */
+    private fun erhStringConstValue(spec: com.eratw.port.core.frontend.DimSpec): String? =
+        literalBodyOf(spec)?.let(::unescapeLiteralBody)
+
+    /**
+     * ERH `#DIMF CONST` 的**浮点**常量预扫表（名大写 → 值）。
+     *
+     * 与 [foldErhStringConsts] 同一条时序理由：符号表 [LabelTable.erhDimConsts] 在解析前即在册，
+     * 而 `@F(#DIMF 形参 = MYFLT)` 的默认值在解析期就要折。PC 判词（4.981 桌面宿主
+     * `--CliDebug`）：ERH `#DIMF CONST MYFLT = 1.5` + `@F(ARG, PFLT = MYFLT)` + `CALL F, 0`
+     * ⇒ 15（×10 口径）= 折成 `SingleFloatTerm(1.5)`，与整型/字符串常量名同一条 `Restructure`。
+     *
+     * 只收「`#DIMF` + CONST + 标量（一维、单值初值）」的项；初值原文（[DimSpec.initializer]）
+     * 必须能直接解析成 double 字面量（整数字面量按宽化收，fork 口径）。多值 / 表达式 /
+     * 缺初值 / 非 CONST 一律不收 —— 不猜。
+     */
+    private fun foldErhFloatConsts(dimSpecs: List<com.eratw.port.core.frontend.DimSpec>): Map<String, Double> {
+        val out = LinkedHashMap<String, Double>()
+        for (spec in dimSpecs) {
+            if (!spec.isFloat || DimKeyword.CONST !in spec.keywords || spec.dims.size > 1) continue
+            val value = spec.initializer?.trim()?.toDoubleOrNull() ?: continue
+            out.putIfAbsent(spec.name.uppercase(Locale.ROOT), value)
+        }
+        return out
+    }
+
+    /** 初值原文必须是**单个**字符串字面量（`"abc"`）：剥引号后交出体内原文。 */
+    private fun literalBodyOf(spec: com.eratw.port.core.frontend.DimSpec): String? = spec.initializer
+        ?.trim()
+        ?.takeIf { spec.isStr && DimKeyword.CONST in spec.keywords && spec.dims.size == 1 }
+        ?.takeIf { it.length >= 2 && it.first() == '"' && it.last() == '"' }
+        ?.let { it.substring(1, it.length - 1) }
+
+    /**
+     * 字符串字面量体内的转义还原（口径同 `UserVariables` 的词法器）；遇到本表不认识的
+     * 转义就整体放弃（返回 null）—— 宁可不在册，也不折出与运行期词法器不同的值。
+     */
+    private fun unescapeLiteralBody(body: String): String? {
+        val sb = StringBuilder(body.length)
+        var i = 0
+        var ok = true
+        while (ok && i < body.length) {
+            if (body[i] == '\\') {
+                val decoded = if (i + 1 < body.length) erhStrEscapes[body[i + 1]] else null
+                if (decoded == null) {
+                    ok = false
+                } else {
+                    sb.append(decoded)
+                    i += 2
+                }
+            } else {
+                sb.append(body[i])
+                i++
+            }
+        }
+        return if (ok) sb.toString() else null
+    }
 
     /**
      * 全局 `#DIMS CONST` 的**字符串**常量表（名大写 → 值）。

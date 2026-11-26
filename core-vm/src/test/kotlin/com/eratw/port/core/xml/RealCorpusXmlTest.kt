@@ -36,13 +36,14 @@ import kotlin.test.assertTrue
  * **按根取列**（xmlcorpus 波，2026-11-06）：本类不再钉单一版本读数。语料根只认
  * `ERATW_GAMEDIR`（闸配方 AGENTS.md §5），版本档由 [com.eratw.port.boot.CorpusProfile.detect]
  * 从 `ERB/DIM.ERH` 的 `NOW_VERSION` 判出，两列读数集中在 [XmlCorpusFacts]：
- * 4.980 = `eratw-画蛇添足版eratw4.980`、4.981 = `eraTW4.981-261017-EAGLOV3`。
+ * 4.980 = `eratw-画蛇添足版eratw4.980`、4.981 = `eraTW4.981-261111-EAGLOV3`
+ * （261017 已退役；4.981 列读数已在 2026-11-14 语料换代后按 261111 重采）。
  *
  * 语料规模（两根实读）：
  * - 4.980：98 个 XML —— `resources` 下 93 个精灵表 + `lang/emuera.zhs.xml` +
  *   `plugins` 下 4 个；3,263,831 字节 / 48,518 元素 / 76,902 属性；
  * - 4.981：4 个（全在 `plugins/`；`resources` 下精灵表在该版已改成 CSV ⇒ 0 个 XML），
- *   609,494 字节 / 35,271 元素 / 46 属性
+ *   625,315 字节 / 36,294 元素 / 46 属性
  *   （.NET 8 DOM 口径：xmlns 声明也是 XmlAttribute；dotnet 8.0.425 对 schema.xml 实测
  *   elems=20 / attrs=46，根上 id、xmlns、xmlns:xs、xmlns:msdata 全计入）；
  * - 带 BOM 的三份：tw_csv_chs / tw_taste_chs / schema；bbas_dataset 不带（两根同值，实读）。
@@ -350,7 +351,7 @@ class RealCorpusXmlTest {
      *
      * 4.981 的 anime.xml / kagerou.xml / Resource.xml 都已随 resources 精灵表移除
      * （4.980 的对拍锚点见 git 历史），换 plugins 下在位的等价锚点（两根都在位）：
-     * `tw_csv_chs.xml`（`<map><p><k>…</k><v>…</v></p>`，4.980 = 4400 个 p / 4.981 = 7804 个）、
+     * `tw_csv_chs.xml`（`<map><p><k>…</k><v>…</v></p>`，4.980 = 4400 个 p / 4.981 = 7721 个）、
      * `bbas_dataset.xml`（`<DocumentElement><bbas_dataset>…`，4.980 = 160 条 / 4.981 = 167 条，
      * 含条件谓词目标）、`schema.xml`（根通配步 + 属性步目标；带前缀的名字步在 .NET SelectNodes
      * 没有 XmlNamespaceManager 时直接抛 XPathException，移植同口径，锚点不能用前缀）。

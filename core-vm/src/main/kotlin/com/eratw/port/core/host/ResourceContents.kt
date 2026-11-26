@@ -2,6 +2,7 @@ package com.eratw.port.core.host
 
 import com.eratw.port.core.data.text.DetectedTextDecoder
 import com.eratw.port.core.image.PngImage
+import com.eratw.port.core.mod.EraA3AssetOverlay
 
 /**
  * CSV 资源表的数据面：宿主只负责扫盘、读字节、读图片头、解码，语义全在 [ResourceContents]。
@@ -136,7 +137,27 @@ object ResourceContents {
         class Frame(val animeName: String, val frame: SpritePool.Frame) : Row
     }
 
-    fun load(pool: SpritePool, host: ResourceFileHost): Report {
+    /**
+     * 既有装载口（映射关掉的反向证明锚）：传空覆盖表，行为与改造前逐字相同。
+     *
+     * 生产装配点在 `GameHost.installGraphics`（`GameHost.kt:1451`）——该文件不在本波独占面，
+     * 覆盖表注入属「需组长接线」；本口保留即保证未接线时零行为变化。
+     */
+    fun load(pool: SpritePool, host: ResourceFileHost): Report =
+        load(pool, host, EraA3AssetOverlay.AssetMap.EMPTY)
+
+    /**
+     * 带官方素材覆盖表的装载口（ERA-A3 方案 B / 二期 B）。
+     *
+     * CSV 行登记成 sprite 时，sprite 名即官方资源名；查 [assetOverlay] 命中 [Kind.SPRITE] 映射后，
+     * 把这份 sprite 的**图源路径**改指向 mod 资源（`mods/rt2/<pkg>.assets/...`，与官方资源同处一个
+     * gameRoot，见 [ResourceFileHost] 的 path 口径）。官方消费面 `SPRITECREATED` / `RM_RESOURCECHECK_LOAD`
+     * 查的仍是原 sprite 名（`ResourceContents.kt:62-65`），故「换皮不改脚本」。
+     *
+     * fail-closed：映射目标文件打不开（[ResourceFileHost.imageSize] 返回 null）⇒ 回落官方路径、
+     * 加一条 WARN；侧车坏档时上层聚合给的是空表 ⇒ 全链回落、逐字不变（不静默吞错、不崩）。
+     */
+    fun load(pool: SpritePool, host: ResourceFileHost, assetOverlay: EraA3AssetOverlay.AssetMap): Report {
         val warnings = ArrayList<String>()
         val registered = HashMap<String, SpritePool.Sprite>()
         val buffers = HashMap<String, GraphicsBuffer>()
@@ -166,7 +187,7 @@ object ResourceContents {
                 if (line.isEmpty() || line.startsWith(';')) return@forEachIndexed
                 val where = "$csv:${index + 1}"
                 val tokens = splitColumns(line)
-                when (val row = parseRow(tokens, dir, where, currentAnime, host, buffers, warnings)) {
+                when (val row = parseRow(tokens, dir, where, currentAnime, host, buffers, warnings, assetOverlay)) {
                     null -> Unit
                     is Row.Frame -> {
                         if (row.animeName == currentAnime?.name) currentAnime?.frames?.add(row.frame)
@@ -210,6 +231,7 @@ object ResourceContents {
         host: ResourceFileHost,
         buffers: MutableMap<String, GraphicsBuffer>,
         warnings: MutableList<String>,
+        assetOverlay: EraA3AssetOverlay.AssetMap,
     ): Row? {
         if (tokens.size < 2) return null
         val name = tokens[0].trim().uppercase()
@@ -235,14 +257,28 @@ object ResourceContents {
         }
 
         val fileName = second.replace('\\', '/')
-        val path = if (dir.isEmpty()) fileName else "$dir/$fileName"
+        val officialPath = if (dir.isEmpty()) fileName else "$dir/$fileName"
+
+        // ERA-A3 覆盖：官方 sprite 名命中侧车映射时，图源改指向 mod 资源（同名换皮）。
+        // 先探 mod 资源文件头；打不开则 WARN 并回落官方路径（fail-closed，不静默吞错）。
+        // 映射关掉（空表）时 targetPath 恒 null ⇒ 下面 path 就是 officialPath，逐字等同改造前。
+        val override = assetOverlay.sprite(name)
+        val overridePath = override?.resourcePath
+        val overrideSize = overridePath?.let { host.imageSize(it, null) }
+        if (overridePath != null && (overrideSize == null || overrideSize.size < 2)) {
+            warnings += "$where: 覆盖资源打不开，回落官方图：$overridePath"
+        }
+        val useOverride = overridePath != null && overrideSize != null && overrideSize.size >= 2
+        val path = if (useOverride) overridePath!! else officialPath
+
         val buffer = buffers[path] ?: run {
-            // 登记期**只读文件头**（`imageSize(path, null)`）：绝对不能在这里 `readBytes`。
+            // 覆盖图源的文件头已在上面探过（useOverride 分支），复用读数、不重复读盘；
+            // 否则走原路探官方文件头。登记期**只读文件头**，绝对不能在这里 `readBytes`。
             // 2026-11-03 真机现场（vivo V2199A / 512 MiB）：4.981 的 266 个 CSV 引用 2,795 张图、
             // 共 570.6 MB，旧写法把每张图的整份压缩字节读进堆并让下面的延迟 lambda 捕获钉住
             // （`evictDeferred` 换代时还会把同一个 lambda 带进新代），装载没跑完堆就到 510 MiB。
             // 字节只在真正要像素时读（下面 lambda 内），解完即弃。
-            val size = host.imageSize(path, null)
+            val size = if (useOverride) overrideSize else host.imageSize(path, null)
             if (size == null || size.size < 2) {
                 // 头部读不出尺寸 = 文件打不开或格式不认，宿主侧无法再区分这两者（旧文案两分，
                 // 但两分的前提是先把整份字节读进来 —— 那正是要拆掉的东西）。

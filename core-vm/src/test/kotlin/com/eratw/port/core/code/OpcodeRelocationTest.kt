@@ -53,7 +53,7 @@ class OpcodeRelocationTest {
     private val mark = 0x51515151
 
     private fun specRef(op: Int, slot: Int): PoolRef {
-        // 不变量 1：c 槽在 0..248 全域都不是池引用。
+        // 不变量 1：c 槽在 0..249 全域都不是池引用。
         if (slot == 2) return PoolRef.NONE
         // isa 语句 marker：a = 语句池下标，b = 0，c = NONE（契约 C3）。
         if (op in 29..197) return if (slot == 0) PoolRef.STATEMENT else PoolRef.NONE
@@ -61,7 +61,7 @@ class OpcodeRelocationTest {
             Opcode._SET_INT -> 1
             Opcode._SET_STR -> 1
             Opcode._PRINT_LITERAL -> 0
-            Opcode._EVAL_INT, Opcode._EVAL_STR, Opcode._EVAL_INT_JZ -> 0
+            Opcode._EVAL_INT, Opcode._EVAL_STR, Opcode._EVAL_INT_JZ, Opcode._EVAL_FLOAT -> 0
             Opcode._CALL -> 0
             Opcode._STK_PUSH_IMM -> 0
             Opcode._STK_PUSH_STR,
@@ -78,7 +78,7 @@ class OpcodeRelocationTest {
         return when (op) {
             Opcode._SET_INT, Opcode._STK_PUSH_IMM -> PoolRef.CONSTANT
             Opcode._SET_STR, Opcode._PRINT_LITERAL -> PoolRef.STRING
-            Opcode._EVAL_INT, Opcode._EVAL_STR, Opcode._EVAL_INT_JZ -> PoolRef.EXPR
+            Opcode._EVAL_INT, Opcode._EVAL_STR, Opcode._EVAL_INT_JZ, Opcode._EVAL_FLOAT -> PoolRef.EXPR
             Opcode._CALL -> PoolRef.FUNCTION
             Opcode._RETF -> PoolRef.EXPR_NULLABLE
             else -> PoolRef.STRING
@@ -185,7 +185,7 @@ class OpcodeRelocationTest {
     fun `表稠密覆盖全部操作码且与规约逐槽一致`() {
         assertEquals(Opcode.MAX_OPCODE + 1, OpcodeRelocation.size, "表必须按 0..MAX_OPCODE 稠密建满")
         assertEquals(Opcode.NAMES.size, OpcodeRelocation.size, "表与名字表同长（追加操作码漏扩 NAMES 也在这里红）")
-        assertEquals(249, OpcodeRelocation.size, "当前末条是 _GT_JZ(248)；追加操作码时本钉跟着改")
+        assertEquals(250, OpcodeRelocation.size, "当前末条是 _EVAL_FLOAT(249)；追加操作码时本钉跟着改")
         for (op in 0..Opcode.MAX_OPCODE) {
             val rel = OpcodeRelocation.of(op)
             for (slot in 0..2) {

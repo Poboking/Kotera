@@ -11,6 +11,7 @@ import com.eratw.port.core.vars.CharacterTemplate
 import com.eratw.port.core.vars.VariableStore
 import com.eratw.port.core.mod.ModDeclarationAdapter
 import com.eratw.port.core.mod.ModRuntimeHost
+import com.eratw.port.core.mod.ModSettingsSnapshot
 import com.eratw.port.core.mod.ModStorageStore
 import com.eratw.port.core.patch.DeclarationRegistry
 import com.eratw.port.core.patch.DeclarationSnapshot
@@ -23,6 +24,23 @@ import com.eratw.port.modapi.FieldType
 import com.eratw.port.modapi.ModContext
 import com.eratw.port.modapi.ModManifest
 import com.eratw.port.modapi.RuntimeScheduler
+import com.eratw.port.modapi.add
+import com.eratw.port.modapi.get
+import com.eratw.port.modapi.has
+import com.eratw.port.modapi.neighbors
+import com.eratw.port.modapi.put
+import com.eratw.port.modapi.remove
+import com.eratw.port.modapi.setValue
+import com.eratw.port.modapi.valueOf
+import com.eratw.port.modfamily.generated.FamilyKeys
+import com.eratw.port.modapi.create
+import com.eratw.port.modapi.getInt
+import com.eratw.port.modapi.setInt
+import com.eratw.port.modapi.getStr
+import com.eratw.port.modapi.setStr
+import com.eratw.port.modapi.getRef
+import com.eratw.port.modapi.setRef
+import com.eratw.port.modapi.query
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -107,6 +125,17 @@ class FamilyModTest {
             shortIdOf = shortIdOf,
             projector = projector,
         )
+        // per-mod 设置面：生产装配在 install 前注入按包快照（ModRuntimeAssembly 同序）；
+        // 本夹具用**声明默认值**当测试替身（persistedValues 空表 ⇒ resolveText 回退 default），
+        // 不另立默认值，也不改载体语义。
+        val settingsManifest = manifests.firstOrNull { it.packageId == FamilyDeclarations.PACKAGE_ID }
+            ?: FamilyDeclarations.manifest
+        host.settings = mapOf(
+            FamilyDeclarations.PACKAGE_ID to ModSettingsSnapshot(
+                FamilyDeclarations.PACKAGE_ID,
+                ModDeclarationAdapter.toDescriptor(settingsManifest).settings,
+            ),
+        )
         val report = host.install(mods)
         assertEquals(1, report.size)
         assertNull(report.single().failure, "装载不得失败：${report.single()}；日志=$logs")
@@ -134,33 +163,33 @@ class FamilyModTest {
     @Test
     fun adoptedChildExistsWithItsIdentityAndParentEdge() {
         val session = start()
-        val father = session.entities.create(FamilyDeclarations.ARCHETYPE_CHILD)
+        val father = session.entities.create(FamilyKeys.archetype)
         val child = session.family.adoptChild(title = "长女", father = father)
 
         assertTrue(session.entities.exists(child), "create 之后实体必须存在")
         assertEquals(EntityState.ACTIVE, session.entities.stateOf(child))
-        assertEquals("长女", session.entities.getStr(child, FamilyDeclarations.FIELD_TITLE))
-        assertEquals(0L, session.entities.getInt(child, FamilyDeclarations.FIELD_AGE))
-        assertEquals(father, session.entities.getInt(child, FamilyDeclarations.FIELD_FATHER).let { EntityId(it) })
+        assertEquals("长女", session.entities.getStr(child, FamilyKeys.title))
+        assertEquals(0L, session.entities.getInt(child, FamilyKeys.age))
+        assertEquals(father, session.entities.getRef(child, FamilyKeys.father))
 
         assertTrue(
-            session.relationships.has(father, FamilyDeclarations.RELATION_PARENT, child),
+            session.relationships.has(father, FamilyDeclarations.PARENT, child),
             "父→子正向边必须挂上",
         )
-        assertEquals(listOf(child), session.relationships.neighbors(father, FamilyDeclarations.RELATION_PARENT, true))
+        assertEquals(listOf(child), session.relationships.neighbors(father, FamilyDeclarations.PARENT, true))
         assertTrue(
-            session.relationships.has(child, FamilyDeclarations.RELATION_LINEAGE, father),
+            session.relationships.has(child, FamilyDeclarations.LINEAGE, father),
             "autoInverse 生成的子→父反向边必须在公开面查得到（这就是 lineage 要进五域声明的原因）",
         )
-        assertEquals(listOf(father), session.relationships.neighbors(child, FamilyDeclarations.RELATION_LINEAGE, true))
+        assertEquals(listOf(father), session.relationships.neighbors(child, FamilyDeclarations.LINEAGE, true))
     }
 
     @Test
     fun childWithoutFatherCarriesNullRefAndNoEdges() {
         val session = start()
         val child = session.family.adoptChild(title = "孤女", father = null)
-        assertEquals(EntityId.NULL.raw, session.entities.getInt(child, FamilyDeclarations.FIELD_FATHER))
-        assertEquals(emptyList(), session.relationships.neighbors(child, FamilyDeclarations.RELATION_LINEAGE, false))
+        assertEquals(EntityId.NULL, session.entities.getRef(child, FamilyKeys.father))
+        assertEquals(emptyList(), session.relationships.neighbors(child, FamilyDeclarations.LINEAGE, false))
     }
 
     @Test
@@ -169,10 +198,10 @@ class FamilyModTest {
         val a = session.family.adoptChild("甲", father = null)
         val b = session.family.adoptChild("乙", father = null)
         repeat(3) { session.family.advanceOneDay() }
-        assertEquals(3L, session.entities.getInt(a, FamilyDeclarations.FIELD_AGE))
-        assertEquals(3L, session.entities.getInt(b, FamilyDeclarations.FIELD_AGE))
+        assertEquals(3L, session.entities.getInt(a, FamilyKeys.age))
+        assertEquals(3L, session.entities.getInt(b, FamilyKeys.age))
         assertEquals(3L, session.family.state.growthTicks)
-        assertEquals("3", session.context.storage.get(FamilyDeclarations.STORAGE_GROWTH_TICKS))
+        assertEquals("3", session.context.storage.get(FamilyDeclarations.GROWTH_TICKS))
     }
 
     @Test
@@ -191,19 +220,19 @@ class FamilyModTest {
     @Test
     fun deceasedChildKeepsItsIdentityRelationsAndData() {
         val session = start()
-        val father = session.entities.create(FamilyDeclarations.ARCHETYPE_CHILD)
+        val father = session.entities.create(FamilyKeys.archetype)
         val child = session.family.adoptChild("次女", father)
-        session.entities.setStr(child, FamilyDeclarations.FIELD_TITLE, "次女·成年")
+        session.entities.setStr(child, FamilyKeys.title, "次女·成年")
         repeat(2) { session.family.advanceOneDay() }
 
         session.family.markDeceased(child)
 
         assertTrue(session.entities.exists(child), "RETIRED 不是删除：身份仍在表上")
         assertEquals(EntityState.RETIRED, session.entities.stateOf(child))
-        assertEquals("次女·成年", session.entities.getStr(child, FamilyDeclarations.FIELD_TITLE), "数据留着")
-        assertEquals(2L, session.entities.getInt(child, FamilyDeclarations.FIELD_AGE), "历史年龄留着")
+        assertEquals("次女·成年", session.entities.getStr(child, FamilyKeys.title), "数据留着")
+        assertEquals(2L, session.entities.getInt(child, FamilyKeys.age), "历史年龄留着")
         assertTrue(
-            session.relationships.has(father, FamilyDeclarations.RELATION_PARENT, child),
+            session.relationships.has(father, FamilyDeclarations.PARENT, child),
             "族谱边留着 —— 这就是不走 destroy 的全部理由",
         )
         assertEquals(0, session.family.state.registeredChildren, "但已退常规轮询，不再长年龄")
@@ -216,8 +245,8 @@ class FamilyModTest {
         val living = session.family.adoptChild("存者", null)
         session.family.markDeceased(gone)
         repeat(4) { session.family.advanceOneDay() }
-        assertEquals(0L, session.entities.getInt(gone, FamilyDeclarations.FIELD_AGE))
-        assertEquals(4L, session.entities.getInt(living, FamilyDeclarations.FIELD_AGE))
+        assertEquals(0L, session.entities.getInt(gone, FamilyKeys.age))
+        assertEquals(4L, session.entities.getInt(living, FamilyKeys.age))
     }
 
     // ------------------------------------------------------------------
@@ -275,14 +304,14 @@ class FamilyModTest {
         assertEquals(listOf(null, null), report.map { it.failure }, "两个 mod 都得干净装载：$logs")
 
         val family = (host.contextOf(FamilyDeclarations.PACKAGE_ID)!!)
-        val child = family.entities.create(FamilyDeclarations.ARCHETYPE_CHILD)
-        family.entities.setStr(child, FamilyDeclarations.FIELD_TITLE, "兼读生")
+        val child = family.entities.create(FamilyKeys.archetype)
+        family.entities.setStr(child, FamilyKeys.title, "兼读生")
         school.enroll(child, hours = 12L)
 
         assertEquals(12L, school.hoursOf(child), "学校包写的字段读得回来")
-        assertEquals("兼读生", family.entities.getStr(child, FamilyDeclarations.FIELD_TITLE), "家族包的字段不受影响")
+        assertEquals("兼读生", family.entities.getStr(child, FamilyKeys.title), "家族包的字段不受影响")
         assertEquals(
-            family.entities.getInt(child, FamilyDeclarations.FIELD_AGE),
+            family.entities.getInt(child, FamilyKeys.age),
             school.hoursOf(child) - 12L,
             "字段命名空间是全局一张表，隔离靠名字不重名：家族读 age、学校读 training，互不串值",
         )
@@ -310,8 +339,8 @@ class FamilyModTest {
         )
         val familyCtx = host.contextOf(FamilyDeclarations.PACKAGE_ID)!!
         val schoolCtx = host.contextOf(SchoolMod.PACKAGE_ID)!!
-        val a = familyCtx.entities.create(FamilyDeclarations.ARCHETYPE_CHILD)
-        val b = schoolCtx.entities.create(FamilyDeclarations.ARCHETYPE_CHILD)
+        val a = familyCtx.entities.create(FamilyKeys.archetype)
+        val b = schoolCtx.entities.create(FamilyKeys.archetype)
         assertNotEqualRaw(a, b)
         assertEquals(7, EntityIdCodec.pkgShortIdOf(a.raw), "家族包的 shortId 必须落在身份里")
         assertEquals(8, EntityIdCodec.pkgShortIdOf(b.raw))
@@ -353,7 +382,7 @@ class FamilyModTest {
         // 玩家重新启用它。
         offline.activate(FamilyDeclarations.PACKAGE_ID)
         val api = offline.apiFor(FamilyDeclarations.PACKAGE_ID)
-        assertEquals("5", api.get(FamilyDeclarations.STORAGE_GROWTH_TICKS), "重启用必须拿回原计数，不是 0")
+        assertEquals("5", api.get(FamilyDeclarations.GROWTH_TICKS), "重启用必须拿回原计数，不是 0")
     }
 
     // ------------------------------------------------------------------
@@ -363,7 +392,7 @@ class FamilyModTest {
     @Test
     fun declarationsAndGeneratedAccessorsDescribeTheSameSchema() {
         val component = FamilyDeclarations.manifest.components.single()
-        assertEquals(FamilyDeclarations.COMPONENT_FAMILY, component.name)
+        assertEquals(FamilyKeys.component.name, component.name)
         assertEquals(
             listOf("age", "father", "title"),
             component.fields.map { it.name }.sorted(),
@@ -373,12 +402,12 @@ class FamilyModTest {
         // 这一条就是「生成器拼了 组件名.字段名」那笔静默错数据的闸：常量对不上声明 ⇒ 红。
         assertEquals(
             component.fields.map { it.name }.toSet(),
-            setOf(FamilyDeclarations.FIELD_AGE, FamilyDeclarations.FIELD_TITLE, FamilyDeclarations.FIELD_FATHER),
+            setOf(FamilyKeys.age.name, FamilyKeys.title.name, FamilyKeys.father.name),
             "字段常量必须逐项等于 FieldDecl 的名字，否则读写全部落在失败哨兵上",
         )
-        assertEquals("age", FamilyDeclarations.FIELD_AGE)
-        assertEquals("title", FamilyDeclarations.FIELD_TITLE)
-        assertEquals("father", FamilyDeclarations.FIELD_FATHER)
+        assertEquals("age", FamilyKeys.age.name)
+        assertEquals("title", FamilyKeys.title.name)
+        assertEquals("father", FamilyKeys.father.name)
         // EntityRef 只能是整型（core 的不变量）；这里钉住声明层不漂移。
         assertTrue(component.fields.single { it.name == "father" }.isEntityRef)
         assertEquals(FieldType.INT, component.fields.single { it.name == "father" }.type)
@@ -388,19 +417,19 @@ class FamilyModTest {
     fun archetypeAndRelationshipAreDeclaredThroughTheSameManifest() {
         val manifest = FamilyDeclarations.manifest
         assertEquals(
-            listOf(FamilyDeclarations.ARCHETYPE_CHILD),
+            listOf(FamilyKeys.archetype.name),
             manifest.archetypes.map { it.name },
         )
         assertEquals(
-            listOf(FamilyDeclarations.COMPONENT_FAMILY),
+            listOf(FamilyKeys.component.name),
             manifest.archetypes.single().components,
         )
-        val parent = manifest.relationships.single { it.name == FamilyDeclarations.RELATION_PARENT }
+        val parent = manifest.relationships.single { it.name == FamilyDeclarations.PARENT.name }
         assertTrue(parent.autoInverse, "反向边由声明生成，业务不手写第二遍")
-        assertEquals(FamilyDeclarations.RELATION_LINEAGE, parent.inverseName)
+        assertEquals(FamilyDeclarations.LINEAGE.name, parent.inverseName)
         assertFalse(parent.cascadeOnDestroy, "族谱不得因为一次 destroy 就被抹边（KDoc 有裁定）")
         // 反向边类型必须也在五域里声明，否则 freeze 直接红（DeclarationRegistry.kt:582-594）。
-        val lineage = manifest.relationships.single { it.name == FamilyDeclarations.RELATION_LINEAGE }
+        val lineage = manifest.relationships.single { it.name == FamilyDeclarations.LINEAGE.name }
         assertFalse(lineage.autoInverse, "parent↔lineage 不得互相折返")
         assertNull(lineage.inverseName, "未启用 autoInverse 时带 inverseName 是声明层非法形状")
         assertFalse(lineage.cascadeOnDestroy, "两个方向的级联口径必须一致，否则半边族谱会先被抹")
@@ -438,12 +467,12 @@ class FamilyModTest {
     fun familyModPresentsAndWithdrawsAChildThroughThePublicRosterFacade() {
         val session = startProjected()
         val store = checkNotNull(session.store)
-        val father = session.entities.create(FamilyDeclarations.ARCHETYPE_CHILD)
+        val father = session.entities.create(FamilyKeys.archetype)
         val child = session.family.adoptChild("登场子", father = father)
 
         // P1-6 ②：生成访问器经 setRef 写的父引用，公开 getRef 与 INT 列逐位同源。
-        assertEquals(father, session.entities.getRef(child, FamilyDeclarations.FIELD_FATHER))
-        assertEquals(father.raw, session.entities.getInt(child, FamilyDeclarations.FIELD_FATHER))
+        assertEquals(father, session.entities.getRef(child, FamilyKeys.father))
+        assertEquals(father.raw, session.entities.getRef(child, FamilyKeys.father).raw)
 
         assertEquals(3, store.characters.count, "装置先铺 3 行原生角色")
         val generation = session.family.rosterGeneration
@@ -470,5 +499,60 @@ class FamilyModTest {
         val failure = assertFailsWith<UnsupportedOperationException> { session.family.presentChild(child) }
         assertTrue("F 车" in failure.message.orEmpty(), "异常必须点名 F 车装配缺口：${failure.message}")
         assertEquals(0, session.family.presentedChildren)
+    }
+
+    @Test
+    fun settingsNotInjectedFailsClosedInsteadOfSilentDefault() {
+        // 载体读设置走 context.settings：宿主没在 install 前注入按包快照时整面 fail-closed
+        // （SettingsApi 口径），**不**静默回退声明默认值。装置刻意不复用 start()（那里总会
+        // 注入快照）；反向证明：把 advanceOneDay 里的读值改回常量 1L，本用例仍绿但
+        // FamilySettingsConsumptionTest 的 growth=3 用例立红 —— 两条一起钉住「读值来自设置面」。
+        val snapshot = freeze(FamilyDeclarations.manifest)
+        val host = ModRuntimeHost(
+            snapshot = snapshot,
+            entityKernel = kernelFor(snapshot),
+            nativeMethods = NativeMethodRegistry(),
+            logSink = { logs += it },
+            runtime = InlineRuntime(),
+            shortIdOf = { 7 },
+        )
+        val mod = FamilyMod()
+        val report = host.install(listOf(FamilyDeclarations.PACKAGE_ID to mod))
+        assertNull(report.single().failure, "装载不得失败：${report.single()}；日志=$logs")
+
+        val failure = assertFailsWith<UnsupportedOperationException> { mod.advanceOneDay() }
+        assertTrue(
+            "设置面未装配" in failure.message.orEmpty(),
+            "异常必须点名设置面缺口：${failure.message}",
+        )
+        assertEquals(0L, mod.state.growthTicks, "读值在改账本之前 ⇒ 抛时零副作用")
+    }
+
+    @Test
+    fun adoptChildSettingsNotInjectedFailsClosedBeforeCreatingEntity() {
+        // 标题设置同走 context.settings；adoptChild 的读值刻意放在 family.create() 之前
+        // （KDoc「设置读取放在 create 之前」），宿主未注入时整笔拒绝，不留半个子嗣/半条父边。
+        // 与 settingsNotInjectedFailsClosedInsteadOfSilentDefault 配对钉同一个设置读值面的两侧：
+        // 读取失败必须抛，不能静默取声明默认；反向证明：把 showTitles 读值改成常量后
+        // FamilySettingsConsumptionTest 的 showTitles 两例立红。
+        val snapshot = freeze(FamilyDeclarations.manifest)
+        val host = ModRuntimeHost(
+            snapshot = snapshot,
+            entityKernel = kernelFor(snapshot),
+            nativeMethods = NativeMethodRegistry(),
+            logSink = { logs += it },
+            runtime = InlineRuntime(),
+            shortIdOf = { 7 },
+        )
+        val mod = FamilyMod()
+        val report = host.install(listOf(FamilyDeclarations.PACKAGE_ID to mod))
+        assertNull(report.single().failure, "装载不得失败：${report.single()}；日志=$logs")
+
+        val failure = assertFailsWith<UnsupportedOperationException> { mod.adoptChild("未装配子", father = null) }
+        assertTrue(
+            "设置面未装配" in failure.message.orEmpty(),
+            "异常必须点名设置面缺口：${failure.message}",
+        )
+        assertEquals(0, mod.state.registeredChildren, "读值在 create 之前 ⇒ 抛时零子嗣")
     }
 }

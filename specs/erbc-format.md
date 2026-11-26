@@ -303,7 +303,7 @@ u32 word[instructionCount × 4]     顺序恒为 op, a, b, c
 | `_SET_INT(2)` 的 b、`_STK_PUSH_IMM(202)` 的 a | `< constantCount` |
 | `_SET_STR(3)` 的 b、`_PRINT_LITERAL(26)` 的 a | `< stringCount` |
 | `_STK_PUSH_STR(203)` / `_STK_PUSH_VAR_I/S(207/208)` / `_STK_PLUS_VAR_I(209)` / `_STK_STORE_VAR_I/S(210/211)` 的 a | `< stringCount` |
-| `_EVAL_INT(27)` / `_EVAL_STR(28)` / `_EVAL_INT_JZ(246)` 的 a | 需 `HAS_EXPRESSIONS` 且 `< exprCount` |
+| `_EVAL_INT(27)` / `_EVAL_STR(28)` / `_EVAL_INT_JZ(246)` / `_EVAL_FLOAT(249)` 的 a | 需 `HAS_EXPRESSIONS` 且 `< exprCount` |
 | `_RETF(244)` 的 a | `NONE_REF` 放行；否则需 `HAS_EXPRESSIONS` 且 `< exprCount` |
 | `_CALL(22)` 的 a | `< funcCount`（带基线时按 `functionBase` 折回）；负值域例外：== `CallSentinels` 两哨兵值（`CALL_SUPER_SENTINEL` = `Int.MIN_VALUE` / `TRY_CALL_SUPER_SENTINEL` = `Int.MIN_VALUE + 1`，仅 Mod 包编译档产出）放行进链接期 `CallRelocation` 还原，其余负值照拒 |
 | `op ∈ 29..197`（marker）的 a | 需 `HAS_STATEMENTS` 且 `< statementCount` |
@@ -319,7 +319,7 @@ b 操作数位域单一真源 = `OpcodeTable.kt`（CMP-57）；本节是容器�
 
 | 位 | 语义 | 适指令 |
 |---|---|---|
-| bit31 | TRY 标志（查不到目标时跳过/吞错） | `_CALL_BY_NAME` / `_JUMP_BY_NAME` |
+| bit31 | TRY 标志（查不到目标时跳过/吞错） | `_CALL_BY_NAME` / `_JUMP_BY_NAME`；**`_CALL`（S9-C1，2026-11-24：仅 TRY 家族静态调用的编译期置位——运行期惰性，`ARG_COUNT_MASK` 已排除；唯一读者 = 链接期未解析导入的降级判，bit31 = 折 NOP 跳过，见 §5.7）** |
 | bit30 | JUMP 尾跳标志（目标帧替换当前帧） | 两者 |
 | bit29 | CALLF 家族（只认用户 `#FUNCTION` 方法） | `_CALL_BY_NAME` / `_JUMP_BY_NAME` |
 | bit28 | STR_RET 字符串返回标志 | 两者 |
@@ -383,10 +383,11 @@ functionDispatch 表。发射方 = 链接器回填 CALL_SUPER 目标（`CallSent
 | `_RETF(244)` | **EXPR_NULLABLE** | — | — |
 | `_CALL_STR(245)` | 帧内 str 槽 | 标志位（低位不解释为 argc） | 返回/命中槽 |
 | `_EVAL_INT_JZ(246)` | **EXPR** | 槽 | 跳转偏移（相对下一条指令） |
+| `_EVAL_FLOAT(249)` | **EXPR** | 帧内整型槽（值 = `doubleToRawLongBits` 位型） | — |
 
 **不变量**（`OpcodeRelocationTest` 逐条钉）：
 
-1. c 槽在 0..246 全域是 `NONE`。将来若有 c 是池引用，消费方已按三槽循环、不需改代码，
+1. c 槽在 0..249 全域是 `NONE`。将来若有 c 是池引用，消费方已按三槽循环、不需改代码，
    但这条钉会红 —— 有意的：这种变化必须过一次人工裁定。
 2. `FUNCTION` 只出现在 `_CALL.a`；`EXPR_NULLABLE` 只出现在 `_RETF.a`。
 3. 表按 `0..Opcode.MAX_OPCODE` 稠密建满，未登记的槽在 `OpcodeRelocation` **类初始化**时就抛
@@ -400,6 +401,34 @@ functionDispatch 表。发射方 = 链接器回填 CALL_SUPER 目标（`CallSent
 `_RETF` 链接后，运行期就地求值 **base 段**的表达式：返回别人的值，装载期零报错。
 根因层 = 装载/编译相位；修法 = 分类收进一张表，消费方只留策略。
 （同类前科：T2-21 加栈码组时 `ErbcFormat.OPCODE_MAX` 没扩，见该常量 KDoc。）
+
+### 5.6c 缺名残桩（未解析外部导入的链接产物形态，S9 改判 2026-11-24）
+
+**裁定**：模块的 `externalCalls` 名在链接组合里查不到**非事件**胜者（缺依赖 / 名字拼错 /
+base 月更删函数）或目标是**事件名** ⇒ **不再整组拒绝**（原 `ImportResolutionException`
+整组拒 = 「别家能导我们不能导」的第三大来源）。链接器按大写名全域去重合成「缺名残桩」
+（`MissingCallStub`），死 `_CALL` 改写跳残桩；`b` bit31（TRY 家族，§5.6a S9-C1）置位的
+死链整条折 `_NOP`（TRY 族缺目标跳过语义）。包形状病态（空白 / 重复名 / packageId 重复）
+维持整组拒绝。
+
+**残桩形态**（3 指令，物理表尾按大写名 sort 落位——确定性，LinkFingerprint 可复现）：
+
+```text
+_EVAL_STR      R0, <EXPR: StrLiteral(原文名)>   ; 表达式池尾追加
+_CALL_BY_NAME  R0, 0, none                      ; 运行期 resolveFunctionIndex
+_RET           none
+```
+
+运行期三条路与原版逐字同口径（零新 VM 机器、文案单一真源 = `ProcessRuntime.resolveFunctionIndex`）：
+未命中非 try = `NotDefinedFunc`（`没有找到指定的函数"@X"`，FunctionIdentifier.cs:3581）；
+事件名 = `CallToEventFunc`（CompatiCallEvent:NO，CalledFunction.cs:100-103）/ **YES 时真调
+首成员**（LabelDictionary.cs:181-184）；多余实参被 `callInto` 三重夹取忽略（残桩 arity=0）。
+装载成功、**执行到调用点才报错** = 原版装载行为（ErbLoader 不查 CALL 目标名）。
+
+**catalog 形态**：残桩候选 `FuncMeta.key = "·MISSING·" + 大写名`（ERB 标识符不可能含 `·`
+⇒ 不撞真名、不进事件桶、dispatch 恒等）；`FunctionInfo.name` = 导入原文名（栈可读）；
+无未解析导入的组合零合成（链接产物与改判前逐字节一致）。`externalCalls` 列表序在
+LinkFingerprint 十因子内，事件名导入 / 缺名导入变化如实进指纹。
 
 ### 5.7 段 6：行号表
 
@@ -425,11 +454,14 @@ record site[callSiteCount]   按 pc **严格升序**
     record arg[argCount]     按 position **严格升序**
         u32 position         头部形参位（0 起）
         u32 bucket           该实参在类型桶里的槽号（int 桶或 str 桶）
-        u8  flags            bit0 = isStr，bit1 = present；其余位保留且必须为 0
+        u8  flags            bit0 = isStr，bit1 = present，bit2 = isFloat；其余位保留且必须为 0
         u32 name             NONE_REF(0xFFFFFFFF) = 无名字；否则段内串池下标
 ```
 
-* 语义来源：`Program.kt:24-30` 的 `CallArg(position / bucket / isStr / name / present)`。
+* 语义来源：`Program.kt:24-30` 的 `CallArg(position / bucket / isStr / name / present / isFloat)`。
+  `isFloat`（追加位，兼容变更、不升容器 version）表示该桶位按 `doubleToRawLongBits` 位型承载浮点值
+  —— 帧模型只有整型列/字符串列，`#DIMF` 形参的浮点实参由 `_EVAL_FLOAT(249)` 位型落 int 桶，
+  绑定点 `ProcessRuntime.floatArgValue` 重解释（原版 `CalledFunction.cs:174-198` 的 TransporterFloat）。
   原版依据 `ProcessState.cs:435-452`（逐**头部形参位**写回，`Arguments[i] == null` 的位跳过 :437）
   与 `UserDefinedFunctionArgument.cs:35-69`（REF 位记 `TransporterRef`，其余按类型分桶）。
 * 编码侧登记点：`ErbProgramCompiler.kt:1085-1111`（逐位建 `CallArg`）与 `:1134`

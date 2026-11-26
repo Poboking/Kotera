@@ -13,6 +13,7 @@ import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.FormConversion
 import com.eratw.port.core.expr.FormPart
 import com.eratw.port.core.expr.FormStringTerm
+import com.eratw.port.core.expr.FloatLiteral
 import com.eratw.port.core.expr.FuncCall
 import com.eratw.port.core.expr.IntLiteral
 import com.eratw.port.core.expr.KeywordIndexArg
@@ -1075,6 +1076,26 @@ class ErbProgramCompiler(
         }
 
         /**
+         * 浮点表达式求值到**整型临时槽**（`_EVAL_FLOAT`，值 = `doubleToRawLongBits` 位型）。
+         *
+         * 用途只有一处：[stageArgs] 的 `#DIMF` 形参实参位（见那里的 KDoc）。与 [_RETF]
+         * 同一条降级口径：先 `lowerExpr` 再入表达式池（嵌套用户方法调用按原版求值序前移），
+         * 返回临时按 [drainRetTemps] 在值指令发射后归还。
+         *
+         * 不走 [evalExprTo]：那条路对 FLOAT 显式抛「浮点表达式不能直接用于整型上下文」，
+         * 因为**帧槽没有浮点列**。这里刻意用位型借道整型槽 —— 只可能是无损搬运，
+         * 消费方（`ProcessRuntime.floatArgValue`）按 [CallArg.isFloat] 重解释。
+         */
+        private fun evalTempFloatBits(e: Expr, line: Int): Int {
+            val t = alloc()
+            val mark = pendingRets.size
+            val lowered = lowerExpr(e)
+            out.emit(Opcode._EVAL_FLOAT, out.expr(lowered), local(t), 0, line)
+            drainRetTemps(mark)
+            return t
+        }
+
+        /**
          * 条件位「求值 + 跳假」的唯一发射口（MODERN-T1 融合点）。
          *
          * 开态（缺省）：条件降级后是 INT 且非字面量时，发一条 [_EVAL_INT_JZ]（表达式下标 a、
@@ -1993,6 +2014,13 @@ class ErbProgramCompiler(
                     val (t, pc) = evalTempPc(a, line)
                     evalPcs[i] = pc
                     t
+                } else if (a.operandType == OperandType.FLOAT) {
+                    // `#DIMF` 形参的**浮点实参**（4.981 fork 作者面）：原版 ConvertArg 按形参
+                    // 项类型分派（CalledFunction.cs:174-198，浮点走 TransporterFloat），本侧
+                    // 帧槽没有浮点列，故把求值结果按 `doubleToRawLongBits` **位型落整型桶**
+                    // （[_EVAL_FLOAT]，见 `CallArg.isFloat`），运行期 `bindCallArgs` 再按浮点
+                    // 重解释写进被调 `#DIMF` 形参（PC 判词：`CALL F, 0, 2.5` ⇒ 形参=2.5）。
+                    evalTempFloatBits(a, line)
                 } else {
                     evalTemp(a, line)
                 }
@@ -2009,6 +2037,7 @@ class ErbProgramCompiler(
             for (i in temps.indices) {
                 val t = temps[i]
                 val isStr = row[i] != null && row[i]!!.operandType == OperandType.STR
+                val isFloat = row[i] != null && row[i]!!.operandType == OperandType.FLOAT
                 val bucket = if (isStr) strBucket++ else intBucket++
                 if (t != bucket) {
                     out.emit(
@@ -2025,6 +2054,7 @@ class ErbProgramCompiler(
                         isStr = isStr,
                         name = (e as? VarRef)?.name,
                         present = e != null,
+                        isFloat = isFloat,
                     ),
                 )
             }
@@ -2050,20 +2080,28 @@ class ErbProgramCompiler(
          * （TODO(verify)：与运行期 `bindCallArgs` 同源的表要进 `FuncMeta`/侧车，属容器面）。
          * `exprCalls == null` 的旧装置只补「**没有同名内建**」的名字（见 [padRuntimeCalls]）：
          * 有内建同名时无法区分用户方法与内建，补位会改内建实参形状。
+         *
+         * 浮点默认值（[FloatLiteral]，`@F(ARGF:1 = 2.5)`）在这里**刻意不补**：本侧实参元数据
+         * 只有 int/str 两个桶（`CallArg.isStr` 一位），把浮点补进 [stageArgs] 会在
+         * [evalExprTo] 抛「浮点表达式不能直接用于整型上下文」。省略位保持 null（present=false），
+         * 由运行期 [com.eratw.port.core.proc.ProcessRuntime.bindOmittedArgDefault] 按
+         * `ARGF` 分支写进每函数一份的浮点局部槽 —— 与 CALLFORM 族同源。
          */
         private fun padOmittedArgs(target: String?, rowArgs: List<Expr?>): List<Expr?> {
             if (target == null) return rowArgs
             if (callDefaults.isEmpty()) return rowArgs
             val defs = callDefaults[target.uppercase()] ?: return rowArgs
+            // 浮点默认值不在编译期补位（见 KDoc）：把它当空位，交给运行期 ARGF 绑定。
+            fun injectable(i: Int): Expr? = defs.getOrNull(i)?.takeIf { it !is FloatLiteral }
             var lastDefault = -1
-            for (i in defs.indices) if (defs[i] != null) lastDefault = i
+            for (i in defs.indices) if (injectable(i) != null) lastDefault = i
             if (lastDefault < 0) return rowArgs
             val size = maxOf(rowArgs.size, lastDefault + 1)
             if (size == rowArgs.size && rowArgs.none { it == null }) return rowArgs
             val out = ArrayList<Expr?>(size)
             for (i in 0 until size) {
                 val given = if (i < rowArgs.size) rowArgs[i] else null
-                out.add(given ?: defs.getOrNull(i))
+                out.add(given ?: injectable(i))
             }
             return out
         }
@@ -2082,10 +2120,19 @@ class ErbProgramCompiler(
             isJump: Boolean = false,
             strRet: Boolean = false,
             callArgs: List<CallArg> = emptyList(),
+            tryBit: Boolean = false,
         ) {
+            // S9 改判 C1（CONTRACT-S9-MISSING-CALL.md L4）：TRY 家族标志 → `_CALL.b` bit31
+            //（[Opcode.TRY_FLAG]）。TRYCALL/TRYJUMP/TRYCCALL/TRYCJUMP 与 TRY*LIST 的
+            // 编译期已知目标发射置位——运行期对已解析目标惰性（ARG_COUNT_MASK 排除
+            // bit31，argc/旗标消费面全不读）；唯一读者 = 链接期未解析导入的降级判
+            // （bit31 = 折 NOP 跳过，同 TRY 族缺目标语义；不带 = 缺名残桩，非 TRY 报错）。
+            // 原版装载期每次重解析不存 try 位，本位是链接产物跨 base 复用时携带
+            // try 语义的必要通道。注释放函数体（detekt baseline 签名串含参数列表原文）。
             var b = argc
             if (isJump) b = b or JUMP_BIT
             if (strRet) b = b or STR_RET_BIT
+            if (tryBit) b = b or Opcode.TRY_FLAG
             val pc = out.emit(Opcode._CALL, 0, b, retDst, line)
             callRefs.add(CallRef(pc, target.uppercase(), line))
             out.declareCallArgs(pc, callArgs)
@@ -3005,9 +3052,28 @@ class ErbProgramCompiler(
          * [callf]（契约 R11/API 5）：置 bit29，让 VM 走 `resolveMethodIndex`（只认用户
          * `#FUNCTION`/`#FUNCTIONS` 方法，spec: IdentifierDictionary.cs:538-586）；
          * 仅 `CALLF/TRYCALLF/CALLFORMF/TRYCALLFORMF` 的动态名调用置位，普通 CALLFORM 不置位。
+         *
+         * **发射序契约（帧内实参桶 `R0..` 不可先占后算）**：`nameT` 由调用方在 [stageArgs]
+         * **之前**用 [evalTemp] 求好再传进来，[stageArgs] 之后才发本指令。理由是该次序不可交换：
+         *
+         * - [stageArgs] 把外层实参 `_MOV_*` 进**调用方帧**的实参桶 `R0..R(argc-1)`
+         *   （桶区在 `callInto` 切帧时才被复制进被调帧）；
+         * - 名字表达式里可以含用户函数调用（语料形态
+         *   `TRYCCALLFORM IRAI_固有{IRAI_ID_TO_CLIENT(IRAI_ID)}(CHARA, …)`），它被降级成
+         *   `stageArgs(内层实参)` + `_CALL`（见 [lowerFuncCall]），**内层实参同样落在同一个
+         *   `R0..` 桶区**；
+         * - 于是「先暂存外层实参、后求值名字」会让内层实参覆盖外层实参：被调第 1 形参收到
+         *   内层实参（真机 `角色数组变量"CALLNAME"…(15101)` 即此 —— 15101 是名字表达式里
+         *   `IRAI_ID_TO_CLIENT` 的**实参**，函数名本身算对了）。
+         *
+         * 原版次序正是「先定名、后求值实参」：`FunctionIdentifier.cs:3572-3576`
+         * `FuncnameTerm.GetStrValue(exm)` 定名、命中后才 `:3589-3598` `state.IntoFunction(...)`
+         * 把各 term 求值进**被调帧**的 `Arg[]`（`Process.State.cs:598` / `:648`
+         * `if (srcArgs != null)`）—— 实参在定名阶段还没落任何与名字共享的暂存位，故原版
+         * 没有这条污染通道。
          */
         private fun emitCallByName(
-            nameTerm: Expr,
+            nameT: Int,
             argc: Int,
             line: Int,
             isTry: Boolean,
@@ -3015,7 +3081,6 @@ class ErbProgramCompiler(
             callf: Boolean = false,
             callArgs: List<CallArg> = emptyList(),
         ) {
-            val nameT = evalTemp(nameTerm, line)
             var b = argc
             if (isTry) b = b or TRY_BIT
             if (isJump) b = b or JUMP_BIT
@@ -3146,9 +3211,13 @@ class ErbProgramCompiler(
                 label == null -> {
                     val nameTerm = (args as? SpCallArgument)?.funcNameTerm
                         ?: throw CompileException(sig.name, line, "$code 缺少函数名表达式")
+                    // **先定名、后暂存实参**（次序见 [emitCallByName] 的发射序契约）：
+                    // 名字表达式里的用户函数调用会把内层实参写进同一个 R0.. 桶区，若排在
+                    // [stageArgs] 之后就会覆盖外层已暂存的实参。
+                    val nameT = evalTemp(nameTerm, line)
                     val staged = stageArgs(rowArgs, line)
                     if (!isTryc) {
-                        emitCallByName(nameTerm, staged.argc, line, isTry, isJump, callArgs = staged.args)
+                        emitCallByName(nameT, staged.argc, line, isTry, isJump, callArgs = staged.args)
                     } else {
                         // 契约 R3 两步式（禁止新增 opcode；c=SlotAddr.NONE 时标志丢弃=纯 TRY 行为）：
                         //   _CALL_BY_NAME nameSlot, (argc|bit31 try|bit30 jump), c=hitFlag
@@ -3161,7 +3230,6 @@ class ErbProgramCompiler(
                         // 命中标志已由 VM 实现（Vm.kt `_CALL_BY_NAME` :418-435）：try=1 且 c≠NONE 时
                         //   命中 setInt(c,1) 且 retDst 改传 SlotAddr.NONE（ERB 调用结果归 RESULT，不占槽），
                         //   未命中 setInt(c,0) 后 pc++。
-                        val nameT = evalTemp(nameTerm, line)
                         val flag = alloc()
                         val hitPc = out.emit(Opcode._CALL_BY_NAME, local(nameT), staged.argc or TRY_BIT or (if (isJump) JUMP_BIT else 0), local(flag), line)
                         out.declareCallArgs(hitPc, staged.args)
@@ -3232,8 +3300,10 @@ class ErbProgramCompiler(
                             // TRY 系（非 TRYC）：查不到 = 跳过本行，编译期判名后"不发射"即为
                             // 正确降级（净效果与原版 `isTry → return` 相同，
                             // spec: FunctionIdentifier.cs:3577-3588）。
+                            // tryBit = true（S9 C1）：目标编译期已知但可能随 base 月更消失，
+                            // 位随产物走，链接期死链折 NOP 保持跳过语义。
                             val staged = stageArgs(rowArgs, line, target)
-                            emitCall(target, staged.argc, line, isJump = isJump, callArgs = staged.args)
+                            emitCall(target, staged.argc, line, isJump = isJump, callArgs = staged.args, tryBit = true)
                         }
                     } else {
                         // 契约 R3：TRYC 与 TRY 的唯一差异 = 目标缺失时跳 **catch 体首行**，
@@ -3244,7 +3314,7 @@ class ErbProgramCompiler(
                         // 否则配对的 CATCH 找不到所属块。
                         if (target in known) {
                             val staged = stageArgs(rowArgs, line, target)
-                            emitCall(target, staged.argc, line, isJump = isJump, callArgs = staged.args)
+                            emitCall(target, staged.argc, line, isJump = isJump, callArgs = staged.args, tryBit = true)
                             if (code in TRYC_OPENERS) scopes.add(TrycScope())
                         } else {
                             bindTrycMiss(code, line, emitJumpAlways(line))
@@ -3313,11 +3383,14 @@ class ErbProgramCompiler(
                         )
                         if (name.uppercase() in known) {
                             // 只有命中的那一条求值实参并发射（原版 miss 的目标不求值实参）
+                            // tryBit = true（S9 C1）：LIST 首命中目标随产物携带 try 语义，
+                            // 链接期死链折 NOP（同「全部不存在 = 不发射」降级）。
                             val staged = stageArgs(arg.rowArgs, t.line, name)
                             emitCall(
                                 name, staged.argc, t.line,
                                 isJump = code == FunctionCode.TRYJUMPLIST,
                                 callArgs = staged.args,
+                                tryBit = true,
                             )
                             break
                         }
@@ -3388,11 +3461,14 @@ class ErbProgramCompiler(
             } else {
                 val nameTerm = fa?.funcNameTerm
                     ?: throw CompileException(sig.name, s.line, "${s.code} 缺少函数名表达式")
+                // **先定名、后暂存实参**（次序见 [emitCallByName] 的发射序契约）：
+                // CALLFORMF/TRYCALLFORMF 的名字表达式同样可以含用户函数调用。
+                val nameT = evalTemp(nameTerm, s.line)
                 val staged = stageArgs(rowArgs, s.line)
                 // 契约 R11/API 7：CALLF 家族的动态名必须走方法解析入口（bit29），
                 // 否则 `CALLFORMF GOLDEN_FF{...}` 会在 resolveFunctionIndex 里
                 // 误把 #FUNCTION 方法判为"不能调用"。
-                emitCallByName(nameTerm, staged.argc, s.line, isTry, callf = true, callArgs = staged.args)
+                emitCallByName(nameT, staged.argc, s.line, isTry, callf = true, callArgs = staged.args)
             }
         }
 

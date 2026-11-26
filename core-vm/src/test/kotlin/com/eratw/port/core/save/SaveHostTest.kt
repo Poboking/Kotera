@@ -350,6 +350,74 @@ class SaveHostTest {
         s.aux.slot("map") { Any() }
         val e = assertFailsWith<CodeEE> { FileSystemOps(s, io, binary()).saveGlobal() }
         assertEquals(FileSystemOps.MES_SAVE_GLOBAL, e.message)
+        // 2026-11-19 引擎侧根修：折点必须留痕（随下一份错误报告出网），否则玩家报告
+        // 只有一句文案推不出根因。MemorySaveIo 走接口默认流式口，producer 异常在接口
+        // 默认实现里折成 false ⇒ 本用例钉「退路 note」分支；producer 异常本体由生产
+        // RootedSaveFileIo 的 WRITE 留痕带出（见 SaveFileIoAtomicWriteTest 同域用例）。
+        assertTrue(
+            SaveDiagnostics.snapshot().any { it.contains("SAVEGLOBAL 退路") },
+            "失败须留痕: ${SaveDiagnostics.snapshot()}",
+        )
+    }
+
+    /**
+     * 文本路（非 eratw 口径）：抓取/序列化异常同样收敛成官方文案，且根因经 initCause
+     * 挂进因果链（2026-11-20 写路同族补账；口径同 526c667cf 的 loadData 两处）。
+     */
+    @Test
+    fun `SAVEGLOBAL 文本路采集异常经 initCause 挂根因`() {
+        val io = MemorySaveIo()
+        val s = store()
+        // 与二进制路同款注入：map 池槽类型错误 ⇒ SaveCapture 的 EM 导出在采集期抛
+        // ClassCastException（这次在 saveGlobal 的 try 里直接抛出，未经 IO 层折成 false）。
+        s.aux.slot("map") { Any() }
+        val e = assertFailsWith<CodeEE> { FileSystemOps(s, io, plain()).saveGlobal() }
+        assertEquals(FileSystemOps.MES_SAVE_GLOBAL, e.message)
+        assertNotNull(e.cause, "根因必须挂进因果链（此前只剩一句文案）")
+        assertTrue(
+            e.cause is ClassCastException,
+            "cause 应是采集期的 ClassCastException，实得 ${e.cause?.javaClass?.name}",
+        )
+    }
+
+    /**
+     * IO 层写失败时 SAVEGLOBAL 的可诊断性（2026-11-19 引擎侧根修）：
+     * `io.write` 返回 false ⇒ 调用点 note 带现场快照，屏上文案一字不变。
+     */
+    @Test
+    fun `SAVEGLOBAL 写失败留痕且文案不变`() {
+        SaveDiagnostics.clear()
+        val io = MemorySaveIo()
+        io.failWrites = true
+        val e = assertFailsWith<CodeEE> { FileSystemOps(store(), io, binary()).saveGlobal() }
+        assertEquals(FileSystemOps.MES_SAVE_GLOBAL, e.message)
+        assertTrue(
+            SaveDiagnostics.snapshot().any { it.contains("SAVEGLOBAL") && it.contains("io.write 返回 false") },
+            "写失败须留痕: ${SaveDiagnostics.snapshot()}",
+        )
+    }
+
+    /**
+     * 生产 IO（[RootedSaveFileIo]）写失败路径的可诊断性：快路与退路的底层异常
+     * 都经 WRITE 留痕进诊断环（报告纪律 = 相对路径，不带绝对路径）。
+     * 注入口：把 `sav` 建成普通文件 ⇒ 建目录与目标 open 双双失败，快路 + 退路都走不通。
+     */
+    @Test
+    fun `生产IO写失败WRITE留痕`() {
+        SaveDiagnostics.clear()
+        val root = java.nio.file.Files.createTempDirectory("eratw-save-diag")
+        try {
+            java.nio.file.Files.writeString(root.resolve("sav"), "not-a-dir")
+            val fs = FileSystemOps.rooted(store(), root, SaveConfig.ERATW)
+            val e = assertFailsWith<CodeEE> { fs.saveGlobal() }
+            assertEquals(FileSystemOps.MES_SAVE_GLOBAL, e.message)
+            val trail = SaveDiagnostics.snapshot().joinToString("\n")
+            assertTrue(trail.contains("stage=atomic-replace"), "快路失败留痕: $trail")
+            assertTrue(trail.contains("stage=in-place"), "退路失败留痕: $trail")
+            assertTrue(trail.contains("path=sav/global.sav"), "留痕须带相对路径: $trail")
+        } finally {
+            root.toFile().deleteRecursively()
+        }
     }
 
     /**

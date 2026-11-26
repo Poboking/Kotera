@@ -1,4 +1,4 @@
-﻿package com.eratw.port.core.save
+package com.eratw.port.core.save
 
 import com.eratw.port.core.data.save.SaveData
 import com.eratw.port.core.data.save.SaveEntry
@@ -1623,11 +1623,20 @@ private fun groupingSeparatorOf(locale: Locale): Char =
  * `99999999999999984`（两者都 17 位、都往返到同一 double），`5E-324` 亦有同类差异。
  * 存档里的浮点来自游戏数值，不涉及这些边界；要逐字节对齐 PC 文本档需移植 Ryu 的
  * tie-break 规则（TODO(verify)）。
+ *
+ * 2026-11-20：可见性由 private 放到 internal —— `StatementExecutor` 的 TIMES 溢出告警
+ * （4.981 `Instraction.Child.cs:1447` 的 `$"TIMES整数溢出: {d}"`，d 是 double）要复刻
+ * .NET `double.ToString()` 的数字形态；本函数已是该格式的**唯一真源**（有 dotnet 探针
+ * 钉在 `SaveTextFloatTailTest`），不再在 sem 侧抄第二份。
  */
-private fun formatDoubleG(v: Double, decimalSeparator: Char): String {
-    if (v.isNaN()) return "NaN"
-    if (v.isInfinite()) return if (v > 0) "Infinity" else "-Infinity"
-    if (v == 0.0) return if (java.lang.Double.doubleToRawLongBits(v) != 0L) "-0" else "0"
+internal fun formatDoubleG(v: Double, decimalSeparator: Char): String {
+    val special = when {
+        v.isNaN() -> "NaN"
+        v.isInfinite() -> if (v > 0) "Infinity" else "-Infinity"
+        v == 0.0 -> if (java.lang.Double.doubleToRawLongBits(v) != 0L) "-0" else "0"
+        else -> null
+    }
+    if (special != null) return special
     val negative = v < 0
     val bd = BigDecimal.valueOf(if (negative) -v else v).stripTrailingZeros()
     val digits = bd.unscaledValue().abs().toString()

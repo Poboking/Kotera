@@ -1,0 +1,1090 @@
+// surface v21
+// 由 ModApiSurfaceSnapshotTest 反射生成，勿手改；类名/签名/KDoc 版本表三处联动。
+// 刷新：.\gradlew.bat -Deratw.refreshApiSurface=true :mod-api:test，然后按提示 bump VERSION 并补 KDoc。
+// 行格式：<类型> | <kind> 为类型行；成员行为 [static ]fun|val|field，JVM 名原样保留。
+com.eratw.port.modapi.ActionApi | interface
+com.eratw.port.modapi.ActionApi | fun constraint(java.lang.String, com.eratw.port.modapi.ActionConstraint): com.eratw.port.modapi.Registration
+com.eratw.port.modapi.ActionApi | fun on(java.lang.String, com.eratw.port.modapi.ActionHandler): com.eratw.port.modapi.Registration
+com.eratw.port.modapi.ActionApi | fun provide(java.lang.String, com.eratw.port.modapi.ActionProvider): com.eratw.port.modapi.Registration
+com.eratw.port.modapi.ActionCandidate | class
+com.eratw.port.modapi.ActionCandidate | fun component1(): java.lang.String
+com.eratw.port.modapi.ActionCandidate | fun component10(): java.lang.Integer
+com.eratw.port.modapi.ActionCandidate | fun component11(): java.util.List<com.eratw.port.modapi.ReservationKey>
+com.eratw.port.modapi.ActionCandidate | fun component12(): java.lang.String
+com.eratw.port.modapi.ActionCandidate | fun component13-NgPTAis(): com.eratw.port.modapi.EntityId
+com.eratw.port.modapi.ActionCandidate | fun component2(): java.lang.String
+com.eratw.port.modapi.ActionCandidate | fun component3-vmlZJTY(): long
+com.eratw.port.modapi.ActionCandidate | fun component4(): int
+com.eratw.port.modapi.ActionCandidate | fun component5(): int
+com.eratw.port.modapi.ActionCandidate | fun component6(): java.util.List<java.lang.String>
+com.eratw.port.modapi.ActionCandidate | fun component7(): java.lang.String
+com.eratw.port.modapi.ActionCandidate | fun component8(): java.lang.Integer
+com.eratw.port.modapi.ActionCandidate | fun component9(): java.lang.Integer
+com.eratw.port.modapi.ActionCandidate | fun copy-7ATCeEs(java.lang.String, java.lang.String, long, int, int, java.util.List<java.lang.String>, java.lang.String, java.lang.Integer, java.lang.Integer, java.lang.Integer, java.util.List<com.eratw.port.modapi.ReservationKey>, java.lang.String, com.eratw.port.modapi.EntityId): com.eratw.port.modapi.ActionCandidate
+com.eratw.port.modapi.ActionCandidate | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.ActionCandidate | fun hashCode(): int
+com.eratw.port.modapi.ActionCandidate | fun toString(): java.lang.String
+com.eratw.port.modapi.ActionCandidate | val actor-vmlZJTY: long
+com.eratw.port.modapi.ActionCandidate | val candidateKey: java.lang.String
+com.eratw.port.modapi.ActionCandidate | val constraints: java.util.List<java.lang.String>
+com.eratw.port.modapi.ActionCandidate | val cooldownDays: java.lang.Integer
+com.eratw.port.modapi.ActionCandidate | val cooldownKey: java.lang.String
+com.eratw.port.modapi.ActionCandidate | val handlerKey: java.lang.String
+com.eratw.port.modapi.ActionCandidate | val payloadRef-NgPTAis: com.eratw.port.modapi.EntityId
+com.eratw.port.modapi.ActionCandidate | val perActorPerDay: java.lang.Integer
+com.eratw.port.modapi.ActionCandidate | val perDay: java.lang.Integer
+com.eratw.port.modapi.ActionCandidate | val priority: int
+com.eratw.port.modapi.ActionCandidate | val providerPackage: java.lang.String
+com.eratw.port.modapi.ActionCandidate | val reservationClaims: java.util.List<com.eratw.port.modapi.ReservationKey>
+com.eratw.port.modapi.ActionCandidate | val weight: int
+com.eratw.port.modapi.ActionConstraint | interface
+com.eratw.port.modapi.ActionConstraint | fun test(com.eratw.port.modapi.ActionConstraintContext): boolean
+com.eratw.port.modapi.ActionConstraintContext | class
+com.eratw.port.modapi.ActionConstraintContext | val candidate: com.eratw.port.modapi.ActionCandidate
+com.eratw.port.modapi.ActionConstraintContext | val packageId: java.lang.String
+com.eratw.port.modapi.ActionConstraintContext | val time: com.eratw.port.modapi.GameTime
+com.eratw.port.modapi.ActionContext | class
+com.eratw.port.modapi.ActionContext | val cancellation: com.eratw.port.modapi.CancellationToken
+com.eratw.port.modapi.ActionContext | val candidate: com.eratw.port.modapi.ActionCandidate
+com.eratw.port.modapi.ActionContext | val packageId: java.lang.String
+com.eratw.port.modapi.ActionContext | val time: com.eratw.port.modapi.GameTime
+com.eratw.port.modapi.ActionHandler | interface
+com.eratw.port.modapi.ActionHandler | fun execute(com.eratw.port.modapi.ActionContext): void
+com.eratw.port.modapi.ActionProvider | interface
+com.eratw.port.modapi.ActionProvider | fun provide(com.eratw.port.modapi.ActionSelectionContext): java.util.List<com.eratw.port.modapi.ActionCandidate>
+com.eratw.port.modapi.ActionSelectionContext | class
+com.eratw.port.modapi.ActionSelectionContext | fun component1(): java.lang.String
+com.eratw.port.modapi.ActionSelectionContext | fun component2(): com.eratw.port.modapi.GameTime
+com.eratw.port.modapi.ActionSelectionContext | fun component3-NgPTAis(): com.eratw.port.modapi.EntityId
+com.eratw.port.modapi.ActionSelectionContext | fun component4(): java.util.Map<java.lang.String, java.lang.String>
+com.eratw.port.modapi.ActionSelectionContext | fun copy-DT8waKs(java.lang.String, com.eratw.port.modapi.GameTime, com.eratw.port.modapi.EntityId, java.util.Map<java.lang.String, java.lang.String>): com.eratw.port.modapi.ActionSelectionContext
+com.eratw.port.modapi.ActionSelectionContext | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.ActionSelectionContext | fun hashCode(): int
+com.eratw.port.modapi.ActionSelectionContext | fun toString(): java.lang.String
+com.eratw.port.modapi.ActionSelectionContext | val actor-NgPTAis: com.eratw.port.modapi.EntityId
+com.eratw.port.modapi.ActionSelectionContext | val domain: java.lang.String
+com.eratw.port.modapi.ActionSelectionContext | val metadata: java.util.Map<java.lang.String, java.lang.String>
+com.eratw.port.modapi.ActionSelectionContext | val time: com.eratw.port.modapi.GameTime
+com.eratw.port.modapi.AndExpr | class
+com.eratw.port.modapi.AndExpr | fun component1(): java.util.List<com.eratw.port.modapi.QueryExpr>
+com.eratw.port.modapi.AndExpr | fun copy(java.util.List<? extends com.eratw.port.modapi.QueryExpr>): com.eratw.port.modapi.AndExpr
+com.eratw.port.modapi.AndExpr | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.AndExpr | fun hashCode(): int
+com.eratw.port.modapi.AndExpr | fun toString(): java.lang.String
+com.eratw.port.modapi.AndExpr | val terms: java.util.List<com.eratw.port.modapi.QueryExpr>
+com.eratw.port.modapi.ArchetypeBuilder | class
+com.eratw.port.modapi.ArchetypeBuilder | fun uses(com.eratw.port.modapi.ComponentKey): void
+com.eratw.port.modapi.ArchetypeBuilder | fun uses(java.lang.String): void
+com.eratw.port.modapi.ArchetypeDecl | class
+com.eratw.port.modapi.ArchetypeDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.ArchetypeDecl | fun component2(): java.util.List<java.lang.String>
+com.eratw.port.modapi.ArchetypeDecl | fun copy(java.lang.String, java.util.List<java.lang.String>): com.eratw.port.modapi.ArchetypeDecl
+com.eratw.port.modapi.ArchetypeDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.ArchetypeDecl | fun hashCode(): int
+com.eratw.port.modapi.ArchetypeDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.ArchetypeDecl | val components: java.util.List<java.lang.String>
+com.eratw.port.modapi.ArchetypeDecl | val name: java.lang.String
+com.eratw.port.modapi.ArchetypeKey | class
+com.eratw.port.modapi.AudioApi | interface
+com.eratw.port.modapi.AudioApi | fun play(java.lang.String, boolean, float): boolean
+com.eratw.port.modapi.AudioApi | fun stop(): void
+com.eratw.port.modapi.BoolSettingDecl | class
+com.eratw.port.modapi.BoolSettingDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.BoolSettingDecl | fun component2(): boolean
+com.eratw.port.modapi.BoolSettingDecl | fun component3(): java.lang.String
+com.eratw.port.modapi.BoolSettingDecl | fun component4(): java.lang.String
+com.eratw.port.modapi.BoolSettingDecl | fun copy(java.lang.String, boolean, java.lang.String, java.lang.String): com.eratw.port.modapi.BoolSettingDecl
+com.eratw.port.modapi.BoolSettingDecl | fun defaultText(): java.lang.String
+com.eratw.port.modapi.BoolSettingDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.BoolSettingDecl | fun hashCode(): int
+com.eratw.port.modapi.BoolSettingDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.BoolSettingDecl | val default: boolean
+com.eratw.port.modapi.BoolSettingDecl | val description: java.lang.String
+com.eratw.port.modapi.BoolSettingDecl | val key: java.lang.String
+com.eratw.port.modapi.BoolSettingDecl | val kind: com.eratw.port.modapi.SettingKind
+com.eratw.port.modapi.BoolSettingDecl | val title: java.lang.String
+com.eratw.port.modapi.BuiltinPhase | object
+com.eratw.port.modapi.BuiltinPhase | val ACTION: com.eratw.port.modapi.PhaseKey
+com.eratw.port.modapi.BuiltinPhase | val ALL: java.util.Set<java.lang.String>
+com.eratw.port.modapi.BuiltinPhase | val DAY_END: com.eratw.port.modapi.PhaseKey
+com.eratw.port.modapi.BuiltinPhase | val DAY_START: com.eratw.port.modapi.PhaseKey
+com.eratw.port.modapi.CancellationToken | class
+com.eratw.port.modapi.CancellationToken | fun requestCancel(): void
+com.eratw.port.modapi.CancellationToken | fun throwIfCancelled(): void
+com.eratw.port.modapi.CancellationToken | val isCancelled: boolean
+com.eratw.port.modapi.CharaRouteDecl | class
+com.eratw.port.modapi.CharaRouteDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.CharaRouteDecl | fun component2(): java.util.List<java.lang.Integer>
+com.eratw.port.modapi.CharaRouteDecl | fun copy(java.lang.String, java.util.List<java.lang.Integer>): com.eratw.port.modapi.CharaRouteDecl
+com.eratw.port.modapi.CharaRouteDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.CharaRouteDecl | fun hashCode(): int
+com.eratw.port.modapi.CharaRouteDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.CharaRouteDecl | val cells: java.util.List<java.lang.Integer>
+com.eratw.port.modapi.CharaRouteDecl | val variable: java.lang.String
+com.eratw.port.modapi.CharaVar | class
+com.eratw.port.modapi.CharaVar.Companion | class
+com.eratw.port.modapi.CharaVar.Companion | val ABL: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val BASE: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val CALLNAME: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val CDFLAG: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val CDOWN: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val CFLAG: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val CSTR: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val CUP: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val DOWNBASE: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val EQUIP: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val EX: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val EXP: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val GOTJUEL: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val ISASSI: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val JUEL: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val MARK: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val MASTERNAME: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val MAXBASE: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val NAME: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val NICKNAME: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val NO: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val NOWEX: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val PALAM: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val RELATION: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val SOURCE: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val STAIN: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val TALENT: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val TCVAR: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.CharaVar.Companion | val TEQUIP: com.eratw.port.modapi.CharaVar
+com.eratw.port.modapi.ComponentBuilder | class
+com.eratw.port.modapi.ComponentBuilder | fun int(com.eratw.port.modapi.FieldKey<java.lang.Long>): void
+com.eratw.port.modapi.ComponentBuilder | fun int(java.lang.String): void
+com.eratw.port.modapi.ComponentBuilder | fun ref(com.eratw.port.modapi.FieldKey<com.eratw.port.modapi.EntityId>): void
+com.eratw.port.modapi.ComponentBuilder | fun str(com.eratw.port.modapi.FieldKey<java.lang.String>): void
+com.eratw.port.modapi.ComponentBuilder | fun str(java.lang.String): void
+com.eratw.port.modapi.ComponentDecl | class
+com.eratw.port.modapi.ComponentDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.ComponentDecl | fun component2(): java.util.List<com.eratw.port.modapi.FieldDecl>
+com.eratw.port.modapi.ComponentDecl | fun copy(java.lang.String, java.util.List<com.eratw.port.modapi.FieldDecl>): com.eratw.port.modapi.ComponentDecl
+com.eratw.port.modapi.ComponentDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.ComponentDecl | fun hashCode(): int
+com.eratw.port.modapi.ComponentDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.ComponentDecl | val fields: java.util.List<com.eratw.port.modapi.FieldDecl>
+com.eratw.port.modapi.ComponentDecl | val name: java.lang.String
+com.eratw.port.modapi.ComponentKey | class
+com.eratw.port.modapi.CsvKeywordDecl | class
+com.eratw.port.modapi.CsvKeywordDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.CsvKeywordDecl | fun component2(): int
+com.eratw.port.modapi.CsvKeywordDecl | fun component3(): java.lang.String
+com.eratw.port.modapi.CsvKeywordDecl | fun component4(): boolean
+com.eratw.port.modapi.CsvKeywordDecl | fun copy(java.lang.String, int, java.lang.String, boolean): com.eratw.port.modapi.CsvKeywordDecl
+com.eratw.port.modapi.CsvKeywordDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.CsvKeywordDecl | fun hashCode(): int
+com.eratw.port.modapi.CsvKeywordDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.CsvKeywordDecl | val index: int
+com.eratw.port.modapi.CsvKeywordDecl | val isAlias: boolean
+com.eratw.port.modapi.CsvKeywordDecl | val keyword: java.lang.String
+com.eratw.port.modapi.CsvKeywordDecl | val table: java.lang.String
+com.eratw.port.modapi.CsvOp | enum
+com.eratw.port.modapi.CsvOp | static fun valueOf(java.lang.String): com.eratw.port.modapi.CsvOp
+com.eratw.port.modapi.CsvOp | static fun values(): com.eratw.port.modapi.CsvOp[]
+com.eratw.port.modapi.CsvOp | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.CsvOp>
+com.eratw.port.modapi.CsvOp | static field ADD: com.eratw.port.modapi.CsvOp
+com.eratw.port.modapi.CsvOp | static field REMOVE: com.eratw.port.modapi.CsvOp
+com.eratw.port.modapi.CsvOp | static field REPLACE: com.eratw.port.modapi.CsvOp
+com.eratw.port.modapi.CsvTable | class
+com.eratw.port.modapi.CsvTable.Companion | class
+com.eratw.port.modapi.CsvTable.Companion | val ABL: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val BASE: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val CALLNAME: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val CDFLAG1: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val CDFLAG2: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val CDOWN: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val CFLAG: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val CSTR: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val CUP: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val DOWNBASE: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val EQUIP: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val EX: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val EXP: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val GOTJUEL: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val JUEL: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val MARK: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val MASTERNAME: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val MAXBASE: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val NAME: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val NICKNAME: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val NOWEX: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val PALAM: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val SOURCE: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val STAIN: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val TALENT: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val TCVAR: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvTable.Companion | val TEQUIP: com.eratw.port.modapi.CsvTable
+com.eratw.port.modapi.CsvValueDecl | class
+com.eratw.port.modapi.CsvValueDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.CsvValueDecl | fun component2(): java.lang.String
+com.eratw.port.modapi.CsvValueDecl | fun component3(): java.lang.String
+com.eratw.port.modapi.CsvValueDecl | fun component4(): com.eratw.port.modapi.CsvOp
+com.eratw.port.modapi.CsvValueDecl | fun component5(): java.lang.String
+com.eratw.port.modapi.CsvValueDecl | fun copy(java.lang.String, java.lang.String, java.lang.String, com.eratw.port.modapi.CsvOp, java.lang.String): com.eratw.port.modapi.CsvValueDecl
+com.eratw.port.modapi.CsvValueDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.CsvValueDecl | fun hashCode(): int
+com.eratw.port.modapi.CsvValueDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.CsvValueDecl | val column: java.lang.String
+com.eratw.port.modapi.CsvValueDecl | val op: com.eratw.port.modapi.CsvOp
+com.eratw.port.modapi.CsvValueDecl | val row: java.lang.String
+com.eratw.port.modapi.CsvValueDecl | val table: java.lang.String
+com.eratw.port.modapi.CsvValueDecl | val value: java.lang.String
+com.eratw.port.modapi.DeclDslKt | class
+com.eratw.port.modapi.DeclDslKt | static fun modDeclarations(java.lang.String, java.lang.String, int, kotlin.jvm.functions.Function1<? super com.eratw.port.modapi.ModManifestBuilder, kotlin.Unit>): com.eratw.port.modapi.ModManifest
+com.eratw.port.modapi.DeclKey | class
+com.eratw.port.modapi.DeclKey | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.DeclKey | fun hashCode(): int
+com.eratw.port.modapi.DeclKey | fun toString(): java.lang.String
+com.eratw.port.modapi.DeclKey | val name: java.lang.String
+com.eratw.port.modapi.DimType | enum
+com.eratw.port.modapi.DimType | static fun valueOf(java.lang.String): com.eratw.port.modapi.DimType
+com.eratw.port.modapi.DimType | static fun values(): com.eratw.port.modapi.DimType[]
+com.eratw.port.modapi.DimType | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.DimType>
+com.eratw.port.modapi.DimType | static field INT: com.eratw.port.modapi.DimType
+com.eratw.port.modapi.DimType | static field STR: com.eratw.port.modapi.DimType
+com.eratw.port.modapi.EntityApi | interface
+com.eratw.port.modapi.EntityApi | fun create-wN9MBu4(java.lang.String): long
+com.eratw.port.modapi.EntityApi | fun destroy-RlEdmUU(long): boolean
+com.eratw.port.modapi.EntityApi | fun exists-RlEdmUU(long): boolean
+com.eratw.port.modapi.EntityApi | fun getInt-Dlhx8ck(long, java.lang.String): long
+com.eratw.port.modapi.EntityApi | fun getRef-_JPOuso(long, java.lang.String): long
+com.eratw.port.modapi.EntityApi | fun getStr-Dlhx8ck(long, java.lang.String): java.lang.String
+com.eratw.port.modapi.EntityApi | fun query(java.lang.String, com.eratw.port.modapi.EntityState): java.util.List<com.eratw.port.modapi.EntityId>
+com.eratw.port.modapi.EntityApi | fun setInt-htsbJaw(long, java.lang.String, long): boolean
+com.eratw.port.modapi.EntityApi | fun setRef-HnAcLk0(long, java.lang.String, long): boolean
+com.eratw.port.modapi.EntityApi | fun setState-Dlhx8ck(long, com.eratw.port.modapi.EntityState): boolean
+com.eratw.port.modapi.EntityApi | fun setStr-htsbJaw(long, java.lang.String, java.lang.String): boolean
+com.eratw.port.modapi.EntityApi | fun stateOf-RlEdmUU(long): com.eratw.port.modapi.EntityState
+com.eratw.port.modapi.EntityId | class
+com.eratw.port.modapi.EntityId | static fun constructor-impl(long): long
+com.eratw.port.modapi.EntityId | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.EntityId | static fun equals-impl(long, java.lang.Object): boolean
+com.eratw.port.modapi.EntityId | static fun equals-impl0(long, long): boolean
+com.eratw.port.modapi.EntityId | fun hashCode(): int
+com.eratw.port.modapi.EntityId | static fun hashCode-impl(long): int
+com.eratw.port.modapi.EntityId | static fun isNull-impl(long): boolean
+com.eratw.port.modapi.EntityId | fun toString(): java.lang.String
+com.eratw.port.modapi.EntityId | static fun toString-impl(long): java.lang.String
+com.eratw.port.modapi.EntityId | val raw: long
+com.eratw.port.modapi.EntityId.Companion | class
+com.eratw.port.modapi.EntityId.Companion | val NULL-vmlZJTY: long
+com.eratw.port.modapi.EntityKeyOpsKt | class
+com.eratw.port.modapi.EntityKeyOpsKt | static fun create(com.eratw.port.modapi.EntityApi, com.eratw.port.modapi.ArchetypeKey): long
+com.eratw.port.modapi.EntityKeyOpsKt | static fun getInt-_sV9MbQ(com.eratw.port.modapi.EntityApi, long, com.eratw.port.modapi.FieldKey<java.lang.Long>): long
+com.eratw.port.modapi.EntityKeyOpsKt | static fun getRef-_sV9MbQ(com.eratw.port.modapi.EntityApi, long, com.eratw.port.modapi.FieldKey<com.eratw.port.modapi.EntityId>): long
+com.eratw.port.modapi.EntityKeyOpsKt | static fun getStr-_sV9MbQ(com.eratw.port.modapi.EntityApi, long, com.eratw.port.modapi.FieldKey<java.lang.String>): java.lang.String
+com.eratw.port.modapi.EntityKeyOpsKt | static fun query(com.eratw.port.modapi.EntityApi, com.eratw.port.modapi.ArchetypeKey, com.eratw.port.modapi.EntityState): java.util.List<com.eratw.port.modapi.EntityId>
+com.eratw.port.modapi.EntityKeyOpsKt | static fun setInt-M4wgtgg(com.eratw.port.modapi.EntityApi, long, com.eratw.port.modapi.FieldKey<java.lang.Long>, long): boolean
+com.eratw.port.modapi.EntityKeyOpsKt | static fun setRef-LpUfgrI(com.eratw.port.modapi.EntityApi, long, com.eratw.port.modapi.FieldKey<com.eratw.port.modapi.EntityId>, long): boolean
+com.eratw.port.modapi.EntityKeyOpsKt | static fun setStr-M4wgtgg(com.eratw.port.modapi.EntityApi, long, com.eratw.port.modapi.FieldKey<java.lang.String>, java.lang.String): boolean
+com.eratw.port.modapi.EntityRefCompareOp | enum
+com.eratw.port.modapi.EntityRefCompareOp | static fun valueOf(java.lang.String): com.eratw.port.modapi.EntityRefCompareOp
+com.eratw.port.modapi.EntityRefCompareOp | static fun values(): com.eratw.port.modapi.EntityRefCompareOp[]
+com.eratw.port.modapi.EntityRefCompareOp | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.EntityRefCompareOp>
+com.eratw.port.modapi.EntityRefCompareOp | static field EQ: com.eratw.port.modapi.EntityRefCompareOp
+com.eratw.port.modapi.EntityRefCompareOp | static field NE: com.eratw.port.modapi.EntityRefCompareOp
+com.eratw.port.modapi.EntityRefFieldCmp | class
+com.eratw.port.modapi.EntityRefFieldCmp | fun component1(): java.lang.String
+com.eratw.port.modapi.EntityRefFieldCmp | fun component2(): com.eratw.port.modapi.EntityRefCompareOp
+com.eratw.port.modapi.EntityRefFieldCmp | fun component3-vmlZJTY(): long
+com.eratw.port.modapi.EntityRefFieldCmp | fun component4(): boolean
+com.eratw.port.modapi.EntityRefFieldCmp | fun copy-mNxp5Dk(java.lang.String, com.eratw.port.modapi.EntityRefCompareOp, long, boolean): com.eratw.port.modapi.EntityRefFieldCmp
+com.eratw.port.modapi.EntityRefFieldCmp | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.EntityRefFieldCmp | fun hashCode(): int
+com.eratw.port.modapi.EntityRefFieldCmp | fun toString(): java.lang.String
+com.eratw.port.modapi.EntityRefFieldCmp | val aliveOnly: boolean
+com.eratw.port.modapi.EntityRefFieldCmp | val field: java.lang.String
+com.eratw.port.modapi.EntityRefFieldCmp | val op: com.eratw.port.modapi.EntityRefCompareOp
+com.eratw.port.modapi.EntityRefFieldCmp | val other-vmlZJTY: long
+com.eratw.port.modapi.EntityState | enum
+com.eratw.port.modapi.EntityState | static fun valueOf(java.lang.String): com.eratw.port.modapi.EntityState
+com.eratw.port.modapi.EntityState | static fun values(): com.eratw.port.modapi.EntityState[]
+com.eratw.port.modapi.EntityState | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.EntityState>
+com.eratw.port.modapi.EntityState | static field ACTIVE: com.eratw.port.modapi.EntityState
+com.eratw.port.modapi.EntityState | static field INACTIVE: com.eratw.port.modapi.EntityState
+com.eratw.port.modapi.EntityState | static field RETIRED: com.eratw.port.modapi.EntityState
+com.eratw.port.modapi.EnumSettingDecl | class
+com.eratw.port.modapi.EnumSettingDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.EnumSettingDecl | fun component2(): java.lang.String
+com.eratw.port.modapi.EnumSettingDecl | fun component3(): java.util.List<java.lang.String>
+com.eratw.port.modapi.EnumSettingDecl | fun component4(): java.lang.String
+com.eratw.port.modapi.EnumSettingDecl | fun component5(): java.lang.String
+com.eratw.port.modapi.EnumSettingDecl | fun copy(java.lang.String, java.lang.String, java.util.List<java.lang.String>, java.lang.String, java.lang.String): com.eratw.port.modapi.EnumSettingDecl
+com.eratw.port.modapi.EnumSettingDecl | fun defaultText(): java.lang.String
+com.eratw.port.modapi.EnumSettingDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.EnumSettingDecl | fun hashCode(): int
+com.eratw.port.modapi.EnumSettingDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.EnumSettingDecl | val candidates: java.util.List<java.lang.String>
+com.eratw.port.modapi.EnumSettingDecl | val default: java.lang.String
+com.eratw.port.modapi.EnumSettingDecl | val description: java.lang.String
+com.eratw.port.modapi.EnumSettingDecl | val key: java.lang.String
+com.eratw.port.modapi.EnumSettingDecl | val kind: com.eratw.port.modapi.SettingKind
+com.eratw.port.modapi.EnumSettingDecl | val title: java.lang.String
+com.eratw.port.modapi.EraMod | interface
+com.eratw.port.modapi.EraMod | fun onDisable(): void
+com.eratw.port.modapi.EraMod | fun onEnable(): void
+com.eratw.port.modapi.EraMod | fun onLoad(com.eratw.port.modapi.ModContext): void
+com.eratw.port.modapi.EraMod | fun onMigrate(int, int): void
+com.eratw.port.modapi.EraMod | fun onNewGame(): void
+com.eratw.port.modapi.EraMod | fun onPackageUpgrade(java.lang.String, java.lang.String): void
+com.eratw.port.modapi.EraMod | fun onSaveLoaded(): void
+com.eratw.port.modapi.EraMod | fun onSettingsChanged(java.util.List<java.lang.String>): void
+com.eratw.port.modapi.EraMod | fun onTurnBoundary(): void
+com.eratw.port.modapi.EraMod | fun onUnload(): void
+com.eratw.port.modapi.EraMod | val apiVersion: int
+com.eratw.port.modapi.EraMod | val dataVersion: int
+com.eratw.port.modapi.EraMod | val requires: java.util.List<java.lang.String>
+com.eratw.port.modapi.EventApi | interface
+com.eratw.port.modapi.EventApi | fun declare(java.lang.String): void
+com.eratw.port.modapi.EventApi | fun exists(java.lang.String): boolean
+com.eratw.port.modapi.EventApi | fun knownEventKeys(): java.util.List<java.lang.String>
+com.eratw.port.modapi.EventApi | fun register(java.lang.String, com.eratw.port.modapi.EventBucket, com.eratw.port.modapi.EventHandler): com.eratw.port.modapi.Registration
+com.eratw.port.modapi.EventApi | fun trigger(java.lang.String): void
+com.eratw.port.modapi.EventBucket | enum
+com.eratw.port.modapi.EventBucket | static fun valueOf(java.lang.String): com.eratw.port.modapi.EventBucket
+com.eratw.port.modapi.EventBucket | static fun values(): com.eratw.port.modapi.EventBucket[]
+com.eratw.port.modapi.EventBucket | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.EventBucket>
+com.eratw.port.modapi.EventBucket | static field LATER: com.eratw.port.modapi.EventBucket
+com.eratw.port.modapi.EventBucket | static field NORMAL: com.eratw.port.modapi.EventBucket
+com.eratw.port.modapi.EventBucket | static field ONLY: com.eratw.port.modapi.EventBucket
+com.eratw.port.modapi.EventBucket | static field PRI: com.eratw.port.modapi.EventBucket
+com.eratw.port.modapi.EventContext | interface
+com.eratw.port.modapi.EventContext | val eventKey: java.lang.String
+com.eratw.port.modapi.EventContext | val packageId: java.lang.String
+com.eratw.port.modapi.EventHandler | interface
+com.eratw.port.modapi.EventHandler | fun onEvent(com.eratw.port.modapi.EventContext): com.eratw.port.modapi.EventResult
+com.eratw.port.modapi.EventResult | enum
+com.eratw.port.modapi.EventResult | static fun valueOf(java.lang.String): com.eratw.port.modapi.EventResult
+com.eratw.port.modapi.EventResult | static fun values(): com.eratw.port.modapi.EventResult[]
+com.eratw.port.modapi.EventResult | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.EventResult>
+com.eratw.port.modapi.EventResult | static field CONTINUE: com.eratw.port.modapi.EventResult
+com.eratw.port.modapi.EventResult | static field SINGLE: com.eratw.port.modapi.EventResult
+com.eratw.port.modapi.FieldDecl | class
+com.eratw.port.modapi.FieldDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.FieldDecl | fun component2(): com.eratw.port.modapi.FieldType
+com.eratw.port.modapi.FieldDecl | fun component3(): boolean
+com.eratw.port.modapi.FieldDecl | fun copy(java.lang.String, com.eratw.port.modapi.FieldType, boolean): com.eratw.port.modapi.FieldDecl
+com.eratw.port.modapi.FieldDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.FieldDecl | fun hashCode(): int
+com.eratw.port.modapi.FieldDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.FieldDecl | val isEntityRef: boolean
+com.eratw.port.modapi.FieldDecl | val name: java.lang.String
+com.eratw.port.modapi.FieldDecl | val type: com.eratw.port.modapi.FieldType
+com.eratw.port.modapi.FieldKey | class
+com.eratw.port.modapi.FieldType | enum
+com.eratw.port.modapi.FieldType | static fun valueOf(java.lang.String): com.eratw.port.modapi.FieldType
+com.eratw.port.modapi.FieldType | static fun values(): com.eratw.port.modapi.FieldType[]
+com.eratw.port.modapi.FieldType | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.FieldType>
+com.eratw.port.modapi.FieldType | static field INT: com.eratw.port.modapi.FieldType
+com.eratw.port.modapi.FieldType | static field STR: com.eratw.port.modapi.FieldType
+com.eratw.port.modapi.FunctionApi | interface
+com.eratw.port.modapi.FunctionApi | fun has(java.lang.String): boolean
+com.eratw.port.modapi.FunctionApi | fun override(java.lang.String, com.eratw.port.modapi.ModFunction): void
+com.eratw.port.modapi.FunctionApi | fun register(java.lang.String, com.eratw.port.modapi.ModFunction): void
+com.eratw.port.modapi.FunctionKey | class
+com.eratw.port.modapi.GameStateApi | interface
+com.eratw.port.modapi.GameStateApi | fun getIntVar(java.lang.String): long
+com.eratw.port.modapi.GameStateApi | fun getStrVar(java.lang.String): java.lang.String
+com.eratw.port.modapi.GameStateApi | fun hasIntVar(java.lang.String): boolean
+com.eratw.port.modapi.GameStateApi | fun hasStrVar(java.lang.String): boolean
+com.eratw.port.modapi.GameStateApi | fun setIntVar(java.lang.String, long): void
+com.eratw.port.modapi.GameStateApi | fun setStrVar(java.lang.String, java.lang.String): void
+com.eratw.port.modapi.GameTime | class
+com.eratw.port.modapi.GameTime | fun component1(): long
+com.eratw.port.modapi.GameTime | fun component2(): java.lang.String
+com.eratw.port.modapi.GameTime | fun copy(long, java.lang.String): com.eratw.port.modapi.GameTime
+com.eratw.port.modapi.GameTime | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.GameTime | fun hashCode(): int
+com.eratw.port.modapi.GameTime | fun toString(): java.lang.String
+com.eratw.port.modapi.GameTime | val day: long
+com.eratw.port.modapi.GameTime | val phase: java.lang.String
+com.eratw.port.modapi.GlobalDimDecl | class
+com.eratw.port.modapi.GlobalDimDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.GlobalDimDecl | fun component2(): com.eratw.port.modapi.DimType
+com.eratw.port.modapi.GlobalDimDecl | fun component3(): java.util.List<java.lang.Integer>
+com.eratw.port.modapi.GlobalDimDecl | fun component4(): boolean
+com.eratw.port.modapi.GlobalDimDecl | fun copy(java.lang.String, com.eratw.port.modapi.DimType, java.util.List<java.lang.Integer>, boolean): com.eratw.port.modapi.GlobalDimDecl
+com.eratw.port.modapi.GlobalDimDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.GlobalDimDecl | fun hashCode(): int
+com.eratw.port.modapi.GlobalDimDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.GlobalDimDecl | val dims: java.util.List<java.lang.Integer>
+com.eratw.port.modapi.GlobalDimDecl | val isSaved: boolean
+com.eratw.port.modapi.GlobalDimDecl | val name: java.lang.String
+com.eratw.port.modapi.GlobalDimDecl | val type: com.eratw.port.modapi.DimType
+com.eratw.port.modapi.GlobalKey | class
+com.eratw.port.modapi.HasRelation | class
+com.eratw.port.modapi.HasRelation | fun component1(): java.lang.String
+com.eratw.port.modapi.HasRelation | fun component2(): boolean
+com.eratw.port.modapi.HasRelation | fun component3-NgPTAis(): com.eratw.port.modapi.EntityId
+com.eratw.port.modapi.HasRelation | fun copy-W0LOBBY(java.lang.String, boolean, com.eratw.port.modapi.EntityId): com.eratw.port.modapi.HasRelation
+com.eratw.port.modapi.HasRelation | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.HasRelation | fun hashCode(): int
+com.eratw.port.modapi.HasRelation | fun toString(): java.lang.String
+com.eratw.port.modapi.HasRelation | val kind: java.lang.String
+com.eratw.port.modapi.HasRelation | val other-NgPTAis: com.eratw.port.modapi.EntityId
+com.eratw.port.modapi.HasRelation | val outgoing: boolean
+com.eratw.port.modapi.HookApi | interface
+com.eratw.port.modapi.HookApi | fun knownFunctionKeys(): java.util.Set<java.lang.String>
+com.eratw.port.modapi.HookApi | fun register(java.lang.String, com.eratw.port.modapi.HookPhase, com.eratw.port.modapi.HookHandler): com.eratw.port.modapi.Registration
+com.eratw.port.modapi.HookApi | fun registrations(): java.util.List<com.eratw.port.modapi.HookRegistration>
+com.eratw.port.modapi.HookContext | class
+com.eratw.port.modapi.HookContext | fun setReturnValue(com.eratw.port.modapi.ModValue): void
+com.eratw.port.modapi.HookContext | val args: com.eratw.port.modapi.ModCallArg[]
+com.eratw.port.modapi.HookContext | val packageId: java.lang.String
+com.eratw.port.modapi.HookContext | val phase: com.eratw.port.modapi.HookPhase
+com.eratw.port.modapi.HookContext | val returnValue: com.eratw.port.modapi.ModValue
+com.eratw.port.modapi.HookContext | val targetKey: java.lang.String
+com.eratw.port.modapi.HookDecl | class
+com.eratw.port.modapi.HookDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.HookDecl | fun component2(): com.eratw.port.modapi.HookPhase
+com.eratw.port.modapi.HookDecl | fun component3(): int
+com.eratw.port.modapi.HookDecl | fun component4(): boolean
+com.eratw.port.modapi.HookDecl | fun component5(): boolean
+com.eratw.port.modapi.HookDecl | fun component6(): boolean
+com.eratw.port.modapi.HookDecl | fun component7(): boolean
+com.eratw.port.modapi.HookDecl | fun copy(java.lang.String, com.eratw.port.modapi.HookPhase, int, boolean, boolean, boolean, boolean): com.eratw.port.modapi.HookDecl
+com.eratw.port.modapi.HookDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.HookDecl | fun hashCode(): int
+com.eratw.port.modapi.HookDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.HookDecl | val continueOnHandlerFailure: boolean
+com.eratw.port.modapi.HookDecl | val mayMutateArgs: boolean
+com.eratw.port.modapi.HookDecl | val mayMutateReturn: boolean
+com.eratw.port.modapi.HookDecl | val phase: com.eratw.port.modapi.HookPhase
+com.eratw.port.modapi.HookDecl | val priority: int
+com.eratw.port.modapi.HookDecl | val runOnFailure: boolean
+com.eratw.port.modapi.HookDecl | val targetKey: java.lang.String
+com.eratw.port.modapi.HookHandler | interface
+com.eratw.port.modapi.HookHandler | fun onHook(com.eratw.port.modapi.HookContext): com.eratw.port.modapi.HookResult
+com.eratw.port.modapi.HookOptions | class
+com.eratw.port.modapi.HookOptions | fun component1(): int
+com.eratw.port.modapi.HookOptions | fun component2(): boolean
+com.eratw.port.modapi.HookOptions | fun component3(): boolean
+com.eratw.port.modapi.HookOptions | fun component4(): boolean
+com.eratw.port.modapi.HookOptions | fun component5(): boolean
+com.eratw.port.modapi.HookOptions | fun copy(int, boolean, boolean, boolean, boolean): com.eratw.port.modapi.HookOptions
+com.eratw.port.modapi.HookOptions | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.HookOptions | fun hashCode(): int
+com.eratw.port.modapi.HookOptions | fun toString(): java.lang.String
+com.eratw.port.modapi.HookOptions | val continueOnHandlerFailure: boolean
+com.eratw.port.modapi.HookOptions | val mayMutateArgs: boolean
+com.eratw.port.modapi.HookOptions | val mayMutateReturn: boolean
+com.eratw.port.modapi.HookOptions | val priority: int
+com.eratw.port.modapi.HookOptions | val runOnFailure: boolean
+com.eratw.port.modapi.HookPhase | enum
+com.eratw.port.modapi.HookPhase | static fun valueOf(java.lang.String): com.eratw.port.modapi.HookPhase
+com.eratw.port.modapi.HookPhase | static fun values(): com.eratw.port.modapi.HookPhase[]
+com.eratw.port.modapi.HookPhase | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.HookPhase>
+com.eratw.port.modapi.HookPhase | static field POSTFIX: com.eratw.port.modapi.HookPhase
+com.eratw.port.modapi.HookPhase | static field PREFIX: com.eratw.port.modapi.HookPhase
+com.eratw.port.modapi.HookRegistration | class
+com.eratw.port.modapi.HookRegistration | fun component1(): java.lang.String
+com.eratw.port.modapi.HookRegistration | fun component2(): com.eratw.port.modapi.HookPhase
+com.eratw.port.modapi.HookRegistration | fun component3(): int
+com.eratw.port.modapi.HookRegistration | fun component4(): java.lang.String
+com.eratw.port.modapi.HookRegistration | fun copy(java.lang.String, com.eratw.port.modapi.HookPhase, int, java.lang.String): com.eratw.port.modapi.HookRegistration
+com.eratw.port.modapi.HookRegistration | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.HookRegistration | fun hashCode(): int
+com.eratw.port.modapi.HookRegistration | fun toString(): java.lang.String
+com.eratw.port.modapi.HookRegistration | val functionKey: java.lang.String
+com.eratw.port.modapi.HookRegistration | val kind: com.eratw.port.modapi.HookPhase
+com.eratw.port.modapi.HookRegistration | val packageId: java.lang.String
+com.eratw.port.modapi.HookRegistration | val priority: int
+com.eratw.port.modapi.HookResult | interface
+com.eratw.port.modapi.HookResult.Continue | object
+com.eratw.port.modapi.HookResult.Continue | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.HookResult.Continue | fun hashCode(): int
+com.eratw.port.modapi.HookResult.Continue | fun toString(): java.lang.String
+com.eratw.port.modapi.HookResult.Replace | class
+com.eratw.port.modapi.HookResult.Replace | fun component1(): com.eratw.port.modapi.ModValue
+com.eratw.port.modapi.HookResult.Replace | fun copy(com.eratw.port.modapi.ModValue): com.eratw.port.modapi.HookResult$Replace
+com.eratw.port.modapi.HookResult.Replace | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.HookResult.Replace | fun hashCode(): int
+com.eratw.port.modapi.HookResult.Replace | fun toString(): java.lang.String
+com.eratw.port.modapi.HookResult.Replace | val value: com.eratw.port.modapi.ModValue
+com.eratw.port.modapi.HookResult.SkipOriginal | object
+com.eratw.port.modapi.HookResult.SkipOriginal | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.HookResult.SkipOriginal | fun hashCode(): int
+com.eratw.port.modapi.HookResult.SkipOriginal | fun toString(): java.lang.String
+com.eratw.port.modapi.IntCompareOp | enum
+com.eratw.port.modapi.IntCompareOp | static fun valueOf(java.lang.String): com.eratw.port.modapi.IntCompareOp
+com.eratw.port.modapi.IntCompareOp | static fun values(): com.eratw.port.modapi.IntCompareOp[]
+com.eratw.port.modapi.IntCompareOp | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.IntCompareOp>
+com.eratw.port.modapi.IntCompareOp | static field EQ: com.eratw.port.modapi.IntCompareOp
+com.eratw.port.modapi.IntCompareOp | static field GE: com.eratw.port.modapi.IntCompareOp
+com.eratw.port.modapi.IntCompareOp | static field GT: com.eratw.port.modapi.IntCompareOp
+com.eratw.port.modapi.IntCompareOp | static field LE: com.eratw.port.modapi.IntCompareOp
+com.eratw.port.modapi.IntCompareOp | static field LT: com.eratw.port.modapi.IntCompareOp
+com.eratw.port.modapi.IntCompareOp | static field NE: com.eratw.port.modapi.IntCompareOp
+com.eratw.port.modapi.IntFieldCmp | class
+com.eratw.port.modapi.IntFieldCmp | fun component1(): java.lang.String
+com.eratw.port.modapi.IntFieldCmp | fun component2(): com.eratw.port.modapi.IntCompareOp
+com.eratw.port.modapi.IntFieldCmp | fun component3(): long
+com.eratw.port.modapi.IntFieldCmp | fun copy(java.lang.String, com.eratw.port.modapi.IntCompareOp, long): com.eratw.port.modapi.IntFieldCmp
+com.eratw.port.modapi.IntFieldCmp | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.IntFieldCmp | fun hashCode(): int
+com.eratw.port.modapi.IntFieldCmp | fun toString(): java.lang.String
+com.eratw.port.modapi.IntFieldCmp | val field: java.lang.String
+com.eratw.port.modapi.IntFieldCmp | val op: com.eratw.port.modapi.IntCompareOp
+com.eratw.port.modapi.IntFieldCmp | val value: long
+com.eratw.port.modapi.IntSettingDecl | class
+com.eratw.port.modapi.IntSettingDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.IntSettingDecl | fun component2(): long
+com.eratw.port.modapi.IntSettingDecl | fun component3(): java.lang.Long
+com.eratw.port.modapi.IntSettingDecl | fun component4(): java.lang.Long
+com.eratw.port.modapi.IntSettingDecl | fun component5(): java.lang.String
+com.eratw.port.modapi.IntSettingDecl | fun component6(): java.lang.String
+com.eratw.port.modapi.IntSettingDecl | fun copy(java.lang.String, long, java.lang.Long, java.lang.Long, java.lang.String, java.lang.String): com.eratw.port.modapi.IntSettingDecl
+com.eratw.port.modapi.IntSettingDecl | fun defaultText(): java.lang.String
+com.eratw.port.modapi.IntSettingDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.IntSettingDecl | fun hashCode(): int
+com.eratw.port.modapi.IntSettingDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.IntSettingDecl | val default: long
+com.eratw.port.modapi.IntSettingDecl | val description: java.lang.String
+com.eratw.port.modapi.IntSettingDecl | val key: java.lang.String
+com.eratw.port.modapi.IntSettingDecl | val kind: com.eratw.port.modapi.SettingKind
+com.eratw.port.modapi.IntSettingDecl | val max: java.lang.Long
+com.eratw.port.modapi.IntSettingDecl | val min: java.lang.Long
+com.eratw.port.modapi.IntSettingDecl | val title: java.lang.String
+com.eratw.port.modapi.InteractionApi | interface
+com.eratw.port.modapi.InteractionApi | fun registerHook(com.eratw.port.modapi.InteractionPhase, com.eratw.port.modapi.InteractionHandler): com.eratw.port.modapi.Registration
+com.eratw.port.modapi.InteractionApi | fun run(com.eratw.port.modapi.InteractionContext, kotlin.jvm.functions.Function0<? extends com.eratw.port.modapi.ModValue>): com.eratw.port.modapi.InteractionRunResult
+com.eratw.port.modapi.InteractionContext | class
+com.eratw.port.modapi.InteractionContext | fun component1(): java.lang.String
+com.eratw.port.modapi.InteractionContext | fun component2-vmlZJTY(): long
+com.eratw.port.modapi.InteractionContext | fun component3(): java.util.List<com.eratw.port.modapi.EntityId>
+com.eratw.port.modapi.InteractionContext | fun component4-NgPTAis(): com.eratw.port.modapi.EntityId
+com.eratw.port.modapi.InteractionContext | fun component5(): java.util.Map<java.lang.String, java.lang.String>
+com.eratw.port.modapi.InteractionContext | fun copy-lHS5A3k(java.lang.String, long, java.util.List<com.eratw.port.modapi.EntityId>, com.eratw.port.modapi.EntityId, java.util.Map<java.lang.String, java.lang.String>): com.eratw.port.modapi.InteractionContext
+com.eratw.port.modapi.InteractionContext | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.InteractionContext | fun hashCode(): int
+com.eratw.port.modapi.InteractionContext | fun toString(): java.lang.String
+com.eratw.port.modapi.InteractionContext | val actor-vmlZJTY: long
+com.eratw.port.modapi.InteractionContext | val interactionId: java.lang.String
+com.eratw.port.modapi.InteractionContext | val metadata: java.util.Map<java.lang.String, java.lang.String>
+com.eratw.port.modapi.InteractionContext | val primaryTarget-NgPTAis: com.eratw.port.modapi.EntityId
+com.eratw.port.modapi.InteractionContext | val targets: java.util.List<com.eratw.port.modapi.EntityId>
+com.eratw.port.modapi.InteractionHandler | interface
+com.eratw.port.modapi.InteractionHandler | fun onInteraction(com.eratw.port.modapi.InteractionHookContext): com.eratw.port.modapi.InteractionResult
+com.eratw.port.modapi.InteractionHookContext | class
+com.eratw.port.modapi.InteractionHookContext | fun setReplacedResult(com.eratw.port.modapi.ModValue): void
+com.eratw.port.modapi.InteractionHookContext | val interaction: com.eratw.port.modapi.InteractionContext
+com.eratw.port.modapi.InteractionHookContext | val packageId: java.lang.String
+com.eratw.port.modapi.InteractionHookContext | val phase: com.eratw.port.modapi.InteractionPhase
+com.eratw.port.modapi.InteractionHookContext | val replacedResult: com.eratw.port.modapi.ModValue
+com.eratw.port.modapi.InteractionHookDecl | class
+com.eratw.port.modapi.InteractionHookDecl | fun component1(): com.eratw.port.modapi.InteractionPhase
+com.eratw.port.modapi.InteractionHookDecl | fun component2(): int
+com.eratw.port.modapi.InteractionHookDecl | fun copy(com.eratw.port.modapi.InteractionPhase, int): com.eratw.port.modapi.InteractionHookDecl
+com.eratw.port.modapi.InteractionHookDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.InteractionHookDecl | fun hashCode(): int
+com.eratw.port.modapi.InteractionHookDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.InteractionHookDecl | val phase: com.eratw.port.modapi.InteractionPhase
+com.eratw.port.modapi.InteractionHookDecl | val priority: int
+com.eratw.port.modapi.InteractionPhase | enum
+com.eratw.port.modapi.InteractionPhase | static fun valueOf(java.lang.String): com.eratw.port.modapi.InteractionPhase
+com.eratw.port.modapi.InteractionPhase | static fun values(): com.eratw.port.modapi.InteractionPhase[]
+com.eratw.port.modapi.InteractionPhase | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.InteractionPhase>
+com.eratw.port.modapi.InteractionPhase | static field MAIN: com.eratw.port.modapi.InteractionPhase
+com.eratw.port.modapi.InteractionPhase | static field POST: com.eratw.port.modapi.InteractionPhase
+com.eratw.port.modapi.InteractionPhase | static field PRE: com.eratw.port.modapi.InteractionPhase
+com.eratw.port.modapi.InteractionPhase | static field PRECONDITION: com.eratw.port.modapi.InteractionPhase
+com.eratw.port.modapi.InteractionPhase | static field SETTLEMENT: com.eratw.port.modapi.InteractionPhase
+com.eratw.port.modapi.InteractionResult | enum
+com.eratw.port.modapi.InteractionResult | static fun valueOf(java.lang.String): com.eratw.port.modapi.InteractionResult
+com.eratw.port.modapi.InteractionResult | static fun values(): com.eratw.port.modapi.InteractionResult[]
+com.eratw.port.modapi.InteractionResult | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.InteractionResult>
+com.eratw.port.modapi.InteractionResult | static field CONTINUE: com.eratw.port.modapi.InteractionResult
+com.eratw.port.modapi.InteractionResult | static field INTERRUPT: com.eratw.port.modapi.InteractionResult
+com.eratw.port.modapi.InteractionResult | static field REPLACE: com.eratw.port.modapi.InteractionResult
+com.eratw.port.modapi.InteractionRunResult | class
+com.eratw.port.modapi.InteractionRunResult | val failures: java.util.List<java.lang.String>
+com.eratw.port.modapi.InteractionRunResult | val interrupted: boolean
+com.eratw.port.modapi.InteractionRunResult | val replaced: boolean
+com.eratw.port.modapi.InteractionRunResult | val returnValue: com.eratw.port.modapi.ModValue
+com.eratw.port.modapi.JobApi | interface
+com.eratw.port.modapi.JobApi | fun bind(java.lang.String, com.eratw.port.modapi.JobHandler): com.eratw.port.modapi.Registration
+com.eratw.port.modapi.JobApi | fun bindTemplate(java.lang.String, com.eratw.port.modapi.JobHandler): com.eratw.port.modapi.Registration
+com.eratw.port.modapi.JobApi | fun cancel(java.lang.String): boolean
+com.eratw.port.modapi.JobApi | fun reschedule(java.lang.String, long): boolean
+com.eratw.port.modapi.JobApi | fun scheduleOnce-W0LOBBY(java.lang.String, long, com.eratw.port.modapi.EntityId): java.lang.String
+com.eratw.port.modapi.JobCatchUp | enum
+com.eratw.port.modapi.JobCatchUp | static fun valueOf(java.lang.String): com.eratw.port.modapi.JobCatchUp
+com.eratw.port.modapi.JobCatchUp | static fun values(): com.eratw.port.modapi.JobCatchUp[]
+com.eratw.port.modapi.JobCatchUp | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.JobCatchUp>
+com.eratw.port.modapi.JobCatchUp | static field MISS_ONCE: com.eratw.port.modapi.JobCatchUp
+com.eratw.port.modapi.JobCatchUp | static field MISS_SKIP: com.eratw.port.modapi.JobCatchUp
+com.eratw.port.modapi.JobCatchUp | static field REPLAY: com.eratw.port.modapi.JobCatchUp
+com.eratw.port.modapi.JobContext | class
+com.eratw.port.modapi.JobContext | val instanceKey: java.lang.String
+com.eratw.port.modapi.JobContext | val jobId: java.lang.String
+com.eratw.port.modapi.JobContext | val packageId: java.lang.String
+com.eratw.port.modapi.JobContext | val payloadRef-NgPTAis: com.eratw.port.modapi.EntityId
+com.eratw.port.modapi.JobContext | val templateKey: java.lang.String
+com.eratw.port.modapi.JobContext | val time: com.eratw.port.modapi.GameTime
+com.eratw.port.modapi.JobDecl | class
+com.eratw.port.modapi.JobDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.JobDecl | fun component2(): java.lang.String
+com.eratw.port.modapi.JobDecl | fun component3(): long
+com.eratw.port.modapi.JobDecl | fun component4(): java.lang.Long
+com.eratw.port.modapi.JobDecl | fun component5(): int
+com.eratw.port.modapi.JobDecl | fun copy(java.lang.String, java.lang.String, long, java.lang.Long, int): com.eratw.port.modapi.JobDecl
+com.eratw.port.modapi.JobDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.JobDecl | fun hashCode(): int
+com.eratw.port.modapi.JobDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.JobDecl | val everyDays: java.lang.Long
+com.eratw.port.modapi.JobDecl | val firstDay: long
+com.eratw.port.modapi.JobDecl | val jobId: java.lang.String
+com.eratw.port.modapi.JobDecl | val phase: java.lang.String
+com.eratw.port.modapi.JobDecl | val priority: int
+com.eratw.port.modapi.JobHandler | interface
+com.eratw.port.modapi.JobHandler | fun run(com.eratw.port.modapi.JobContext): void
+com.eratw.port.modapi.JobKey | class
+com.eratw.port.modapi.JobTemplateDecl | class
+com.eratw.port.modapi.JobTemplateDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.JobTemplateDecl | fun component2(): java.lang.String
+com.eratw.port.modapi.JobTemplateDecl | fun component3(): int
+com.eratw.port.modapi.JobTemplateDecl | fun component4(): com.eratw.port.modapi.JobCatchUp
+com.eratw.port.modapi.JobTemplateDecl | fun component5(): java.lang.Long
+com.eratw.port.modapi.JobTemplateDecl | fun copy(java.lang.String, java.lang.String, int, com.eratw.port.modapi.JobCatchUp, java.lang.Long): com.eratw.port.modapi.JobTemplateDecl
+com.eratw.port.modapi.JobTemplateDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.JobTemplateDecl | fun hashCode(): int
+com.eratw.port.modapi.JobTemplateDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.JobTemplateDecl | val catchUp: com.eratw.port.modapi.JobCatchUp
+com.eratw.port.modapi.JobTemplateDecl | val maxCatchUp: java.lang.Long
+com.eratw.port.modapi.JobTemplateDecl | val phase: java.lang.String
+com.eratw.port.modapi.JobTemplateDecl | val priority: int
+com.eratw.port.modapi.JobTemplateDecl | val templateKey: java.lang.String
+com.eratw.port.modapi.JobTemplateKey | class
+com.eratw.port.modapi.ModApi | object
+com.eratw.port.modapi.ModApi | static field VERSION: int = 21
+com.eratw.port.modapi.ModCallArg | class
+com.eratw.port.modapi.ModCallArg | fun setIntValue(long): void
+com.eratw.port.modapi.ModCallArg | fun setStrValue(java.lang.String): void
+com.eratw.port.modapi.ModCallArg | val intValue: long
+com.eratw.port.modapi.ModCallArg | val isString: boolean
+com.eratw.port.modapi.ModCallArg | val strValue: java.lang.String
+com.eratw.port.modapi.ModCarrier | annotation
+com.eratw.port.modapi.ModCarrierDeclaration | interface
+com.eratw.port.modapi.ModCarrierDeclaration | fun newMod(): com.eratw.port.modapi.EraMod
+com.eratw.port.modapi.ModCarrierDeclaration | val apiVersion: int
+com.eratw.port.modapi.ModCarrierDeclaration | val manifest: com.eratw.port.modapi.ModManifest
+com.eratw.port.modapi.ModCarrierDeclaration | val packageId: java.lang.String
+com.eratw.port.modapi.ModContext | interface
+com.eratw.port.modapi.ModContext | val actions: com.eratw.port.modapi.ActionApi
+com.eratw.port.modapi.ModContext | val audio: com.eratw.port.modapi.AudioApi
+com.eratw.port.modapi.ModContext | val entities: com.eratw.port.modapi.EntityApi
+com.eratw.port.modapi.ModContext | val events: com.eratw.port.modapi.EventApi
+com.eratw.port.modapi.ModContext | val functions: com.eratw.port.modapi.FunctionApi
+com.eratw.port.modapi.ModContext | val gameState: com.eratw.port.modapi.GameStateApi
+com.eratw.port.modapi.ModContext | val hooks: com.eratw.port.modapi.HookApi
+com.eratw.port.modapi.ModContext | val interactions: com.eratw.port.modapi.InteractionApi
+com.eratw.port.modapi.ModContext | val jobs: com.eratw.port.modapi.JobApi
+com.eratw.port.modapi.ModContext | val logger: com.eratw.port.modapi.ModLogger
+com.eratw.port.modapi.ModContext | val packageId: java.lang.String
+com.eratw.port.modapi.ModContext | val phases: com.eratw.port.modapi.PhaseApi
+com.eratw.port.modapi.ModContext | val query: com.eratw.port.modapi.QueryApi
+com.eratw.port.modapi.ModContext | val relationships: com.eratw.port.modapi.RelationshipApi
+com.eratw.port.modapi.ModContext | val resources: com.eratw.port.modapi.ModResourceApi
+com.eratw.port.modapi.ModContext | val rng: com.eratw.port.modapi.RandomApi
+com.eratw.port.modapi.ModContext | val roster: com.eratw.port.modapi.RosterProjectionApi
+com.eratw.port.modapi.ModContext | val runtime: com.eratw.port.modapi.RuntimeScheduler
+com.eratw.port.modapi.ModContext | val services: com.eratw.port.modapi.ModServiceRegistry
+com.eratw.port.modapi.ModContext | val settings: com.eratw.port.modapi.SettingsApi
+com.eratw.port.modapi.ModContext | val storage: com.eratw.port.modapi.StorageApi
+com.eratw.port.modapi.ModContext | val strings: com.eratw.port.modapi.StringsApi
+com.eratw.port.modapi.ModContext | val timing: com.eratw.port.modapi.TimingApi
+com.eratw.port.modapi.ModContext | val ui: com.eratw.port.modapi.UiApi
+com.eratw.port.modapi.ModDeclarationsKt | class
+com.eratw.port.modapi.ModDeclarationsKt | static fun intField(com.eratw.port.modapi.FieldKey<java.lang.Long>): com.eratw.port.modapi.FieldDecl
+com.eratw.port.modapi.ModDeclarationsKt | static fun refField(com.eratw.port.modapi.FieldKey<com.eratw.port.modapi.EntityId>): com.eratw.port.modapi.FieldDecl
+com.eratw.port.modapi.ModDeclarationsKt | static fun strField(com.eratw.port.modapi.FieldKey<java.lang.String>): com.eratw.port.modapi.FieldDecl
+com.eratw.port.modapi.ModFunction | interface
+com.eratw.port.modapi.ModFunction | fun call(com.eratw.port.modapi.ModCallArg[]): void
+com.eratw.port.modapi.ModKeysKt | class
+com.eratw.port.modapi.ModKeysKt | static fun intKey(java.lang.String): com.eratw.port.modapi.FieldKey<java.lang.Long>
+com.eratw.port.modapi.ModKeysKt | static fun refKey(java.lang.String): com.eratw.port.modapi.FieldKey<com.eratw.port.modapi.EntityId>
+com.eratw.port.modapi.ModKeysKt | static fun strKey(java.lang.String): com.eratw.port.modapi.FieldKey<java.lang.String>
+com.eratw.port.modapi.ModLogger | interface
+com.eratw.port.modapi.ModLogger | fun error(java.lang.String, java.lang.Throwable): void
+com.eratw.port.modapi.ModLogger | fun info(java.lang.String): void
+com.eratw.port.modapi.ModLogger | fun warn(java.lang.String): void
+com.eratw.port.modapi.ModManifest | class
+com.eratw.port.modapi.ModManifest | fun component1(): java.lang.String
+com.eratw.port.modapi.ModManifest | fun component10(): java.util.List<com.eratw.port.modapi.ComponentDecl>
+com.eratw.port.modapi.ModManifest | fun component11(): java.util.List<com.eratw.port.modapi.ArchetypeDecl>
+com.eratw.port.modapi.ModManifest | fun component12(): java.util.List<com.eratw.port.modapi.RelationshipDecl>
+com.eratw.port.modapi.ModManifest | fun component13(): java.util.List<com.eratw.port.modapi.HookDecl>
+com.eratw.port.modapi.ModManifest | fun component14(): java.util.List<com.eratw.port.modapi.InteractionHookDecl>
+com.eratw.port.modapi.ModManifest | fun component15(): java.util.List<com.eratw.port.modapi.PhaseDecl>
+com.eratw.port.modapi.ModManifest | fun component16(): java.util.List<com.eratw.port.modapi.JobDecl>
+com.eratw.port.modapi.ModManifest | fun component17(): java.util.List<com.eratw.port.modapi.JobTemplateDecl>
+com.eratw.port.modapi.ModManifest | fun component18(): java.util.List<java.lang.String>
+com.eratw.port.modapi.ModManifest | fun component19(): java.util.Set<java.lang.String>
+com.eratw.port.modapi.ModManifest | fun component2(): java.lang.String
+com.eratw.port.modapi.ModManifest | fun component20(): java.util.Map<java.lang.String, java.util.List<com.eratw.port.modapi.PrivateDimDecl>>
+com.eratw.port.modapi.ModManifest | fun component21(): java.util.Map<java.lang.String, java.lang.String>
+com.eratw.port.modapi.ModManifest | fun component22(): java.lang.String
+com.eratw.port.modapi.ModManifest | fun component23(): java.util.List<com.eratw.port.modapi.CharaRouteDecl>
+com.eratw.port.modapi.ModManifest | fun component24(): java.lang.String
+com.eratw.port.modapi.ModManifest | fun component25(): java.lang.String
+com.eratw.port.modapi.ModManifest | fun component26(): java.lang.String
+com.eratw.port.modapi.ModManifest | fun component27(): java.util.List<com.eratw.port.modapi.SettingDecl>
+com.eratw.port.modapi.ModManifest | fun component28(): java.util.Map<java.lang.String, java.lang.String>
+com.eratw.port.modapi.ModManifest | fun component29(): java.util.List<com.eratw.port.modapi.WriteGrantDecl>
+com.eratw.port.modapi.ModManifest | fun component3(): int
+com.eratw.port.modapi.ModManifest | fun component4(): java.util.List<java.lang.String>
+com.eratw.port.modapi.ModManifest | fun component5(): java.util.List<java.lang.String>
+com.eratw.port.modapi.ModManifest | fun component6(): java.util.Set<java.lang.String>
+com.eratw.port.modapi.ModManifest | fun component7(): java.util.List<com.eratw.port.modapi.GlobalDimDecl>
+com.eratw.port.modapi.ModManifest | fun component8(): java.util.List<com.eratw.port.modapi.CsvKeywordDecl>
+com.eratw.port.modapi.ModManifest | fun component9(): java.util.List<com.eratw.port.modapi.CsvValueDecl>
+com.eratw.port.modapi.ModManifest | fun copy(java.lang.String, java.lang.String, int, java.util.List<java.lang.String>, java.util.List<java.lang.String>, java.util.Set<java.lang.String>, java.util.List<com.eratw.port.modapi.GlobalDimDecl>, java.util.List<com.eratw.port.modapi.CsvKeywordDecl>, java.util.List<com.eratw.port.modapi.CsvValueDecl>, java.util.List<com.eratw.port.modapi.ComponentDecl>, java.util.List<com.eratw.port.modapi.ArchetypeDecl>, java.util.List<com.eratw.port.modapi.RelationshipDecl>, java.util.List<com.eratw.port.modapi.HookDecl>, java.util.List<com.eratw.port.modapi.InteractionHookDecl>, java.util.List<com.eratw.port.modapi.PhaseDecl>, java.util.List<com.eratw.port.modapi.JobDecl>, java.util.List<com.eratw.port.modapi.JobTemplateDecl>, java.util.List<java.lang.String>, java.util.Set<java.lang.String>, java.util.Map<java.lang.String, ? extends java.util.List<com.eratw.port.modapi.PrivateDimDecl>>, java.util.Map<java.lang.String, java.lang.String>, java.lang.String, java.util.List<com.eratw.port.modapi.CharaRouteDecl>, java.lang.String, java.lang.String, java.lang.String, java.util.List<? extends com.eratw.port.modapi.SettingDecl>, java.util.Map<java.lang.String, java.lang.String>, java.util.List<com.eratw.port.modapi.WriteGrantDecl>): com.eratw.port.modapi.ModManifest
+com.eratw.port.modapi.ModManifest | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.ModManifest | fun hashCode(): int
+com.eratw.port.modapi.ModManifest | fun toString(): java.lang.String
+com.eratw.port.modapi.ModManifest | val archetypes: java.util.List<com.eratw.port.modapi.ArchetypeDecl>
+com.eratw.port.modapi.ModManifest | val artifactSha256: java.lang.String
+com.eratw.port.modapi.ModManifest | val author: java.lang.String
+com.eratw.port.modapi.ModManifest | val charaRoutes: java.util.List<com.eratw.port.modapi.CharaRouteDecl>
+com.eratw.port.modapi.ModManifest | val components: java.util.List<com.eratw.port.modapi.ComponentDecl>
+com.eratw.port.modapi.ModManifest | val csvKeywords: java.util.List<com.eratw.port.modapi.CsvKeywordDecl>
+com.eratw.port.modapi.ModManifest | val csvValues: java.util.List<com.eratw.port.modapi.CsvValueDecl>
+com.eratw.port.modapi.ModManifest | val declarationPositions: java.util.Map<java.lang.String, java.lang.String>
+com.eratw.port.modapi.ModManifest | val description: java.lang.String
+com.eratw.port.modapi.ModManifest | val displayName: java.lang.String
+com.eratw.port.modapi.ModManifest | val entityRefs: java.util.Set<java.lang.String>
+com.eratw.port.modapi.ModManifest | val exportedMacros: java.util.Map<java.lang.String, java.lang.String>
+com.eratw.port.modapi.ModManifest | val externalCalls: java.util.List<java.lang.String>
+com.eratw.port.modapi.ModManifest | val globalDims: java.util.List<com.eratw.port.modapi.GlobalDimDecl>
+com.eratw.port.modapi.ModManifest | val hooks: java.util.List<com.eratw.port.modapi.HookDecl>
+com.eratw.port.modapi.ModManifest | val interactionHooks: java.util.List<com.eratw.port.modapi.InteractionHookDecl>
+com.eratw.port.modapi.ModManifest | val jobTemplates: java.util.List<com.eratw.port.modapi.JobTemplateDecl>
+com.eratw.port.modapi.ModManifest | val jobs: java.util.List<com.eratw.port.modapi.JobDecl>
+com.eratw.port.modapi.ModManifest | val loadAfter: java.util.List<java.lang.String>
+com.eratw.port.modapi.ModManifest | val minApi: int
+com.eratw.port.modapi.ModManifest | val overrideFunctions: java.util.Set<java.lang.String>
+com.eratw.port.modapi.ModManifest | val packageId: java.lang.String
+com.eratw.port.modapi.ModManifest | val phases: java.util.List<com.eratw.port.modapi.PhaseDecl>
+com.eratw.port.modapi.ModManifest | val privateDims: java.util.Map<java.lang.String, java.util.List<com.eratw.port.modapi.PrivateDimDecl>>
+com.eratw.port.modapi.ModManifest | val relationships: java.util.List<com.eratw.port.modapi.RelationshipDecl>
+com.eratw.port.modapi.ModManifest | val requires: java.util.List<java.lang.String>
+com.eratw.port.modapi.ModManifest | val settings: java.util.List<com.eratw.port.modapi.SettingDecl>
+com.eratw.port.modapi.ModManifest | val version: java.lang.String
+com.eratw.port.modapi.ModManifest | val writeGrants: java.util.List<com.eratw.port.modapi.WriteGrantDecl>
+com.eratw.port.modapi.ModManifestBaseBuilder | class
+com.eratw.port.modapi.ModManifestBaseBuilder | fun artifactSha256(java.lang.String): void
+com.eratw.port.modapi.ModManifestBaseBuilder | fun author(java.lang.String): void
+com.eratw.port.modapi.ModManifestBaseBuilder | fun description(java.lang.String): void
+com.eratw.port.modapi.ModManifestBaseBuilder | fun displayName(java.lang.String): void
+com.eratw.port.modapi.ModManifestBaseBuilder | fun entityRefs(java.lang.String...): void
+com.eratw.port.modapi.ModManifestBaseBuilder | fun externalCall(java.lang.String...): void
+com.eratw.port.modapi.ModManifestBaseBuilder | fun loadAfter(java.lang.String...): void
+com.eratw.port.modapi.ModManifestBaseBuilder | fun overrideFunction(java.lang.String...): void
+com.eratw.port.modapi.ModManifestBaseBuilder | fun requires(java.lang.String...): void
+com.eratw.port.modapi.ModManifestBuilder | class
+com.eratw.port.modapi.ModManifestBuilder | fun hook(com.eratw.port.modapi.FunctionKey, com.eratw.port.modapi.HookPhase, com.eratw.port.modapi.HookOptions): void
+com.eratw.port.modapi.ModManifestBuilder | fun interactionHook(com.eratw.port.modapi.InteractionPhase, int): void
+com.eratw.port.modapi.ModManifestDataBuilder | class
+com.eratw.port.modapi.ModManifestDataBuilder | fun charaRoute(com.eratw.port.modapi.CharaVar, int...): void
+com.eratw.port.modapi.ModManifestDataBuilder | fun charaRoutes(com.eratw.port.modapi.CharaVar...): void
+com.eratw.port.modapi.ModManifestDataBuilder | fun csvKeyword(com.eratw.port.modapi.CsvTable, java.lang.String, int, boolean): void
+com.eratw.port.modapi.ModManifestDataBuilder | fun csvValue(com.eratw.port.modapi.CsvTable, java.lang.String, java.lang.String, com.eratw.port.modapi.CsvOp, java.lang.String): void
+com.eratw.port.modapi.ModManifestDataBuilder | fun exportedMacro(java.lang.String, java.lang.String): void
+com.eratw.port.modapi.ModManifestDataBuilder | fun global(com.eratw.port.modapi.GlobalKey, com.eratw.port.modapi.DimType, java.util.List<java.lang.Integer>, boolean): void
+com.eratw.port.modapi.ModManifestDataBuilder | fun privateDim(com.eratw.port.modapi.FunctionKey, java.lang.String, com.eratw.port.modapi.DimType, java.util.List<java.lang.Integer>): void
+com.eratw.port.modapi.ModManifestDataBuilder | fun writeGrant(java.lang.String, com.eratw.port.modapi.DimType): void
+com.eratw.port.modapi.ModManifestRelationsBuilder | class
+com.eratw.port.modapi.ModManifestRelationsBuilder | fun job(com.eratw.port.modapi.JobKey, com.eratw.port.modapi.PhaseKey, long, java.lang.Long, int): void
+com.eratw.port.modapi.ModManifestRelationsBuilder | fun jobTemplate(com.eratw.port.modapi.JobTemplateKey, com.eratw.port.modapi.PhaseKey, int, com.eratw.port.modapi.JobCatchUp, java.lang.Long): void
+com.eratw.port.modapi.ModManifestRelationsBuilder | fun phase(com.eratw.port.modapi.PhaseKey, int): void
+com.eratw.port.modapi.ModManifestRelationsBuilder | fun relation(com.eratw.port.modapi.RelationKey, com.eratw.port.modapi.RelationKey, boolean, boolean, boolean): void
+com.eratw.port.modapi.ModManifestRelationsBuilder | fun relation(java.lang.String, java.lang.String, boolean, boolean, boolean): void
+com.eratw.port.modapi.ModManifestSchemaBuilder | class
+com.eratw.port.modapi.ModManifestSchemaBuilder | fun archetype(com.eratw.port.modapi.ArchetypeKey, kotlin.jvm.functions.Function1<? super com.eratw.port.modapi.ArchetypeBuilder, kotlin.Unit>): void
+com.eratw.port.modapi.ModManifestSchemaBuilder | fun archetype(java.lang.String, kotlin.jvm.functions.Function1<? super com.eratw.port.modapi.ArchetypeBuilder, kotlin.Unit>): void
+com.eratw.port.modapi.ModManifestSchemaBuilder | fun component(com.eratw.port.modapi.ComponentKey, kotlin.jvm.functions.Function1<? super com.eratw.port.modapi.ComponentBuilder, kotlin.Unit>): void
+com.eratw.port.modapi.ModManifestSchemaBuilder | fun component(java.lang.String, kotlin.jvm.functions.Function1<? super com.eratw.port.modapi.ComponentBuilder, kotlin.Unit>): void
+com.eratw.port.modapi.ModManifestSettingsBuilder | class
+com.eratw.port.modapi.ModManifestSettingsBuilder | fun boolSetting(java.lang.String, boolean, java.lang.String, java.lang.String): void
+com.eratw.port.modapi.ModManifestSettingsBuilder | fun enumSetting(java.lang.String, java.lang.String, java.util.List<java.lang.String>, java.lang.String, java.lang.String): void
+com.eratw.port.modapi.ModManifestSettingsBuilder | fun intSetting(java.lang.String, long, kotlin.ranges.LongRange, java.lang.String, java.lang.String): void
+com.eratw.port.modapi.ModManifestSettingsBuilder | fun setting(com.eratw.port.modapi.SettingDecl): void
+com.eratw.port.modapi.ModManifestSettingsBuilder | fun strSetting(java.lang.String, java.lang.String, java.lang.String, java.lang.String): void
+com.eratw.port.modapi.ModResourceApi | interface
+com.eratw.port.modapi.ModResourceApi | fun exists(java.lang.String): boolean
+com.eratw.port.modapi.ModResourceApi | fun keys(): java.util.List<java.lang.String>
+com.eratw.port.modapi.ModResourceApi | fun open(java.lang.String): byte[]
+com.eratw.port.modapi.ModResourceApi | fun size(java.lang.String): java.lang.Long
+com.eratw.port.modapi.ModResourceApi | val packageId: java.lang.String
+com.eratw.port.modapi.ModServiceRegistry | interface
+com.eratw.port.modapi.ModServiceRegistry | fun find(java.lang.Class<T>): T
+com.eratw.port.modapi.ModServiceRegistry | fun owners(java.lang.Class<T>): java.util.List<java.lang.String>
+com.eratw.port.modapi.ModServiceRegistry | fun publish(java.lang.Class<T>, T, java.lang.String): void
+com.eratw.port.modapi.ModServiceRegistry | fun publishedTypes(): java.util.Set<java.lang.String>
+com.eratw.port.modapi.ModUiElement | interface
+com.eratw.port.modapi.ModUiElement.Image | class
+com.eratw.port.modapi.ModUiElement.Image | fun component1(): java.lang.String
+com.eratw.port.modapi.ModUiElement.Image | fun component2(): java.lang.String
+com.eratw.port.modapi.ModUiElement.Image | fun component3(): java.lang.Integer
+com.eratw.port.modapi.ModUiElement.Image | fun copy(java.lang.String, java.lang.String, java.lang.Integer): com.eratw.port.modapi.ModUiElement$Image
+com.eratw.port.modapi.ModUiElement.Image | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.ModUiElement.Image | fun hashCode(): int
+com.eratw.port.modapi.ModUiElement.Image | fun toString(): java.lang.String
+com.eratw.port.modapi.ModUiElement.Image | val altText: java.lang.String
+com.eratw.port.modapi.ModUiElement.Image | val maxSidePx: java.lang.Integer
+com.eratw.port.modapi.ModUiElement.Image | val resourceName: java.lang.String
+com.eratw.port.modapi.ModUiElement.Image | static field MAX_ALT_TEXT_CHARS: int = 200
+com.eratw.port.modapi.ModUiElement.Image | static field MAX_SIDE_PX: int = 4096
+com.eratw.port.modapi.ModUiElement.Image | static field SUGGESTED_SIDE_PX: int = 512
+com.eratw.port.modapi.ModUiElement.Image.Companion | class
+com.eratw.port.modapi.ModUiElementKt | class
+com.eratw.port.modapi.ModUiElementKt | static fun modUiImage(java.lang.String, java.lang.String, java.lang.Integer): com.eratw.port.modapi.ModUiElement$Image
+com.eratw.port.modapi.ModValue | interface
+com.eratw.port.modapi.ModValue.Companion | class
+com.eratw.port.modapi.ModValue.Companion | fun of(java.lang.String): com.eratw.port.modapi.ModValue
+com.eratw.port.modapi.ModValue.Companion | fun of(long): com.eratw.port.modapi.ModValue
+com.eratw.port.modapi.ModValue.IntValue | class
+com.eratw.port.modapi.ModValue.IntValue | fun component1(): long
+com.eratw.port.modapi.ModValue.IntValue | fun copy(long): com.eratw.port.modapi.ModValue$IntValue
+com.eratw.port.modapi.ModValue.IntValue | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.ModValue.IntValue | fun hashCode(): int
+com.eratw.port.modapi.ModValue.IntValue | fun toString(): java.lang.String
+com.eratw.port.modapi.ModValue.IntValue | val value: long
+com.eratw.port.modapi.ModValue.StrValue | class
+com.eratw.port.modapi.ModValue.StrValue | fun component1(): java.lang.String
+com.eratw.port.modapi.ModValue.StrValue | fun copy(java.lang.String): com.eratw.port.modapi.ModValue$StrValue
+com.eratw.port.modapi.ModValue.StrValue | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.ModValue.StrValue | fun hashCode(): int
+com.eratw.port.modapi.ModValue.StrValue | fun toString(): java.lang.String
+com.eratw.port.modapi.ModValue.StrValue | val value: java.lang.String
+com.eratw.port.modapi.OrExpr | class
+com.eratw.port.modapi.OrExpr | fun component1(): java.util.List<com.eratw.port.modapi.QueryExpr>
+com.eratw.port.modapi.OrExpr | fun copy(java.util.List<? extends com.eratw.port.modapi.QueryExpr>): com.eratw.port.modapi.OrExpr
+com.eratw.port.modapi.OrExpr | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.OrExpr | fun hashCode(): int
+com.eratw.port.modapi.OrExpr | fun toString(): java.lang.String
+com.eratw.port.modapi.OrExpr | val terms: java.util.List<com.eratw.port.modapi.QueryExpr>
+com.eratw.port.modapi.PhaseApi | interface
+com.eratw.port.modapi.PhaseApi | fun subscribe(java.lang.String, com.eratw.port.modapi.PhaseHandler): com.eratw.port.modapi.Registration
+com.eratw.port.modapi.PhaseContext | class
+com.eratw.port.modapi.PhaseContext | val packageId: java.lang.String
+com.eratw.port.modapi.PhaseContext | val phase: java.lang.String
+com.eratw.port.modapi.PhaseContext | val time: com.eratw.port.modapi.GameTime
+com.eratw.port.modapi.PhaseDecl | class
+com.eratw.port.modapi.PhaseDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.PhaseDecl | fun component2(): int
+com.eratw.port.modapi.PhaseDecl | fun copy(java.lang.String, int): com.eratw.port.modapi.PhaseDecl
+com.eratw.port.modapi.PhaseDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.PhaseDecl | fun hashCode(): int
+com.eratw.port.modapi.PhaseDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.PhaseDecl | val name: java.lang.String
+com.eratw.port.modapi.PhaseDecl | val priority: int
+com.eratw.port.modapi.PhaseHandler | interface
+com.eratw.port.modapi.PhaseHandler | fun onPhase(com.eratw.port.modapi.PhaseContext): void
+com.eratw.port.modapi.PhaseKey | class
+com.eratw.port.modapi.PrivateDimDecl | class
+com.eratw.port.modapi.PrivateDimDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.PrivateDimDecl | fun component2(): com.eratw.port.modapi.DimType
+com.eratw.port.modapi.PrivateDimDecl | fun component3(): java.util.List<java.lang.Integer>
+com.eratw.port.modapi.PrivateDimDecl | fun copy(java.lang.String, com.eratw.port.modapi.DimType, java.util.List<java.lang.Integer>): com.eratw.port.modapi.PrivateDimDecl
+com.eratw.port.modapi.PrivateDimDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.PrivateDimDecl | fun hashCode(): int
+com.eratw.port.modapi.PrivateDimDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.PrivateDimDecl | val dims: java.util.List<java.lang.Integer>
+com.eratw.port.modapi.PrivateDimDecl | val name: java.lang.String
+com.eratw.port.modapi.PrivateDimDecl | val type: com.eratw.port.modapi.DimType
+com.eratw.port.modapi.QueryApi | interface
+com.eratw.port.modapi.QueryApi | fun query(com.eratw.port.modapi.QueryPlan): java.util.List<com.eratw.port.modapi.EntityId>
+com.eratw.port.modapi.QueryApiKt | class
+com.eratw.port.modapi.QueryApiKt | static fun queryPlan(kotlin.jvm.functions.Function1<? super com.eratw.port.modapi.QueryPlanBuilder, kotlin.Unit>): com.eratw.port.modapi.QueryPlan
+com.eratw.port.modapi.QueryExpr | interface
+com.eratw.port.modapi.QueryPlan | class
+com.eratw.port.modapi.QueryPlan | fun component1(): java.util.Set<java.lang.String>
+com.eratw.port.modapi.QueryPlan | fun component2(): java.util.Set<com.eratw.port.modapi.EntityState>
+com.eratw.port.modapi.QueryPlan | fun component3(): com.eratw.port.modapi.QueryExpr
+com.eratw.port.modapi.QueryPlan | fun copy(java.util.Set<java.lang.String>, java.util.Set<? extends com.eratw.port.modapi.EntityState>, com.eratw.port.modapi.QueryExpr): com.eratw.port.modapi.QueryPlan
+com.eratw.port.modapi.QueryPlan | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.QueryPlan | fun hashCode(): int
+com.eratw.port.modapi.QueryPlan | fun toString(): java.lang.String
+com.eratw.port.modapi.QueryPlan | val archetypes: java.util.Set<java.lang.String>
+com.eratw.port.modapi.QueryPlan | val states: java.util.Set<com.eratw.port.modapi.EntityState>
+com.eratw.port.modapi.QueryPlan | val where: com.eratw.port.modapi.QueryExpr
+com.eratw.port.modapi.QueryPlanBuilder | class
+com.eratw.port.modapi.QueryPlanBuilder | fun archetype(com.eratw.port.modapi.ArchetypeKey): void
+com.eratw.port.modapi.QueryPlanBuilder | fun archetype(java.lang.String): void
+com.eratw.port.modapi.QueryPlanBuilder | fun build(): com.eratw.port.modapi.QueryPlan
+com.eratw.port.modapi.QueryPlanBuilder | fun state(com.eratw.port.modapi.EntityState): void
+com.eratw.port.modapi.QueryPlanBuilder | fun where(com.eratw.port.modapi.QueryExpr): void
+com.eratw.port.modapi.RandomApi | interface
+com.eratw.port.modapi.RandomApi | fun chance(int): boolean
+com.eratw.port.modapi.RandomApi | fun nextDouble(): double
+com.eratw.port.modapi.RandomApi | fun nextInt(int): int
+com.eratw.port.modapi.RandomApi | fun nextInt(int, int): int
+com.eratw.port.modapi.RandomApi | fun permutationIndices(int): int[]
+com.eratw.port.modapi.Registration | interface
+com.eratw.port.modapi.Registration | fun unregister(): void
+com.eratw.port.modapi.RelationKey | class
+com.eratw.port.modapi.RelationKeyOpsKt | class
+com.eratw.port.modapi.RelationKeyOpsKt | static fun add-LpUfgrI(com.eratw.port.modapi.RelationshipApi, long, com.eratw.port.modapi.RelationKey, long): boolean
+com.eratw.port.modapi.RelationKeyOpsKt | static fun has-LpUfgrI(com.eratw.port.modapi.RelationshipApi, long, com.eratw.port.modapi.RelationKey, long): boolean
+com.eratw.port.modapi.RelationKeyOpsKt | static fun neighbors-M4wgtgg(com.eratw.port.modapi.RelationshipApi, long, com.eratw.port.modapi.RelationKey, boolean): java.util.List<com.eratw.port.modapi.EntityId>
+com.eratw.port.modapi.RelationKeyOpsKt | static fun remove-LpUfgrI(com.eratw.port.modapi.RelationshipApi, long, com.eratw.port.modapi.RelationKey, long): boolean
+com.eratw.port.modapi.RelationKeyOpsKt | static fun setValue-SmiNpuI(com.eratw.port.modapi.RelationshipApi, long, com.eratw.port.modapi.RelationKey, long, long): boolean
+com.eratw.port.modapi.RelationKeyOpsKt | static fun valueOf-LpUfgrI(com.eratw.port.modapi.RelationshipApi, long, com.eratw.port.modapi.RelationKey, long): long
+com.eratw.port.modapi.RelationshipApi | interface
+com.eratw.port.modapi.RelationshipApi | fun add-HnAcLk0(long, java.lang.String, long): boolean
+com.eratw.port.modapi.RelationshipApi | fun has-HnAcLk0(long, java.lang.String, long): boolean
+com.eratw.port.modapi.RelationshipApi | fun hasKind(java.lang.String): boolean
+com.eratw.port.modapi.RelationshipApi | fun neighbors-htsbJaw(long, java.lang.String, boolean): java.util.List<com.eratw.port.modapi.EntityId>
+com.eratw.port.modapi.RelationshipApi | fun remove-HnAcLk0(long, java.lang.String, long): boolean
+com.eratw.port.modapi.RelationshipApi | fun setValue-57VGvCM(long, java.lang.String, long, long): boolean
+com.eratw.port.modapi.RelationshipApi | fun valueOf-HnAcLk0(long, java.lang.String, long): long
+com.eratw.port.modapi.RelationshipDecl | class
+com.eratw.port.modapi.RelationshipDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.RelationshipDecl | fun component2(): boolean
+com.eratw.port.modapi.RelationshipDecl | fun component3(): boolean
+com.eratw.port.modapi.RelationshipDecl | fun component4(): boolean
+com.eratw.port.modapi.RelationshipDecl | fun component5(): boolean
+com.eratw.port.modapi.RelationshipDecl | fun component6(): java.lang.String
+com.eratw.port.modapi.RelationshipDecl | fun copy(java.lang.String, boolean, boolean, boolean, boolean, java.lang.String): com.eratw.port.modapi.RelationshipDecl
+com.eratw.port.modapi.RelationshipDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.RelationshipDecl | fun hashCode(): int
+com.eratw.port.modapi.RelationshipDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.RelationshipDecl | val autoInverse: boolean
+com.eratw.port.modapi.RelationshipDecl | val cascadeOnDestroy: boolean
+com.eratw.port.modapi.RelationshipDecl | val dedupeEdges: boolean
+com.eratw.port.modapi.RelationshipDecl | val directed: boolean
+com.eratw.port.modapi.RelationshipDecl | val inverseName: java.lang.String
+com.eratw.port.modapi.RelationshipDecl | val name: java.lang.String
+com.eratw.port.modapi.ReservationKey | class
+com.eratw.port.modapi.ReservationKey | fun component1(): java.lang.String
+com.eratw.port.modapi.ReservationKey | fun component2(): java.lang.String
+com.eratw.port.modapi.ReservationKey | fun copy(java.lang.String, java.lang.String): com.eratw.port.modapi.ReservationKey
+com.eratw.port.modapi.ReservationKey | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.ReservationKey | fun hashCode(): int
+com.eratw.port.modapi.ReservationKey | fun toString(): java.lang.String
+com.eratw.port.modapi.ReservationKey | val key: java.lang.String
+com.eratw.port.modapi.ReservationKey | val kind: java.lang.String
+com.eratw.port.modapi.RosterProjectionApi | interface
+com.eratw.port.modapi.RosterProjectionApi | fun charIndexOfChecked-Dlhx8ck(long, long): int
+com.eratw.port.modapi.RosterProjectionApi | fun project-RlEdmUU(long): int
+com.eratw.port.modapi.RosterProjectionApi | fun unproject-RlEdmUU(long): boolean
+com.eratw.port.modapi.RosterProjectionApi | val rosterGeneration: long
+com.eratw.port.modapi.RuntimeScheduler | interface
+com.eratw.port.modapi.RuntimeScheduler | fun submit(kotlin.jvm.functions.Function0<kotlin.Unit>): void
+com.eratw.port.modapi.RuntimeScheduler | val isOnMainThread: boolean
+com.eratw.port.modapi.SettingDecl | class
+com.eratw.port.modapi.SettingDecl | fun defaultText(): java.lang.String
+com.eratw.port.modapi.SettingDecl | val description: java.lang.String
+com.eratw.port.modapi.SettingDecl | val key: java.lang.String
+com.eratw.port.modapi.SettingDecl | val kind: com.eratw.port.modapi.SettingKind
+com.eratw.port.modapi.SettingDecl | val title: java.lang.String
+com.eratw.port.modapi.SettingDecl | static field MAX_TEXT_LENGTH: int = 512
+com.eratw.port.modapi.SettingDecl.Companion | class
+com.eratw.port.modapi.SettingKind | enum
+com.eratw.port.modapi.SettingKind | static fun valueOf(java.lang.String): com.eratw.port.modapi.SettingKind
+com.eratw.port.modapi.SettingKind | static fun values(): com.eratw.port.modapi.SettingKind[]
+com.eratw.port.modapi.SettingKind | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.SettingKind>
+com.eratw.port.modapi.SettingKind | static field BOOL: com.eratw.port.modapi.SettingKind
+com.eratw.port.modapi.SettingKind | static field ENUM: com.eratw.port.modapi.SettingKind
+com.eratw.port.modapi.SettingKind | static field INT: com.eratw.port.modapi.SettingKind
+com.eratw.port.modapi.SettingKind | static field STR: com.eratw.port.modapi.SettingKind
+com.eratw.port.modapi.SettingsApi | interface
+com.eratw.port.modapi.SettingsApi | fun bool(java.lang.String): boolean
+com.eratw.port.modapi.SettingsApi | fun enumName(java.lang.String): java.lang.String
+com.eratw.port.modapi.SettingsApi | fun has(java.lang.String): boolean
+com.eratw.port.modapi.SettingsApi | fun int(java.lang.String): long
+com.eratw.port.modapi.SettingsApi | fun str(java.lang.String): java.lang.String
+com.eratw.port.modapi.SettingsApi | val keys: java.util.Set<java.lang.String>
+com.eratw.port.modapi.SettingsApi | val packageId: java.lang.String
+com.eratw.port.modapi.StorageApi | interface
+com.eratw.port.modapi.StorageApi | fun get(java.lang.String): java.lang.String
+com.eratw.port.modapi.StorageApi | fun keys(): java.util.Set<java.lang.String>
+com.eratw.port.modapi.StorageApi | fun put(java.lang.String, java.lang.String): void
+com.eratw.port.modapi.StorageApi | fun remove(java.lang.String): boolean
+com.eratw.port.modapi.StorageKey | class
+com.eratw.port.modapi.StorageKeyOpsKt | class
+com.eratw.port.modapi.StorageKeyOpsKt | static fun bind(com.eratw.port.modapi.JobApi, com.eratw.port.modapi.JobKey, com.eratw.port.modapi.JobHandler): com.eratw.port.modapi.Registration
+com.eratw.port.modapi.StorageKeyOpsKt | static fun get(com.eratw.port.modapi.StorageApi, com.eratw.port.modapi.StorageKey): java.lang.String
+com.eratw.port.modapi.StorageKeyOpsKt | static fun getIntVar(com.eratw.port.modapi.GameStateApi, com.eratw.port.modapi.GlobalKey): long
+com.eratw.port.modapi.StorageKeyOpsKt | static fun getStrVar(com.eratw.port.modapi.GameStateApi, com.eratw.port.modapi.GlobalKey): java.lang.String
+com.eratw.port.modapi.StorageKeyOpsKt | static fun put(com.eratw.port.modapi.StorageApi, com.eratw.port.modapi.StorageKey, java.lang.String): void
+com.eratw.port.modapi.StorageKeyOpsKt | static fun remove(com.eratw.port.modapi.StorageApi, com.eratw.port.modapi.StorageKey): boolean
+com.eratw.port.modapi.StrCompareOp | enum
+com.eratw.port.modapi.StrCompareOp | static fun valueOf(java.lang.String): com.eratw.port.modapi.StrCompareOp
+com.eratw.port.modapi.StrCompareOp | static fun values(): com.eratw.port.modapi.StrCompareOp[]
+com.eratw.port.modapi.StrCompareOp | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.StrCompareOp>
+com.eratw.port.modapi.StrCompareOp | static field EQ: com.eratw.port.modapi.StrCompareOp
+com.eratw.port.modapi.StrCompareOp | static field NE: com.eratw.port.modapi.StrCompareOp
+com.eratw.port.modapi.StrFieldCmp | class
+com.eratw.port.modapi.StrFieldCmp | fun component1(): java.lang.String
+com.eratw.port.modapi.StrFieldCmp | fun component2(): com.eratw.port.modapi.StrCompareOp
+com.eratw.port.modapi.StrFieldCmp | fun component3(): java.lang.String
+com.eratw.port.modapi.StrFieldCmp | fun copy(java.lang.String, com.eratw.port.modapi.StrCompareOp, java.lang.String): com.eratw.port.modapi.StrFieldCmp
+com.eratw.port.modapi.StrFieldCmp | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.StrFieldCmp | fun hashCode(): int
+com.eratw.port.modapi.StrFieldCmp | fun toString(): java.lang.String
+com.eratw.port.modapi.StrFieldCmp | val field: java.lang.String
+com.eratw.port.modapi.StrFieldCmp | val op: com.eratw.port.modapi.StrCompareOp
+com.eratw.port.modapi.StrFieldCmp | val value: java.lang.String
+com.eratw.port.modapi.StrSettingDecl | class
+com.eratw.port.modapi.StrSettingDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.StrSettingDecl | fun component2(): java.lang.String
+com.eratw.port.modapi.StrSettingDecl | fun component3(): java.lang.String
+com.eratw.port.modapi.StrSettingDecl | fun component4(): java.lang.String
+com.eratw.port.modapi.StrSettingDecl | fun copy(java.lang.String, java.lang.String, java.lang.String, java.lang.String): com.eratw.port.modapi.StrSettingDecl
+com.eratw.port.modapi.StrSettingDecl | fun defaultText(): java.lang.String
+com.eratw.port.modapi.StrSettingDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.StrSettingDecl | fun hashCode(): int
+com.eratw.port.modapi.StrSettingDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.StrSettingDecl | val default: java.lang.String
+com.eratw.port.modapi.StrSettingDecl | val description: java.lang.String
+com.eratw.port.modapi.StrSettingDecl | val key: java.lang.String
+com.eratw.port.modapi.StrSettingDecl | val kind: com.eratw.port.modapi.SettingKind
+com.eratw.port.modapi.StrSettingDecl | val title: java.lang.String
+com.eratw.port.modapi.StringsApi | interface
+com.eratw.port.modapi.StringsApi | fun declare(java.lang.String, java.lang.String, java.lang.String, java.lang.String): void
+com.eratw.port.modapi.StringsApi | fun has(java.lang.String): boolean
+com.eratw.port.modapi.StringsApi | fun language(): java.lang.String
+com.eratw.port.modapi.StringsApi | fun of(java.lang.String): java.lang.String
+com.eratw.port.modapi.StringsSpec | object
+com.eratw.port.modapi.StringsSpec | static field MAX_KEY_LENGTH: int = 64
+com.eratw.port.modapi.StringsSpec | static field MAX_TEXT_LENGTH: int = 512
+com.eratw.port.modapi.TimingApi | interface
+com.eratw.port.modapi.TimingApi | fun record(java.lang.String, long): void
+com.eratw.port.modapi.TimingApi | fun reset(): void
+com.eratw.port.modapi.TimingApi | fun samples(): java.util.List<com.eratw.port.modapi.TimingSample>
+com.eratw.port.modapi.TimingApiKt | class
+com.eratw.port.modapi.TimingApiKt | static fun measure(com.eratw.port.modapi.TimingApi, java.lang.String, kotlin.jvm.functions.Function0<? extends T>): T
+com.eratw.port.modapi.TimingSample | class
+com.eratw.port.modapi.TimingSample | fun component1(): java.lang.String
+com.eratw.port.modapi.TimingSample | fun component2(): long
+com.eratw.port.modapi.TimingSample | fun component3(): long
+com.eratw.port.modapi.TimingSample | fun component4(): long
+com.eratw.port.modapi.TimingSample | fun component5(): long
+com.eratw.port.modapi.TimingSample | fun component6(): long
+com.eratw.port.modapi.TimingSample | fun copy(java.lang.String, long, long, long, long, long): com.eratw.port.modapi.TimingSample
+com.eratw.port.modapi.TimingSample | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.TimingSample | fun hashCode(): int
+com.eratw.port.modapi.TimingSample | fun toString(): java.lang.String
+com.eratw.port.modapi.TimingSample | val averageNanos: long
+com.eratw.port.modapi.TimingSample | val count: long
+com.eratw.port.modapi.TimingSample | val lastNanos: long
+com.eratw.port.modapi.TimingSample | val maxNanos: long
+com.eratw.port.modapi.TimingSample | val scope: java.lang.String
+com.eratw.port.modapi.TimingSample | val totalNanos: long
+com.eratw.port.modapi.UiApi | interface
+com.eratw.port.modapi.UiApi | fun registerImage(java.lang.String, java.lang.String, java.lang.Integer): com.eratw.port.modapi.Registration
+com.eratw.port.modapi.UiApi | fun registerInteraction(java.lang.String, kotlin.jvm.functions.Function0<java.lang.Boolean>, kotlin.jvm.functions.Function0<kotlin.Unit>): com.eratw.port.modapi.Registration
+com.eratw.port.modapi.WriteGrantDecl | class
+com.eratw.port.modapi.WriteGrantDecl | fun component1(): java.lang.String
+com.eratw.port.modapi.WriteGrantDecl | fun component2(): com.eratw.port.modapi.DimType
+com.eratw.port.modapi.WriteGrantDecl | fun copy(java.lang.String, com.eratw.port.modapi.DimType): com.eratw.port.modapi.WriteGrantDecl
+com.eratw.port.modapi.WriteGrantDecl | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.WriteGrantDecl | fun hashCode(): int
+com.eratw.port.modapi.WriteGrantDecl | fun toString(): java.lang.String
+com.eratw.port.modapi.WriteGrantDecl | val name: java.lang.String
+com.eratw.port.modapi.WriteGrantDecl | val type: com.eratw.port.modapi.DimType

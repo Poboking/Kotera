@@ -1,0 +1,3 @@
+; MODDX3-A2 探针头文件：零声明、纯注释——只为钉「zip 收录面含 .ERH」（ModZip.unpack
+; 按 .ERB/.ERH 双白名单解条目）与「入口跨源回退」（本文件不产出函数头时 entry 落到
+; 装载序下一个有 @ 的源）。语义锚：ModImportController.kt ModZip.unpack / compilePatch。

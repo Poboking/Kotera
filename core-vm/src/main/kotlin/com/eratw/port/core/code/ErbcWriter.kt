@@ -523,6 +523,7 @@ object ErbcWriter {
                     var f = 0
                     if (a.isStr) f = f or ErbcFormat.CallArgFlags.IS_STR
                     if (a.present) f = f or ErbcFormat.CallArgFlags.PRESENT
+                    if (a.isFloat) f = f or ErbcFormat.CallArgFlags.IS_FLOAT
                     rec.u8(f)
                     rec.u32(if (a.name == null) NONE_REF else names.intern(a.name))
                 }

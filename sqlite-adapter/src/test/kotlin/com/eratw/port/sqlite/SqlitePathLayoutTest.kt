@@ -5,6 +5,7 @@ import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -21,7 +22,7 @@ class SqlitePathLayoutTest {
 
     @Test
     fun `Data Source 键大小写与两侧空白不敏感`(@TempDir dir: Path) {
-        assertEquals(setOf("plugins/qol_data.db"), DEFAULT_MUTABLE_DATA_SOURCES)
+        assertEquals(emptySet(), DEFAULT_MUTABLE_DATA_SOURCES, "默认无可写库（取证见 DEFAULT_MUTABLE_DATA_SOURCES KDoc）")
         val seedRoot = Files.createDirectories(dir.resolve("seed"))
         val writeRoot = Files.createDirectories(dir.resolve("write"))
         val seed = writeSeed(seedRoot, "plugins/qol_data.db")
@@ -38,7 +39,23 @@ class SqlitePathLayoutTest {
             val file = assertIs<SqliteOpenTarget.File>(layout.resolve(connection), connection)
             assertEquals(writeRoot.resolve("plugins/qol_data.db").normalize(), file.target, connection)
             assertEquals(seed, file.seed, connection)
+            assertFalse(file.mutable, "默认集合为空 ⇒ qol_data 不再命中 mutable，随 seed 更新刷新")
         }
+    }
+
+    @Test
+    fun `注入 mutableDataSources 的库命中永不刷新语义`(@TempDir dir: Path) {
+        val seedRoot = Files.createDirectories(dir.resolve("seed"))
+        val writeRoot = Files.createDirectories(dir.resolve("write"))
+        writeSeed(seedRoot, "plugins/private.db")
+        val layout = SqlitePathLayout(seedRoot, writeRoot, mutableDataSources = setOf("plugins/private.db"))
+
+        val file = assertIs<SqliteOpenTarget.File>(layout.resolve("Data Source=plugins/private.db"))
+        assertTrue(file.mutable, "注入集合命中 ⇒ 保留「target 一旦存在永不回滚」的机制语义")
+        assertFalse(
+            assertIs<SqliteOpenTarget.File>(layout.resolve("Data Source=plugins/other.db")).mutable,
+            "未注入的库不受 mutable 保护",
+        )
     }
 
     @Test

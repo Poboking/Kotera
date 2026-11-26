@@ -128,6 +128,21 @@ class ModuleLinkMatrixTest {
         ),
     )
 
+    /** KI 改判用：带 diagnostics 收集的 link 变体（覆盖裁决告警断言用）。 */
+    private fun linkCollecting(
+        modules: List<LinkableModule>,
+        policy: ResolverPolicy = ResolverPolicy.MODERN,
+        diags: MutableList<String>,
+    ): LinkedProgram = ModuleLinker.link(
+        LinkInputs(
+            compileBase(),
+            baseMetas,
+            modules,
+            policy,
+            diagnostics = { diags += it },
+        ),
+    )
+
     /** base-only 的 LSC：无模块 ⇒ 不进链接器，直接由 base 元数据构建纯目录。 */
     private fun baseCatalog(policy: ResolverPolicy): SymbolCatalog =
         SymbolCatalog.build(
@@ -522,15 +537,16 @@ class ModuleLinkMatrixTest {
     // ------------------------------------------------------------------
 
     @Test
-    fun `MODERN 未声明重名整组拒绝并点名提供者`() {
+    fun `KI-2 MODERN 未声明重名改告警放行且点名提供者`() {
         val first = matrixModule("x1", "X", 101L, signature = "sig-x")
         val undeclared = matrixModule("x3", "X", 103L, signature = "sig-x")
-        val ex = assertFailsWith<SymbolConflictException> {
-            link(listOf(first, undeclared), ResolverPolicy.MODERN)
-        }
-        assertEquals("X", ex.key.uppercase(Locale.ROOT))
-        assertEquals(listOf("x1", "x3"), ex.providers)
-        assertTrue("X" in ex.message!!, ex.message)
+        val diags = mutableListOf<String>()
+        val linked = linkCollecting(listOf(first, undeclared), ResolverPolicy.MODERN, diags)
+        assertEquals(WINNER_SECOND, linked.catalog.winnerIndexOf("X"), "last-wins：后装载者胜出")
+        assertTrue(
+            diags.any { it.contains("X") && it.contains("未声明覆盖") },
+            "告警点名符号: $diags",
+        )
     }
 
     @Test
@@ -546,7 +562,7 @@ class ModuleLinkMatrixTest {
     }
 
     @Test
-    fun `MODERN 显式覆盖签名闸 一致放行 空与不一致拒绝`() {
+    fun `KI-2 MODERN 签名闸改告警放行 一致与不一致都 last-wins`() {
         val first = matrixModule("x1", "X", 101L, signature = "sig-x")
         val declared = matrixModule(
             "x2", "X", 102L,
@@ -556,21 +572,28 @@ class ModuleLinkMatrixTest {
         assertEquals(WINNER_SECOND, ok.catalog.winnerIndexOf("X"))
         assertTrue(ok.hasOverrides)
 
+        // 空指纹：改判后告警放行（不再抛 OverrideSignatureException）。
         val emptySig = matrixModule("x4", "X", 104L, pkg("x4", overrideFunctions = setOf("X")))
-        val emptyEx = assertFailsWith<OverrideSignatureException> {
-            link(listOf(first, emptySig), ResolverPolicy.MODERN)
-        }
-        assertEquals("X", emptyEx.key.uppercase(Locale.ROOT))
-        assertTrue("签名信息不完整" in emptyEx.message!!, emptyEx.message)
+        val diags1 = mutableListOf<String>()
+        val okEmpty = linkCollecting(listOf(first, emptySig), ResolverPolicy.MODERN, diags1)
+        assertEquals(WINNER_SECOND, okEmpty.catalog.winnerIndexOf("X"), "空指纹覆盖照样 last-wins")
+        assertTrue(
+            diags1.any { it.contains("X") && it.contains("签名指纹缺失") },
+            "空指纹告警: $diags1",
+        )
 
+        // 不一致指纹：同样告警放行。
         val mismatch = matrixModule(
             "x5", "X", 105L,
             pkg("x5", overrideFunctions = setOf("X")), signature = "sig-other",
         )
-        val mismatchEx = assertFailsWith<OverrideSignatureException> {
-            link(listOf(first, mismatch), ResolverPolicy.MODERN)
-        }
-        assertTrue("签名不一致" in mismatchEx.message!!, mismatchEx.message)
+        val diags2 = mutableListOf<String>()
+        val okMismatch = linkCollecting(listOf(first, mismatch), ResolverPolicy.MODERN, diags2)
+        assertEquals(WINNER_SECOND, okMismatch.catalog.winnerIndexOf("X"))
+        assertTrue(
+            diags2.any { it.contains("X") && it.contains("签名不一致") },
+            "签名不一致告警: $diags2",
+        )
     }
 
     @Test

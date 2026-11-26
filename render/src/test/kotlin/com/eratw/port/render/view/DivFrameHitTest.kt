@@ -7,6 +7,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * DIV-WIRE-2 帧级集成：**真机那条路**（`ConsoleFrame.draw`）上 div 子行按钮可点、tooltip 可取。
@@ -79,6 +80,76 @@ class DivFrameHitTest {
         val (screen, composer) = buildScreen()
         ConsoleFrame(composer).draw(screen, screen.list.dirtyStrips())
         assertNull(screen.divHitAt(composer.canvasWidthPx - 1, composer.canvasHeightPx - 1))
+    }
+
+    // ---- B9 定案锁（判词 7）：真语料负 depth 弹窗在场时，正文行链接仍可点 ----
+
+    /**
+     * 语料 `ERB/魔改内容/qol/QOL_USERCOM.ERB @COM_OPTION`（负 depth 在 :284 的 ATR 行）与
+     * `ERB/魔改内容/PRINT系/UI_Container_Framework.ERB:275` 的 `STYLE_POPUP` 同形：弹窗只给
+     * `depth='-1'`，整帧 depth 键表全负。
+     *
+     * 官方在这种帧里正文行**点不动**：正文行那趟扫描只在首个非负 depth 键处插一次
+     * （1.824 `EmueraConsole.cs:2342-2343` 摊平升序 + `:2350` 的 `if (!flag3 && num7 >= 0)`；
+     * 蛇版 4.981 `Emuera/UI/Game/EmueraConsole.cs:2604-2605` + `:2612` 的 `if (!zeroTested && depth >= 0)`），
+     * 键表全负 ⇒ 门闸永不触发 ⇒ `HtmlManager.cs:723-739` 登记的正文链接与 `PRINTBUTTON` 整片失效。
+     * 移植侧按判词 7 取优雅侧：`ButtonLayer.kt:836` / `:865-869` 的正文行扫描无门闸。
+     *
+     * 本用例是**定案锁**（正文行像素没被负 depth 弹窗吞、点击链仍能提交）；
+     * 能测出「改回官方形」的突变敏感锁在 `ButtonLayerDivHitTest` 的 ⑥ 节提示用例上 ——
+     * 理由见那里的 KDoc：键全负时 hitAt 两种写法同解（都回 null），点击面靠调用方兜底。
+     */
+    @Test
+    fun `真语料负 depth 弹窗在场时正文行按钮仍可点`() {
+        val sink = LineBufferConsoleSink(clientWidth = clientWidth)
+        // 正文行可点件（语料 `PRINTBUTTON 泡茶, 301` 一路）＋弹窗锚行，弹窗 box 压在同一段行带上
+        sink.printButtonC("泡茶", 301L, true)
+        sink.printHtml(
+            "<div rect='20px, -81px, 248px, 71px' border='2px' bcolor='#888888' depth='-1' padding='10px,10px'>" +
+                "<button value='1'>[泡红茶]</button><br><button value='99'>[关闭]</button><br></div>",
+            true,
+        )
+        sink.noteInputWait(
+            com.eratw.port.core.host.InputRequest(
+                type = com.eratw.port.core.host.InputRequest.InputType.INT,
+                form = com.eratw.port.core.host.InputRequest.RequestForm.VALUE,
+                mouseInput = true,
+                hasDef = true,
+                defInt = -1L,
+            ),
+        )
+        val screen = ConsoleScreen(clientWidth, 100, heightLines)
+        screen.submitSnapshot(ConsoleAdapter.adapt(sink.snapshot()))
+        val composer = ScreenComposer(
+            clientWidth,
+            heightLines,
+            metrics,
+            canvasHeightPx = heightLines * metrics.lineHeight,
+        )
+        ConsoleFrame(composer).draw(screen, screen.list.dirtyStrips())
+
+        val divs = screen.divTargets()
+        assertTrue(divs.isNotEmpty(), "弹窗子行按钮要进命中表，否则本用例是空转")
+        assertTrue(
+            divs.all { it.depth < 0 },
+            "本帧 depth 键表全负（语料 popup 只给 depth='-1'），实际=" + divs.map { it.depth },
+        )
+
+        val body = screen.buttons.all().first { it.value == 301L }
+        val rows = screen.visibleRows()
+        val xPx = metrics.cellsToPixels(body.colStart) + 2
+        val yPx = composer.rowTopPx(body.row, rows.size) + metrics.lineHeight / 2
+        assertNull(
+            screen.divHitAt(xPx, yPx),
+            "B9 定案：负 depth 弹窗在场也要让回正文行像素（官方在此整趟跳过正文扫描 ⇒ 点不动）",
+        )
+        assertEquals("301", screen.click(body.row, body.colStart), "让位后正文行按钮照旧提交")
+
+        // 对照：弹窗自己的子行按钮仍可点（负键先扫，官方同判），证明上面的 null 不是命中表没喂
+        val tea = divs.first { it.value == 1L }
+        val teaHit = screen.divHitAt((tea.xPx + tea.widthPx / 2).toInt(), (tea.yPx + tea.heightPx / 2).toInt())
+        assertNotNull(teaHit, "弹窗 [泡红茶] 中心像素必须命中 div")
+        assertEquals(1L, teaHit.value)
     }
 
     /** 没画过帧（命中表未喂）时一律不命中 —— 证明命中表确实来自 `ConsoleFrame` 的每帧喂参。 */

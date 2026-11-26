@@ -81,7 +81,11 @@ class ComOptionRealCorpusProbeTest {
             program = program,
             metadata = metadata,
             randSeed = RAND_SEED,
-            frameGateEnabled = false,
+            // 生产口径：`GameHost` 建会话时恒传 true（`GameHost.assemble`），
+            // `publishedOptions()` 因而读 `frameOptions`（一屏一帧）。此处曾写死 false —— 那是
+            // `publishFrame` 关掉的口径，`publishedOptions()` 走活表，**壳层那道
+            // `isCurrentGeneration` 世代判据在生产上压在另一条路上**，本文件当时等于没锁它。
+            frameGateEnabled = true,
             inputSinkOverride = sink,
         )
         return Rig(session, metadata, sink)
@@ -150,10 +154,14 @@ class ComOptionRealCorpusProbeTest {
     }
 
     /** 第二轮：重进弹窗，在挂起瞬间抓右栏快照（`currentOptions` = 右栏芯片唯一数据源）。 */
-    private fun railSnapshotRoundTwo(rig: Rig): Pair<List<ConsoleOption>, String> {
+    private fun railSnapshotRoundTwo(rig: Rig): Triple<List<ConsoleOption>, String, Boolean> {
         val key = rig.functionKey("COM_OPTION")
         val snapshot = AtomicReference<List<ConsoleOption>>()
         val awaitingDesc = AtomicReference<String>()
+        // 壳层点击的第二道闸：`MainActivity.handleConsoleTap` 命中后必过
+        // `GameHost.isCurrentGeneration(值)`，判假就静默吞（0.2.45 的世代闸）。
+        // 这里在挂起瞬间取同一读数 —— 生产帧口径下它必须为真，否则玩家点就是白点。
+        val generationAccepted = AtomicReference<Boolean>()
         val done = AtomicBoolean(false)
         val feeder = startFeeder(rig.sink, done) {
             val req = rig.sink.awaiting
@@ -162,6 +170,7 @@ class ComOptionRealCorpusProbeTest {
                     "hasDef=${req?.hasDef} def=${req?.defInt}",
             )
             snapshot.set(rig.session.console.currentOptions())
+            generationAccepted.set(rig.session.console.isCurrentGeneration("1"))
         }
         var vmError: Throwable? = null
         try {
@@ -173,7 +182,7 @@ class ComOptionRealCorpusProbeTest {
             feeder.join(JOIN_MS)
         }
         check(vmError == null) { "第二轮 COM_OPTION 调用异常：$vmError" }
-        return snapshot.get().orEmpty() to awaitingDesc.get().orEmpty()
+        return Triple(snapshot.get().orEmpty(), awaitingDesc.get().orEmpty(), generationAccepted.get() == true)
     }
 
     private fun describe(options: List<ConsoleOption>): String =
@@ -195,11 +204,16 @@ class ComOptionRealCorpusProbeTest {
             println("PROBE COM_NAME301=$label")
             check(label == "泡红茶") { "COM_ALTER_301=1 时面板按钮名期望「泡红茶」，实际「$label」" }
 
-            val (chips, awaiting) = railSnapshotRoundTwo(rig)
+            val (chips, awaiting, generationOk) = railSnapshotRoundTwo(rig)
             println("PROBE railChips=${describe(chips)}")
             println("PROBE awaiting=$awaiting")
             println("PROBE live=${describe(rig.session.console.displayOptions())}")
             println("PROBE published=${describe(rig.session.console.publishedOptions())}")
+            println("PROBE isCurrentGeneration(1)=$generationOk")
+            check(generationOk) {
+                "生产帧口径下 isCurrentGeneration(1) 必须为真 —— 否则壳层 handleConsoleTap " +
+                    "命中后会被世代闸静默吞掉（published=${describe(rig.session.console.publishedOptions())}）"
+            }
             val teaChip = chips.firstOrNull { it.submitValue == "1" }
             check(teaChip != null) {
                 "弹窗等待页右栏快照必须含 [泡红茶]（submitValue=1），实际=${describe(chips)}"
@@ -213,3 +227,4 @@ class ComOptionRealCorpusProbeTest {
         }
     }
 }
+

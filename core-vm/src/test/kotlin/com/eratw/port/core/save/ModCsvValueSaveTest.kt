@@ -53,6 +53,7 @@ class ModCsvValueSaveTest {
         override fun syncFromCharaSlot(entityId: Long) = Unit
         override fun onCharacterRowsPermuted(oldToNewIndexMap: IntArray) = Unit
         override fun onCharacterRowDeleted(deletedIndex: Int) = Unit
+        override fun onWorldReset() = Unit
     }
 
     /** 生产端口的最小镜像：载荷包装/拆包与激活包过滤都走生产编解码器。 */

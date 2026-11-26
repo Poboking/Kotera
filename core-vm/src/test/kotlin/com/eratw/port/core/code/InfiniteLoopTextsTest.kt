@@ -11,12 +11,12 @@ import kotlin.test.assertTrue
  * ## 出处（两侧都复核过，逐字同文）
  * | 文案 | skia `Lang.cs` | 官方 `Lang.cs` | `lang.emuera-zhs.xml` | `lang.emuera-eng.xml` | 消费点 |
  * |---|---|---|---|---|---|
- * | `MessageBox.InfiniteLoop`（框标题） | 3147 | 4102 | 970 | 973 | skia `Process.cs:480` / 官方 `:503` |
- * | `MessageBox.TooLongLoop`（框正文） | 3150 | 4106 | 971-973 | 974-976 | skia `Process.cs:481` / 官方 `:504` |
- * | `Error.SelectExitInfiniteLoopMB`（退出错） | 2270 | 2934 | 688 | 691 | skia `Process.cs:484` / 官方 `:507` |
+ * | `MessageBox.InfiniteLoop`（框标题） | 3147 | 4102 | 970 | 973 | skia `Process.cs:502`（官方 `:503`） |
+ * | `MessageBox.TooLongLoop`（框正文） | 3150 | 4106 | 971-973 | 974-976 | skia `Process.cs:503-505`（官方 `:504`） |
+ * | `Error.SelectExitInfiniteLoopMB`（退出错） | 2270 | 2934 | 688 | 691 | skia `Process.cs:508`（官方 `:507`） |
  *
  * ## 锁什么
- * 1. **占位符语义**：正文四个实参的**顺序**照抄 `Process.cs:481`
+ * 1. **占位符语义**：正文四个实参的**顺序**照抄 `Process.cs:505`
  *    —— 第 0 位文件名、第 1 位行号、第 2 位段落内已执行行数、第 3 位墙钟毫秒。
  *    日文模板里 `{3}` 出现在 `{2}` **之前**（「最後の入力から{3}ミリ秒経過し{2}行が実行されました」），
  *    按位置填充与按顺序填充不等价 ⇒ 这一条是唯一能锁住「别把两个数换错位置」的闸。
@@ -230,7 +230,7 @@ class InfiniteLoopTextsTest {
                 override val evalContext: com.eratw.port.core.expr.EvalContext? = null
                 override fun print(text: String) {}
             }.askInfiniteLoop(alert(sourceName = "x.erb")),
-            "VmHost.askInfiniteLoop 的缺省实现必须 ≙ skia Process.cs:478 的 view.Enabled == false",
+            "VmHost.askInfiniteLoop 的缺省实现必须 ≙ skia Process.cs:500-501 的 console.Enabled == false",
         )
     }
 }

@@ -71,6 +71,16 @@ class ArithmeticErrorContextTest {
         override fun printSystemLine(message: String) {
             systemLines.add(message)
         }
+
+        /**
+         * `EvalContext by base` 只把**本类未覆写**的成员委托给 base；接口里的缺省实现
+         * 若在 base 上执行，`printSystemLine` 会落到 base 的空实现、绕过上面的记录。
+         * 生产侧 `BuiltinEvalContext` 同样显式覆写本方法（记 overflow 桶 + 上屏），
+         * 这里逐条对齐 —— 否则溢出告警在本装置里是不可见的。
+         */
+        override fun reportArithmeticOverflow(message: String) {
+            systemLines.add(message)
+        }
     }
 
     private fun div(left: Expr, right: Expr): Binary =
@@ -145,9 +155,9 @@ class ArithmeticErrorContextTest {
         val store = storeWithCnt(Long.MIN_VALUE)
         val ctx = RecordingEvalContext(TestEvalContext(store))
         val negated = Unary(OperatorCode.MINUS, intVar("CNT", 0L))
-        // MinusInt 自己打一行「取负不生效」（Expr.kt:621），零除再打一行。
-        // 钳制路径若还保留「为取证补读左子树」，这里会多出第三行 —— 那是旧 bug-divzero
-        // 波最容易写坏的地方，现在没有取证补读，恰好两行。
+        // 4.981 MinusInt 走 SafeNegate：MIN 取负打一行「整数溢出: --…」并饱和成 MAX；
+        // 零除再打一行。钳制路径若还保留「为取证补读左子树」，这里会多出第三行 ——
+        // 那是旧 bug-divzero 波最容易写坏的地方，现在没有取证补读，恰好两行。
         assertEquals(0L, div(negated, IntLiteral(0L)).getIntValue(ctx))
         assertEquals(2, ctx.systemLines.size, "不得为取证重复求值：${ctx.systemLines}")
         assertTrue(ctx.systemLines.last().startsWith("零除: "), ctx.systemLines.toString())

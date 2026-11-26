@@ -787,8 +787,23 @@ object Opcode {
     /** 同 [_LT_JZ]：左 > 右继续，否则跳转（负步长 FOR 用）。 */
     const val _GT_JZ = 248
 
+    /**
+     * 浮点实参落地（`#DIMF` 形参实参通道，4.981 fork 作者面能力）。
+     *
+     * 语义：`a` = **表达式池下标**（浮点表达式），`b` = 帧内**整型**槽；执行时把表达式按
+     * `getFloatValue` 求值后以 `Double.doubleToRawLongBits` 的位型写进该整型槽。
+     *
+     * 为什么借用整型槽：本移植的帧槽只有 `frameInts`/`frameStrs` 两套数组，**没有浮点列**
+     * （见 [Vm.floatResult] 的 KDoc）。新增浮点帧数组要动帧模型与 ERBC 容器；而实参只需
+     * 「从调用者表达式搬到被调形参」这一段，位型借道整型桶即可无损（`longToDouble` 的
+     * 逆变换在绑定点 `ProcessRuntime.floatArgValue`），段 7 只多一个 flags 位。
+     *
+     * 与 [_EVAL_INT] 的唯一差别 = 求值函数（浮点 vs 整型）与落槽前的位型转换。
+     */
+    const val _EVAL_FLOAT = 249
+
     /** 最后一条已定义的操作码（= 编译器扩展追加段末条；栈码组末条是 [_STK_POP_SLOT_S]）。 */
-    const val MAX_OPCODE = _GT_JZ
+    const val MAX_OPCODE = _EVAL_FLOAT
 
     /** 最后一条 ERB 语句的操作码（isa.yaml 的 169 条语句占 29..197）。 */
     const val MAX_STATEMENT_OPCODE = 197
@@ -813,7 +828,7 @@ object Opcode {
      *
      * 末位随「只许末尾追加」的新扩展码一起后移（[_RETF]、[_CALL_STR]、[_EVAL_INT_JZ]），栈码组区间 [STACK_OPS] 不动。
      */
-    val EXTENSION_OPS: IntRange = _CALL_BY_NAME.._GT_JZ
+    val EXTENSION_OPS: IntRange = _CALL_BY_NAME.._EVAL_FLOAT
 
     // ------------------------------------------------------------------
     // 调用指令 b 操作数的标志位（CMP-57：单一真源）
@@ -910,12 +925,13 @@ object Opcode {
         "_STK_JZ_POP", "_STK_JNZ_POP", "_STK_JZ_KEEP",
         "_STK_POP_SLOT_I", "_STK_POP_SLOT_S",
         // 末尾追加段（244 `_RETF`、245 `_CALL_STR`、246 `_EVAL_INT_JZ`、247 `_LT_JZ`、
-        // 248 `_GT_JZ`）：新扩展码只许加在这里，栈码组的编号与顺序不动。
+        // 248 `_GT_JZ`、249 `_EVAL_FLOAT`）：新扩展码只许加在这里，栈码组的编号与顺序不动。
         "_RETF",
         "_CALL_STR",
         "_EVAL_INT_JZ",
         "_LT_JZ",
         "_GT_JZ",
+        "_EVAL_FLOAT",
     )
 
     /** 名字 -> 操作码（内部指令 + 169 条语句的规范名 + 4 条编译器扩展 + 42 条栈码 + 1 条浮点返回 + 1 条运行期字符串调用 + 1 条条件位融合 + 2 条循环条件融合）。 */

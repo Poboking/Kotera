@@ -1,4 +1,5 @@
-schema	com.eratw.port.modfamily.generated	FamilyAccessors	family
+schema	com.eratw.port.modfamily.generated	Family	family
+archetype	family.child
 field	age	INT	false
 field	title	STR	false
 field	father	INT	true

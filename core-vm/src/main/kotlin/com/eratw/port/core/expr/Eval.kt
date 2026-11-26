@@ -56,16 +56,65 @@ fun ExprEvalException.toCodeEE(
 )
 
 /**
+ * 4.981「1 维稀疏背板」的**运行期越界读**补径面（[VariableReader] 的扩展）。
+ *
+ * 为什么单独成接口：这是可选能力面 —— 只读快照 / 测试假体不需要它（缺省回落严格通道），
+ * 而 [VariableReader] 本体已有的函数条数已贴着 detekt 的接口阈值，补径另立一面才不越闸。
+ *
+ * 4.981 fork 把**只有 1 维**的内置数组换成字典背板：全局 `DataIntegerArray` /
+ * `DataStringArray` 的元素类型是 `SparseArray<long>` / `SparseArray<string>`
+ * （VariableData.cs:44,47,50；角色侧 CharacterData.cs:25,28），其下标器对**任意**
+ * long 取键 —— 缺席读返回默认值、写直接落字典（SparseArray.cs:25-40），
+ * **运行期下标越界不再是错误**。解析期常量下标仍在执行前的 Restructure 阶段被
+ * `VariableToken.CheckBounds` 拦下（VariableTerm.cs:316-347），所以 4.981 下
+ * 「动态下标」与「常量下标」的越界语义不同 —— 这是 1.824 基线（稠密 `long[]`：
+ * reference/emuera-cs/MinorShift.Emuera.GameData.Variable/VariableData.cs:16-30，
+ * 越界一律抛）移植时漏掉的一条。
+ *
+ * PC 端实测（Emuera.exe `1824+v24+EMv18+EEv56+Skiav16`，2026-11-17，`--CliDebug` 探针）：
+ * `X = -1` 后 `{ITEM:X}` 读 0、`ITEM:X = 7` 后读回 7、`ITEM:X += 5` 后读回 5、
+ * `STR:X = "ab"` 后读回 "ab"；而常量下标 `{ITEM:(-1)}` 仍抛
+ * 「配列変数"ITEM"の第1引数(-1)は配列の範囲外です」。
+ *
+ * 何时被调到：[com.eratw.port.core.expr.VarRef] 先走**严格通道**，严格通道抛
+ * CodeEE 且最后一个下标是运行期值时才转到这里（见 VarRef.lastIndexIsDynamic）——
+ * 这样热路径零额外开销，也不必给 `VarRef` 加字段（`ProgramDiagnostics` 的 shape
+ * 探针钉着字段集）。
+ *
+ * 缺省实现**回落严格通道**：越界仍按原样抛，不会静默兜底。
+ * 真实实现见 [com.eratw.port.core.vars.VariableStore]（覆盖层 + 稠密回落）。
+ */
+interface SparseOorVariableReader {
+    /** 严格读口（[VariableReader] 已有同签名声明，实现方只实现一次）。 */
+    fun readInt(name: String, indices: LongArray): Long
+
+    /** 严格字符串读口（同上）。 */
+    fun readStr(name: String, indices: LongArray): String
+
+    /** 严格 `+=` 口（[plusSparseIntOor] 的缺省回落用它）。 */
+    fun plusInt(name: String, indices: LongArray, delta: Long): Long
+
+    /** 整数侧越界读：缺席读默认值 0（PC 实测见接口 KDoc）。 */
+    fun readSparseIntOor(name: String, indices: LongArray): Long = readInt(name, indices)
+
+    /** [readSparseIntOor] 的字符串侧（SparseArray 的默认值是空串）。 */
+    fun readSparseStrOor(name: String, indices: LongArray): String = readStr(name, indices)
+
+    /** 越界 `+=`（整数侧）：旧值（默认 0 或覆盖层）+ delta 落回覆盖层，返回加完之后的新值。 */
+    fun plusSparseIntOor(name: String, indices: LongArray, delta: Long): Long = plusInt(name, indices, delta)
+}
+
+/**
  * 求值时变量存取的唯一入口（M2 提供真实实现，测试用假实现注入）。
  *
  * 索引一律为求值后的 Long 数组（字符串关键字下标在解析期已被包装为
  * [KeywordIndexArg]，求值时经 [keywordToInteger] 转成 Long 再传进来）。
  */
-interface VariableReader {
+interface VariableReader : SparseOorVariableReader {
     /** 该变量是否为常量（用于 `++`/`--` 拒绝常量）。spec: OperatorMethodManager.cs:757-759 */
     fun isConst(name: String): Boolean
 
-    fun readInt(name: String, indices: LongArray): Long
+    override fun readInt(name: String, indices: LongArray): Long
 
     /**
      * 借一块下标暂存缓冲（PERF 2026-10-26），用完必须调 [returnIndices]。
@@ -82,7 +131,7 @@ interface VariableReader {
     fun returnIndices() {}
 
     /** 字符串变量读出 null 时必须返回 ""。spec: VariableTerm.cs:91-96 */
-    fun readStr(name: String, indices: LongArray): String
+    override fun readStr(name: String, indices: LongArray): String
 
     /**
      * 浮点变量读出（4.981 fork 新增的第三型；1.824 参考实现只有 long/string 两条通道，
@@ -122,7 +171,7 @@ interface VariableReader {
      * 后置 ++/-- 由求值器再 -1/+1 得旧值）。spec: VariableTerm.cs:202-223,
      * OperatorMethodManager.cs:601-655
      */
-    fun plusInt(name: String, indices: LongArray, delta: Long): Long
+    override fun plusInt(name: String, indices: LongArray, delta: Long): Long
 
     /**
      * [plusInt] 的浮点侧（`LOCALF += 1.5` 一类在解析期**不折常量**时由语句层调用）。
@@ -150,6 +199,32 @@ interface VariableReader {
 }
 
 /**
+ * 4.981「1 维稀疏背板」的**运行期越界写**补径面（[VariableWriter] 的扩展）。
+ *
+ * 与 [SparseOorVariableReader] 同源（PC 实测 `ITEM:X = 7` 越界写能原样读回、
+ * `STR:X = "ab"` 同样），单列一面的理由也同上：这是可选能力面，写侧只有语句层与
+ * 栈码需要，[VariableWriter] 本体不该为了它变宽。
+ */
+interface SparseOorVariableWriter {
+    /** 严格写口（[VariableWriter] 已有同签名声明，实现方只实现一次）。 */
+    fun writeInt(name: String, indices: LongArray, value: Long)
+
+    /** 严格字符串写口（同上）。 */
+    fun writeStr(name: String, indices: LongArray, value: String)
+
+    /**
+     * 整数侧越界写：落覆盖层（PC = 写进 SparseArray 字典）。
+     * 缺省实现**回落严格通道**（照原样抛），不静默兜底。
+     */
+    fun writeSparseIntOor(name: String, indices: LongArray, value: Long): Unit =
+        writeInt(name, indices, value)
+
+    /** [writeSparseIntOor] 的字符串侧（实测 `STR:-1 = "ab"` 后读回 "ab"）。 */
+    fun writeSparseStrOor(name: String, indices: LongArray, value: String): Unit =
+        writeStr(name, indices, value)
+}
+
+/**
  * 变量**写**入口（T2-23）。
  *
  * 为什么单独成接口而不是塞进 [VariableReader]：读口是表达式层的必需品（`VarRef` 求值
@@ -160,10 +235,10 @@ interface VariableReader {
  * 语义权威是 [com.eratw.port.core.vars.VariableStore] 的 `writeInt`/`writeStr`：
  * 校验顺序（未定义 → 类型 → 常量/伪变量 → 下标）与报错文案由它一家定义。
  */
-interface VariableWriter {
-    fun writeInt(name: String, indices: LongArray, value: Long)
+interface VariableWriter : SparseOorVariableWriter {
+    override fun writeInt(name: String, indices: LongArray, value: Long)
 
-    fun writeStr(name: String, indices: LongArray, value: String)
+    override fun writeStr(name: String, indices: LongArray, value: String)
 
     /**
      * 浮点写通道（4.981 fork 的第三型）。缺省报错而不是空实现：
@@ -339,6 +414,19 @@ interface EvalContext {
 
     /** 系统行输出（仅 `-(-9223372036854775808)` 溢出警告用到）。spec: OperatorMethodManager.cs:561-564 */
     fun printSystemLine(message: String) {}
+
+    /**
+     * 整数四则溢出告警（4.981 `SafeArithmetic.cs:7-65` 的 `Console.PrintWarning` 对应口，
+     * 2026-11-20 溢出族）。
+     *
+     * 缺省 = 只上屏（[printSystemLine]）。持有会话槽的实现方**额外**留痕到
+     * `ClampWarnings.overflow` 桶，供错误报告与定向单读取证 —— 生产链路里
+     * `BuiltinEvalContext` 覆写了本方法；`TestEvalContext` 一类替身保持缺省（只上屏），
+     * 既有装置读数因此不受影响。
+     */
+    fun reportArithmeticOverflow(message: String) {
+        printSystemLine(message)
+    }
 
     /**
      * 字符串关系比较方言（ENGC-4，[com.eratw.port.core.expr.strCompare] 的唯一消费者）：

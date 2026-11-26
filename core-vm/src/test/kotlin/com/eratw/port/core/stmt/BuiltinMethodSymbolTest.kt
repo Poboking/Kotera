@@ -67,7 +67,8 @@ class BuiltinMethodSymbolTest {
         // 原版 271 条台账 + 4.981 上游自改族（GETANIMETIMER/GETPLATFORM/UNCHECKED_* / MAP_*）
         // + 浮点扩展 TOFLOAT/ROUND + 25 条 SQL 族（f2bf08be8 补齐差集 9 后全量）
         // + RT2 实体扩展族（原版无 C# 出处，见 fn/EntityMethods.kt），2026-11-16 实测 331。
-        assertEquals(331, BuiltinSymbols.functions.size, "methodList 条目数（271 原版 + 上游自改族 + TOFLOAT/ROUND + 25 SQL + 实体族，实测 331）")
+        assertEquals(331, BuiltinSymbols.functions.size, "methodList 条目数（271 原版 + 上游自改族 + " +
+            "TOFLOAT/ROUND + 25 SQL + 实体族，实测 331）")
         for ((name, type) in BuiltinSymbols.functions) {
             assertTrue(BuiltinSymbols.isBuiltinMethod(name), "$name 必须是 methodList 成员")
             assertTrue(BuiltinSymbols.isBuiltinFunction(name), "$name 必须有返回类型")

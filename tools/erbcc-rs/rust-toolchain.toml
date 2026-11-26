@@ -1,0 +1,7 @@
+# 版本 pin：erbcc 的产物要求跨机逐字节相等（CONTRACT-RUSTFULL 铁律 2），
+# 编译器版本漂移会改变优化决策与 codegen，故锁到确切的 stable 版本。
+# 换版本必须同时改这里与 AGENTS.md §5 的读数，并重跑四件套对拍。
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

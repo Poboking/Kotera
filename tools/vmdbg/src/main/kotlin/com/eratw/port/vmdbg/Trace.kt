@@ -30,7 +30,7 @@ object CmdTrace {
 
     fun run(a: Args, out: PrintStream, err: PrintStream): Int {
         val name = a.positional.getOrNull(1) ?: throw CliError("用法: trace <函数名> [--steps N] [--capacity N] [--out 文件]")
-        val assembled = Assembler.assemble(a, out = out)
+        val assembled = Assembler.assemble(a, sinkOverride = CmdCall.sinkOverride(a), out = out)
         CmdCall.applyPreState(assembled, a, out)?.let { return it }
         val capacity = a.longOr("--capacity", Cli.DEFAULT_TRACE_CAPACITY.toLong()).toInt()
         if (capacity <= 0) throw CliError("--capacity 必须为正整数")

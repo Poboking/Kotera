@@ -8,6 +8,7 @@ import com.eratw.port.core.entity.VirtualCharaNoRegistry
 import com.eratw.port.core.fn.NativeMethodRegistry
 import com.eratw.port.core.mod.ModDeclarationAdapter
 import com.eratw.port.core.mod.ModRuntimeHost
+import com.eratw.port.core.mod.ModSettingsSnapshot
 import com.eratw.port.core.patch.DeclarationRegistry
 import com.eratw.port.core.patch.DeclarationSnapshot
 import com.eratw.port.core.vars.CharacterTemplate
@@ -16,6 +17,23 @@ import com.eratw.port.modapi.EraMod
 import com.eratw.port.modapi.ModContext
 import com.eratw.port.modapi.ModManifest
 import com.eratw.port.modapi.RuntimeScheduler
+import com.eratw.port.modapi.add
+import com.eratw.port.modapi.get
+import com.eratw.port.modapi.has
+import com.eratw.port.modapi.neighbors
+import com.eratw.port.modapi.put
+import com.eratw.port.modapi.remove
+import com.eratw.port.modapi.setValue
+import com.eratw.port.modapi.valueOf
+import com.eratw.port.modfamily.generated.FamilyKeys
+import com.eratw.port.modapi.create
+import com.eratw.port.modapi.getInt
+import com.eratw.port.modapi.setInt
+import com.eratw.port.modapi.getStr
+import com.eratw.port.modapi.setStr
+import com.eratw.port.modapi.getRef
+import com.eratw.port.modapi.setRef
+import com.eratw.port.modapi.query
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -90,6 +108,13 @@ class FamilyCharaRouteSliceTest {
             shortIdOf = { shortId },
             projector = projector,
         )
+        // per-mod 设置面同生产序（install 前注入）；声明默认值当测试替身，不改载体语义。
+        host.settings = mapOf(
+            FamilyDeclarations.PACKAGE_ID to ModSettingsSnapshot(
+                FamilyDeclarations.PACKAGE_ID,
+                ModDeclarationAdapter.toDescriptor(manifest).settings,
+            ),
+        )
         val report = host.install(listOf(FamilyDeclarations.PACKAGE_ID to mod))
         assertEquals(1, report.size)
         assertNull(report.single().failure, "装载不得失败：${report.single().failure}")
@@ -107,7 +132,7 @@ class FamilyCharaRouteSliceTest {
         // 装置自证：域清单 = 声明派生的全跨度逐格行（ABL 100 + EXP 100 + JUEL 200 + CFLAG 1000）。
         assertEquals(1400, s.routes.size, "四族全跨度派生（出厂尺寸权威，mod 不写尺寸）")
 
-        val father = s.entities.create(FamilyDeclarations.ARCHETYPE_CHILD)
+        val father = s.entities.create(FamilyKeys.archetype)
         val child = s.family.adoptChild("育成子", father = father)
         assertEquals(3, s.family.presentChild(child), "ADDVOIDCHARA 语义：伪角色尾部追加")
         val row = s.family.charIndexOfPresentedChild(child)
@@ -136,7 +161,7 @@ class FamilyCharaRouteSliceTest {
 
         // 成长拍只动实体权威字段（age），路由域镜像不受 advanceOneDay 影响（路由域 ≠ mod 字段）。
         s.family.advanceOneDay()
-        assertEquals(1L, s.entities.getInt(child, FamilyDeclarations.FIELD_AGE))
+        assertEquals(1L, s.entities.getInt(child, FamilyKeys.age))
         assertEquals(31L, s.entities.getInt(child, "ABL:2"), "成长拍不动路由域镜像")
         s.host.shutdown()
     }

@@ -225,7 +225,8 @@ class ErbcV2SectionsTest {
             base,
             ErbcFormat.SECTION_CALL_ARGS,
             ErbcFormat.FLAG_HAS_CALL_ARGS,
-            callArgsBody(pcs = intArrayOf(0), argsOf = { 1 }, argFlagsOverride = 0x04),
+            // 0x04 = IS_FLOAT（浮点实参，已启用）；保留位取 0x08。
+            callArgsBody(pcs = intArrayOf(0), argsOf = { 1 }, argFlagsOverride = 0x08),
         )
         val e2 = assertFailsWith<ErbcDecodeException> { ErbcReader.decode(badFlags) }
         assertTrue(e2.message!!.contains("flags"), e2.message)

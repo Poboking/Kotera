@@ -27,10 +27,12 @@ package com.eratw.port.modapi
  * clean 语义（§18.7）：未声明任务绑定 = 拒绝；任务处理器失败按 Mod 隔离（§18.4），
  * 不拖垮其余任务。
  *
- * ## 接线边界（§12.1）
+ * ## 接线边界（§12.1，2026-11-19 现状订正：生产已接线）
  *
- * 本接口的四个动态实例方法在 mod-api 侧保留抽象契约；core-vm 的 `JobApiAdapter` 生产覆写
- * 属 K3/M4-3 宿主接线（当前默认实现显式 fail-closed，不伪造第二套调度表）。
+ * 生产已接线：core-vm 的 `JobApiAdapter` 四方法全覆写并委托引擎 `JobScheduler`——调度由
+ * `ModRuntimeAssembly` 的 `GameTickDriver(phases, jobs)` 生产节拍驱动，读档经
+ * `restoreJobState` 回灌。本接口的四个缺省实现 = **未注入适配器实例**（台架 / 直用形态）
+ * 的显式 fail-closed 兜底，不伪造第二套调度表。
  */
 interface JobApi {
     /**
@@ -47,8 +49,9 @@ interface JobApi {
      */
     fun bindTemplate(templateKey: String, handler: JobHandler): Registration =
         throw UnsupportedOperationException(
-            "bindTemplate 尚未接线到引擎 JobScheduler（§12.1 生产不可达；须由宿主用 " +
-                "JobApiAdapter 覆写本方法注入 packageId 后委托 JobScheduler.bindTemplate）",
+            "bindTemplate 缺省 fail-closed 兜底：当前实例未注入引擎 JobScheduler 适配 " +
+                "（生产宿主经 JobApiAdapter 注入；直用须覆写本方法注入 packageId 后委托 " +
+                "JobScheduler.bindTemplate）",
         )
 
     /**
@@ -59,8 +62,9 @@ interface JobApi {
      */
     fun scheduleOnce(templateKey: String, atDay: Long, payloadRef: EntityId? = null): String =
         throw UnsupportedOperationException(
-            "scheduleOnce 尚未接线到引擎 JobScheduler（§12.1 生产不可达；须由宿主用 " +
-                "JobApiAdapter 覆写本方法注入 packageId 后委托 JobScheduler.scheduleOnce）",
+            "scheduleOnce 缺省 fail-closed 兜底：当前实例未注入引擎 JobScheduler 适配 " +
+                "（生产宿主经 JobApiAdapter 注入；直用须覆写本方法注入 packageId 后委托 " +
+                "JobScheduler.scheduleOnce）",
         )
 
     /**
@@ -68,8 +72,9 @@ interface JobApi {
      */
     fun cancel(instanceKey: String): Boolean =
         throw UnsupportedOperationException(
-            "cancel 尚未接线到引擎 JobScheduler（§12.1 生产不可达；须由宿主用 " +
-                "JobApiAdapter 覆写本方法注入 packageId 后委托 JobScheduler.cancel）",
+            "cancel 缺省 fail-closed 兜底：当前实例未注入引擎 JobScheduler 适配 " +
+                "（生产宿主经 JobApiAdapter 注入；直用须覆写本方法注入 packageId 后委托 " +
+                "JobScheduler.cancel）",
         )
 
     /**
@@ -79,8 +84,9 @@ interface JobApi {
      */
     fun reschedule(instanceKey: String, atDay: Long): Boolean =
         throw UnsupportedOperationException(
-            "reschedule 尚未接线到引擎 JobScheduler（§12.1 生产不可达；须由宿主用 " +
-                "JobApiAdapter 覆写本方法注入 packageId 后委托 JobScheduler.reschedule）",
+            "reschedule 缺省 fail-closed 兜底：当前实例未注入引擎 JobScheduler 适配 " +
+                "（生产宿主经 JobApiAdapter 注入；直用须覆写本方法注入 packageId 后委托 " +
+                "JobScheduler.reschedule）",
         )
 }
 

@@ -1,0 +1,9 @@
+schema	com.eratw.port.modlivingworld.generated	Npc
+component	lw.char.persona	persona
+field	lwWarmth	INT	false	warmth
+field	lwGrit	INT	false	grit
+component	lw.char.schedule	schedule
+field	lwEveningSlot	INT	false	eveningSlot
+field	lwActivity	STR	false	activity
+field	lwCraftStage	INT	false	craftStage
+archetype	lw.char.npc

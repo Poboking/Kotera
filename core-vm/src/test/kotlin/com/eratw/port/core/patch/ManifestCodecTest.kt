@@ -11,6 +11,12 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
+/** 靶3 行为探针的扫描上界；magic 闸若连上界都收，用例判红要求抬界（防探针退化成硬编码版本表）。 */
+private const val PROBE_MAX_MANIFEST_VERSION = 24
+
+/** 远高于探针上界、一定不被实收的版本号，用来安全取「首行必须为 …」提示句。 */
+private const val PROBE_UNACCEPTED_VERSION = 99
+
 /**
  * M1-3 载体钉（CONTRACT-RT2-M1-3 §3.2）：
  * - 八域逐域往返无损（含枚举、可空值、空表、满表、重复键）；
@@ -189,6 +195,67 @@ class ManifestCodecTest {
         assertEquals(e.jobTemplateDeclarations, a.jobTemplateDeclarations)
         // M5-4 刀 1（/3 续）：chara-field-routes 声明逐条往返（component-schemas 段 B1 子类型）。
         assertEquals(e.charaRoutes, a.charaRoutes)
+    }
+
+    // -----------------------------------------------------------------------
+    // 元数据域（/4）：无元数据仍产 /3，有元数据才升 /4，两版都能解
+    // -----------------------------------------------------------------------
+    @Test
+    fun metadataIsOptionalAndOnlyPresenceUpgradesToVersionFour() {
+        val plain = base()
+        val plainBytes = ManifestCodec.encode(plain)
+        assertEquals("RT2MANIFEST/3", String(plainBytes, Charsets.UTF_8).lineSequence().first())
+        val plainBack = ManifestCodec.decode(plainBytes)
+        assertEquals("", plainBack.displayName)
+        assertEquals("", plainBack.author)
+        assertEquals("", plainBack.description)
+
+        // 只有一个字段非空也要升版：三字段是同一段同一组行，缺一个就说不清是「空」还是「旧版」。
+        val onlyName = plain.copy(displayName = "家族系统")
+        assertEquals("RT2MANIFEST/4", String(ManifestCodec.encode(onlyName), Charsets.UTF_8).lineSequence().first())
+
+        val rich = plain.copy(
+            displayName = "家族系统",
+            author = "eratw-port",
+            description = "父子血缘、收养与逐日成长",
+        )
+        val richBytes = ManifestCodec.encode(rich)
+        assertEquals("RT2MANIFEST/4", String(richBytes, Charsets.UTF_8).lineSequence().first())
+        val richBack = ManifestCodec.decode(richBytes)
+        assertEquals("家族系统", richBack.displayName)
+        assertEquals("eratw-port", richBack.author)
+        assertEquals("父子血缘、收养与逐日成长", richBack.description)
+        assertEquals(plain.packageId, richBack.packageId)
+        assertEquals(plain.version, richBack.version)
+    }
+
+    @Test
+    fun versionThreeManifestStillDecodesWithEmptyMetadata() {
+        val lines = encodeLines(base())
+        assertEquals("RT2MANIFEST/3", lines.first())
+        // meta 段旧格式只有两个值。
+        val start = sectionStart(lines, "meta")
+        assertEquals(2, sectionEnd(lines, start) - start - 1)
+        val back = ManifestCodec.decode(toBytes(lines))
+        assertEquals(base(), back)
+    }
+
+    @Test
+    fun metadataFieldCountIsStrictOnBothVersions() {
+        // /4 少一个值 ⇒ 段尾 / 被当成值读，拒载。
+        val richLines = encodeLines(base().copy(displayName = "d", author = "a", description = "x"))
+        val richStart = sectionStart(richLines, "meta")
+        assertEquals(5, sectionEnd(richLines, richStart) - richStart - 1)
+        val short = richLines.toMutableList()
+        short.removeAt(richStart + 4)
+        assertFailsWith<ManifestFormatException> { ManifestCodec.decode(toBytes(short)) }
+
+        // /3 多一个值 ⇒ 段尾位置不符，拒载（不静默吃掉多余值）。
+        val plainLines = encodeLines(base())
+        val plainStart = sectionStart(plainLines, "meta")
+        val long = plainLines.toMutableList()
+        long.add(plainStart + 3, "S" + hex("extra"))
+        assertFailsWith<ManifestFormatException> { ManifestCodec.decode(toBytes(long)) }
     }
 
     // -----------------------------------------------------------------------
@@ -560,7 +627,7 @@ class ManifestCodecTest {
         val ex = assertFailsWith<ManifestFormatException> { ManifestCodec.decode(legacyV1Bytes()) }
         val m = ex.message!!
         assertTrue(m.contains("RT2MANIFEST/1 已拒载"))
-        assertTrue(m.contains("请用 /3 编码器重出 Manifest"))
+        assertTrue(m.contains("请用 /3 至 /8 的编码器重出 Manifest"))
         assertTrue(m.contains("phase-jobs") && m.contains("B2"))
         assertTrue(m.contains("RT2MANIFEST/3"))
 
@@ -569,15 +636,107 @@ class ManifestCodecTest {
         v2[0] = "RT2MANIFEST/2"
         val ex2 = assertFailsWith<ManifestFormatException> { ManifestCodec.decode(toBytes(v2)) }
         assertTrue(ex2.message!!.contains("RT2MANIFEST/2 已拒载"))
-        assertTrue(ex2.message!!.contains("请用 /3 编码器重出 Manifest"))
+        assertTrue(ex2.message!!.contains("请用 /3 至 /8 的编码器重出 Manifest"))
+        // 列全实收版本的判据不写在这里（会随版本落后而变烂），见 [legacyRejectionCopyListsEveryVersionTheDecoderAccepts]。
 
         val unknown = encodeLines(base())
         unknown[0] = "RT2MANIFEST/9"
         assertFailsWith<ManifestFormatException> { ManifestCodec.decode(toBytes(unknown)) }
     }
 
+    /**
+     * RT2 卫生波靶3（CONTRACT-HYGIENE1 §2.3 + 组长 2026-11-26 追加）：`/1` 与 `/2` 的拒载文案必须
+     * 逐个列全解码器实收的版本，而「实收」的真源是解码器控制流本身，不是任何一段人写的清单。
+     *
+     * 首版的实收集合是从 ManifestCodec.kt:1219-1221 那句「首行必须为 …」反推的，组长判洞：那句虽由六个
+     * MAGIC 常量插值拼出，但「列哪几个常量」仍是手写的一行 —— 将来加 `/9` 若两处文案同时漏写，拿它当
+     * 裁判的闸会跟着一起瞎。现在真源换成行为探针 [decoderAcceptedManifestVersions]：对 `RT2MANIFEST/1`
+     * 到探针上界逐个改写首行喂 decode，失败原因里既不含「已拒载」也不含「首行必须为」的才算过了 magic
+     * 闸（组长点名的坑：判据落在闸位、不要求 decode 成功 —— 最小首行过闸后被段校验打回是另一回事，
+     * 不许为绿补假段）。四面判据：
+     * - 探针集合非空、`/1` `/2` 不在其中、上界没被吃满（吃满 ⇒ 判红要求抬界，禁止退化成硬编码版本表）；
+     * - 两条旧档文案逐个含实收版本（正向：加版本不补文案 ⇒ 红）；
+     * - 旧档文案不许列 magic 闸不收的版本（反向：只补文案不接闸 ⇒ 红）；
+     * - 「首行必须为」提示与 magic 闸实收逐名相等（接了闸忘补提示、或反之 ⇒ 红）。
+     */
     @Test
-    fun encodeEmitsOnlyVersionThree() {
+    fun legacyRejectionCopyListsEveryVersionTheDecoderAccepts() {
+        val accepted = decoderAcceptedManifestVersions()
+        assertTrue(
+            accepted.isNotEmpty(),
+            "行为探针失效：/1../$PROBE_MAX_MANIFEST_VERSION 没有一个能过 magic 闸（探针或 magic 闸被改坏了）",
+        )
+        val probeMax = "RT2MANIFEST/$PROBE_MAX_MANIFEST_VERSION"
+        assertTrue(
+            probeMax !in accepted,
+            "探针上界被吃满：$probeMax 也过了 magic 闸 ⇒ 抬 PROBE_MAX_MANIFEST_VERSION，不许退化成硬编码版本表",
+        )
+        assertTrue(
+            "RT2MANIFEST/1" !in accepted && "RT2MANIFEST/2" !in accepted,
+            "解码器把 /1 或 /2 列进了实收集合 ⇒ 本用例的前提（旧档必拒）失效，须连同生产码一起重写：$accepted",
+        )
+        for (legacy in listOf("RT2MANIFEST/1", "RT2MANIFEST/2")) {
+            val m = rejectionMessageFor(legacy)
+            for (v in accepted) {
+                assertTrue(m.contains(v), "$legacy 的拒载文案漏列实收版本 $v：$m")
+            }
+            val bogus = versionsInRejectionList(m) - accepted
+            assertTrue(bogus.isEmpty(), "$legacy 的拒载文案列了 magic 闸不收的版本 $bogus（实收=$accepted）")
+        }
+        assertEquals(
+            accepted,
+            versionsInUnknownMagicHint(),
+            "「首行必须为」提示与 magic 闸实收不符（加或删了版本而两处没同步；实收集合来自行为探针）",
+        )
+    }
+
+    /**
+     * 行为探针：逐个版本改写首行喂 decode，返回「过了 magic 闸」的版本集合 —— 本用例唯一的实收真源。
+     * 只看失败原因里有没有 magic 闸那两句文案，不看 decode 成败（段校验不参与闸位判定）。
+     */
+    private fun decoderAcceptedManifestVersions(): Set<String> {
+        val accepted = mutableSetOf<String>()
+        for (n in 1..PROBE_MAX_MANIFEST_VERSION) {
+            val v = "RT2MANIFEST/$n"
+            val m = runCatching { ManifestCodec.decode(toBytes(versionProbeLines(v))) }
+                .exceptionOrNull()?.message ?: ""
+            if (!m.contains("已拒载") && !m.contains("首行必须为")) accepted += v
+        }
+        return accepted
+    }
+
+    /** 与 base() 同段表、只换首行的探针档（不补假段：闸位判据不需要后续段成立）。 */
+    private fun versionProbeLines(version: String): MutableList<String> {
+        val l = encodeLines(base())
+        l[0] = version
+        return l
+    }
+
+    /** 旧档必须走明示拒载分支；顺带把那条文案原文交回给断言用。 */
+    private fun rejectionMessageFor(legacy: String): String {
+        val l = versionProbeLines(legacy)
+        val m = assertFailsWith<ManifestFormatException> { ManifestCodec.decode(toBytes(l)) }.message!!
+        assertTrue(m.contains("$legacy 已拒载"), "$legacy 没走明示拒载分支：$m")
+        return m
+    }
+
+    /**
+     * 只取「本解码器只接受 …」那一句里的版本名，避开句首被拒 magic 自身。句式若被改掉，
+     * substringAfter 会把整条消息当句子扫进来 ⇒ 上面那条反向断言判红，不会静默放行。
+     */
+    private fun versionsInRejectionList(message: String): Set<String> =
+        Regex("RT2MANIFEST/\\d+").findAll(message.substringAfter("只接受").substringBefore("。")).map { it.value }.toSet()
+
+    /** 「首行必须为 …，实际「x」」提示句里列出的版本名（截到「，实际」之前，不含被拒的那个值）。 */
+    private fun versionsInUnknownMagicHint(): Set<String> {
+        val l = versionProbeLines("RT2MANIFEST/$PROBE_UNACCEPTED_VERSION")
+        val m = assertFailsWith<ManifestFormatException> { ManifestCodec.decode(toBytes(l)) }.message!!
+        val segment = m.substringAfter("首行必须为").substringBefore("，实际")
+        return Regex("RT2MANIFEST/\\d+").findAll(segment).map { it.value }.toSet()
+    }
+
+    @Test
+    fun encodeEmitsOnlyVersionThreeWhenNoMetadata() {
         val l = encodeLines(fullDescriptor())
         assertEquals("RT2MANIFEST/3", l[0])
         assertEquals(ALL_SECTIONS.size, l.count { it.startsWith("@") })
@@ -762,5 +921,124 @@ class ManifestCodecTest {
         assertEquals(d.interactionHookDeclarations, snapshot.interactionHookDeclarations.map { it.declaration })
         assertEquals(d.phaseDeclarations, snapshot.phaseDeclarations.map { it.declaration })
         assertEquals(d.jobDeclarations, snapshot.jobDeclarations.map { it.declaration })
+    }
+
+    // -----------------------------------------------------------------------
+    // ModDX-2 DX2-B：min-api 段（仅 /6）。缺省缺席 = 0 = 不设闸，旧 manifest 逐字节零变化。
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun minApiPresenceUpgradesToVersionSixAndZeroStaysByteIdentical() {
+        // 缺省 0 = 不设闸：字节与旧编码器逐位一致，不出现 min-api 段。
+        val plain = ManifestCodec.encode(base())
+        assertEquals("RT2MANIFEST/3", String(plain, Charsets.UTF_8).lineSequence().first())
+        assertTrue(!String(plain, Charsets.UTF_8).contains("@min-api"))
+        assertEquals(0, ManifestCodec.decode(plain).minApi)
+
+        // 非 0 才升 /6：meta 恒 5 值、settings 段恒在场（计数 0）、末段 min-api。
+        val gated = base().copy(minApi = 15)
+        val l = encodeLines(gated)
+        assertEquals("RT2MANIFEST/6", l.first())
+        val metaStart = sectionStart(l, "meta")
+        assertEquals(5, sectionEnd(l, metaStart) - metaStart - 1)
+        val settingsStart = sectionStart(l, "settings")
+        assertEquals("I0", l[settingsStart + 1])
+        val minApiStart = sectionStart(l, "min-api")
+        assertEquals("I15", l[minApiStart + 1])
+        assertEquals("/", l[minApiStart + 2])
+        val back = ManifestCodec.decode(toBytes(l))
+        assertEquals(15, back.minApi)
+        assertEquals(gated.packageId, back.packageId)
+    }
+
+    @Test
+    fun minApiVersionSelectionComposesWithSettingsAndMetadata() {
+        // settings 单独在场仍 /5（min-api 未声明不升版）。
+        val settingsOnly = base().copy(
+            settings = listOf(BoolSettingDeclaration("k", true, "t", "d")),
+        )
+        assertEquals("RT2MANIFEST/5", String(ManifestCodec.encode(settingsOnly), Charsets.UTF_8).lineSequence().first())
+
+        // min-api 与 settings / 展示元数据组合都归 /6，两段按段表顺序（settings 先、min-api 后）。
+        val both = base().copy(
+            displayName = "n",
+            settings = listOf(BoolSettingDeclaration("k", true, "t", "d")),
+            minApi = 16,
+        )
+        val l = encodeLines(both)
+        assertEquals("RT2MANIFEST/6", l.first())
+        assertTrue(sectionStart(l, "settings") < sectionStart(l, "min-api"))
+        val back = ManifestCodec.decode(toBytes(l))
+        assertEquals(16, back.minApi)
+        assertEquals("n", back.displayName)
+        assertEquals(1, back.settings.size)
+    }
+
+    @Test
+    fun minApiRoundTripIsByteDeterministic() {
+        val d = base().copy(minApi = 16, displayName = "m", author = "a")
+        val b1 = ManifestCodec.encode(d)
+        val b2 = ManifestCodec.encode(d)
+        assertTrue(b1.contentEquals(b2))
+        val back = ManifestCodec.decode(b1)
+        assertEquals(16, back.minApi)
+        assertTrue(b1.contentEquals(ManifestCodec.encode(back)), "write→read→write 逐字节相同")
+    }
+
+    @Test
+    fun negativeAndMalformedMinApiValuesAreFailClosed() {
+        // 负值（读侧明示拒绝，消息点名 min-api）。
+        val l = encodeLines(base().copy(minApi = 15))
+        val s = sectionStart(l, "min-api")
+        l[s + 1] = "I-1"
+        val ex = assertFailsWith<ManifestFormatException> { ManifestCodec.decode(toBytes(l)) }
+        assertTrue(ex.message!!.contains("min-api") && ex.message!!.contains("负"))
+
+        // 非整数（期望 I token）：S 行拒绝；前导 0 与加号由整数字面量闸拒绝。
+        val l2 = encodeLines(base().copy(minApi = 15))
+        val s2 = sectionStart(l2, "min-api")
+        l2[s2 + 1] = "S" + hex("15")
+        assertFailsWith<ManifestFormatException> { ManifestCodec.decode(toBytes(l2)) }
+
+        val l3 = encodeLines(base().copy(minApi = 15))
+        val s3 = sectionStart(l3, "min-api")
+        l3[s3 + 1] = "I015"
+        assertFailsWith<ManifestFormatException> { ManifestCodec.decode(toBytes(l3)) }
+
+        // 直构路径：负值构造期 fail-closed（不经 decode 也有闸）。
+        val direct = assertFailsWith<IllegalArgumentException> {
+            ModuleDescriptor(packageId = "mod.x", minApi = -1)
+        }
+        assertTrue(direct.message!!.contains("min-api"))
+    }
+
+    @Test
+    fun versionSixSectionStructureIsStrict() {
+        // /6 缺 min-api 段（段数判定写死）⇒ 拒。
+        val l = encodeLines(base().copy(minApi = 15))
+        val s = sectionStart(l, "min-api")
+        val e = sectionEnd(l, s)
+        l.subList(s, e + 1).clear()
+        val ex = assertFailsWith<ManifestFormatException> { ManifestCodec.decode(toBytes(l)) }
+        assertTrue(
+            ex.message!!.contains("min-api") || ex.message!!.contains("期望段") ||
+                ex.message!!.contains("截断"),
+        )
+
+        // /6 重复 min-api 段 ⇒ 拒（min-api 是末段，重复块落在段循环之后，
+        // 命中「尾部多余内容」闸；仍在段循环内的重复则命中「重复键」闸 —— 同为整包拒）。
+        val l2 = encodeLines(base().copy(minApi = 15))
+        val s2 = sectionStart(l2, "min-api")
+        val e2 = sectionEnd(l2, s2)
+        l2.addAll(e2 + 1, l2.subList(s2, e2 + 1).toList())
+        val ex2 = assertFailsWith<ManifestFormatException> { ManifestCodec.decode(toBytes(l2)) }
+        assertTrue(ex2.message!!.contains("重复") || ex2.message!!.contains("多余"))
+
+        // /6 尾部多余内容 ⇒ 拒（fail-closed 口径不因新段放宽）。
+        val full = ManifestCodec.encode(base().copy(minApi = 15))
+        val ex3 = assertFailsWith<ManifestFormatException> {
+            ManifestCodec.decode(full + "TAIL\n".toByteArray(Charsets.UTF_8))
+        }
+        assertTrue(ex3.message!!.contains("多余"))
     }
 }

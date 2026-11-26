@@ -246,7 +246,10 @@ class JumpCompileTest {
         assertEquals(indexOfFunc(p, "GOLDEN_LISTCALLED"), call.a, "命中第一个已知目标")
         assertEquals(1, call.b and ARG_COUNT_MASK, "argc = 1（FUNC …, 5）")
         assertEquals(0, call.b and JUMP_BIT, "TRYCALLLIST → 常规调用（bit30 = 0）")
-        assertTrue(call.b >= 0, "TRY 位不用于 TRY*LIST 的 _CALL")
+        // S9-C1（2026-11-24）：TRY 家族身份编译期恢复进 _CALL.b bit31——链接期缺名
+        // 判折 NOP（TRY 缺目标跳过语义）的唯一凭据；ARG_COUNT_MASK 既有排除该位 ⇒
+        // 运行期 argc 语义零变化。旧断言「TRY 位不用于 TRY*LIST」随 S9 改判反转。
+        assertTrue(call.b < 0, "TRY 位必须用于 TRY*LIST 的 _CALL（S9-C1 链接期死链凭据）")
     }
 
     @Test
@@ -256,6 +259,7 @@ class JumpCompileTest {
         assertEquals(indexOfFunc(p, "GOLDEN_LISTCALLED"), call.a, "命中第一个已知目标")
         assertEquals(1, call.b and ARG_COUNT_MASK, "argc = 1（FUNC …, 5）")
         assertEquals(JUMP_BIT, call.b and JUMP_BIT, "TRYJUMPLIST → 尾跳（bit30 = 1）")
+        assertTrue(call.b < 0, "TRYJUMPLIST 同置 TRY 位（S9-C1）")
     }
 
     // ------------------------------------------------------------------

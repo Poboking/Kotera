@@ -36,6 +36,10 @@ import java.util.concurrent.CancellationException
  * 资源预留键：引擎只保证**同 kind + 同 key 互斥**，不解释 kind/key 的业务含义。
  *
  * 行动中的角色不得被换出（§7）由本原语自然表达：`chara:<entityId>` 预留即占槽。
+ * `chara` kind 的 key 契约（ERAFIN2 实证钉死）= 目标实体 [EntityId] 的 `raw`
+ * **十进制串**（即 `entityId.raw.toString()`）：宿主存活谓词按「十进制解析 → 内核
+ * `exists`」判活，解析失败或实体已亡 = 陈旧回收（宁可误杀不可留悬空锁）；
+ * 非 `chara` kind 的 key 语义归 mod 自定（引擎与宿主都不解释）。
  */
 data class ReservationKey(
     val kind: String,

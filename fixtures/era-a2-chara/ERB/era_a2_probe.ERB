@@ -1,0 +1,22 @@
+; ERA-A2 探针包源（随包角色模板收录面，CONTRACT-ERA-A2 §3）。
+; 本文件是 EraA2CharaTemplateTrackTest 的数据源，测试从 fixtures 目录现场读取，
+; 不在测试里内嵌副本。改动本文件须同步测试断言。
+;
+; NO=999 是「不存在于语料 CSV/Chara（番号 0..167）」的探针号；只做模板缺失/在场
+; 的运行期判据，不进任何 base 发现循环。
+
+@M_KOJO_K999
+PRINTL ERA-A2 随包模板探针（NO=999）
+RETURN 0
+
+@PROBE_CHARA_ADD
+#DIM pos
+ADDCHARA 999
+pos = CHARANUM - 1
+PRINTFORML COUNT={CHARANUM}
+PRINTFORML NAME=%NAME:pos%
+RETURN 0
+
+@PROBE_KOJO_DISPATCH
+CALLFORM M_KOJO_K999
+RETURN 0

@@ -205,6 +205,8 @@ object OpcodeRelocation {
         put(Opcode._RETF, a = PoolRef.EXPR_NULLABLE)
         put(Opcode._CALL_STR)
         put(Opcode._EVAL_INT_JZ, a = PoolRef.EXPR)
+        // 浮点实参落地：a = 表达式池下标（浮点表达式），b = 帧内整型槽（位型）。
+        put(Opcode._EVAL_FLOAT, a = PoolRef.EXPR)
         put(Opcode._LT_JZ)
         put(Opcode._GT_JZ)
 

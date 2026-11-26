@@ -48,6 +48,7 @@ class SidecarPairSaveTest {
         override fun syncFromCharaSlot(entityId: Long) = Unit
         override fun onCharacterRowsPermuted(oldToNewIndexMap: IntArray) = Unit
         override fun onCharacterRowDeleted(deletedIndex: Int) = Unit
+        override fun onWorldReset() = Unit
     }
 
     /**

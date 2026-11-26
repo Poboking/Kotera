@@ -1,5 +1,6 @@
 package com.eratw.port.core.diag
 
+import com.eratw.port.core.code.CodeCacheCensus
 import com.eratw.port.core.code.Program
 import com.eratw.port.core.host.GraphicsPool
 import com.eratw.port.core.host.LineBufferConsoleSink
@@ -106,6 +107,16 @@ object LiveSetCensus {
     private const val BYTES_PER_MIB = 1024L * 1024L
     /** UTF-16：一个 `String` 的 char 逻辑占 2 B（JDK 紧凑字符串实际是 latin1 1 B/char，账面按 2 B **高估**串本体，与「不算对象头」的低估方向相反，逐项注明）。 */
     private const val BYTES_PER_CHAR = 2L
+
+    /** 数组元素宽度（压缩 oops 口径，与真机 ART 一致）：引用 4 B、int 4 B、long 8 B、short/char 2 B、byte/boolean 1 B。 */
+    private const val BYTES_PER_REF = 4L
+    private const val BYTES_PER_INT_SLOT = 4L
+    private const val BYTES_PER_LONG_SLOT = 8L
+    private const val BYTES_PER_SHORT_SLOT = 2L
+    private const val BYTES_PER_BYTE_SLOT = 1L
+
+    /** `Array<*>` 元素递归深度上限：1 层壳 + 1 层元素（`Array<IntArray?>` 够用），防环。 */
+    private const val VM_ARRAY_CHAIN_MAX = 2
 
     /**
      * 一份 Java 堆分项账面。每个字段是**字节**（`Long`）或**条数**（`Long`）；
@@ -320,6 +331,27 @@ object LiveSetCensus {
          * 这一簇的主要来源之一，整笔在账外（装载侧串池只入了 [stringPoolChars] 那 0.42 MiB）。
          */
         val strTableEntries: Long,
+        /**
+         * 运行期字符串驻留池的**串载荷字符总数**：`store.pool.charsTotal`（UTF-16 code unit 之和，
+         * 含下标 0 空串=0 字）。
+         *
+         * 为什么需要（2026-11-17 lane-k）：[strTableEntries] 只有条数，而 [strTableEntries] 的 KDoc
+         * 自己写着「串本体字节读不到」——真机三份 OOM 报告读到 96,168 条，若存的是整行长文本，
+         * 量级会从桌面尺的 ≈24 MiB 跳到数百 MiB，而账面一个字都没有 ⇒ 串池既证不实也证不伪。
+         * 本条给的是**下界**：`chars × [BYTES_PER_CHAR]` 覆盖 `String` 载荷（与 [stringPoolChars]、
+         * [displayTextChars] 同尺），`String` 对象头 / `byte[]` 数组头 / `ids` 反查表的装载因子余量另计。
+         *
+         * **不进 [byteFields]**：与 [displayTextChars] 同一条理由——它缺对象头与引用，进和会把
+         * 「账面」伪装成比实际更接近 dominator（探针的 `bookedSumBytes` 与 `HeapRootLedger` 的判据
+         * 都钉在现有十项上，换口径要另立项）。要判「串池是不是那 380 MiB 无名差额」，看的是这一枚
+         * 与实测堆的**差额对比**，不是把它塞进和里去凑。
+         *
+         * 判性 = **真读数且热路径可取**（`StringTable` 入池/淘汰时增量维护，查询 O(1)，见
+         * `StringTable.charsTotal` 的 KDoc）：与装载侧那份**整册扫描**的 [stringPoolChars] 不同，
+         * 因此**不随 [fullScan] 分档**——页中钉发（`fullScan=false`）也给读数。
+         * -1 = 无会话（store 为 null），不是 0 条。
+         */
+        val strTableChars: Long = -1L,
 
         // ---- 行缓冲（LineBufferConsoleSink）----
         /**
@@ -338,6 +370,21 @@ object LiveSetCensus {
          * 判性 = **fullScan=false 时「热路径不取」(-1)**；装载臂上同 [displayLineCount] 属结构性 0。
          */
         val displaySegmentCount: Long,
+        /**
+         * 行内段的**字符总数**（**仅 [fullScan]**）：与 [displaySegmentCount] 共用同一次
+         * `console.lines()` 快照，逐段累加 `text.length`。
+         *
+         * 为什么需要（2026-11-17 lane-i）：[displaySegmentCount] 只说「切了几块」，
+         * 而块里的 `Segment.text` 才是行缓冲真正占堆的东西；真机三份 OOM 报告（Xiaomi 24069RA21C）
+         * 只印得出「显示 1500 逻辑 74516 段 2910」，一个字节都没有 ⇒ 行缓冲既证不实也证不伪。
+         * 本条给的是**下界**：`chars × [BYTES_PER_CHAR]` 覆盖 `String` 载荷（UTF-16 口径，与
+         * [stringPoolChars] 同尺），`Segment` 对象头 / 引用 / 折行续行对象另计。
+         *
+         * **不进 [byteFields]**：它缺对象头与引用，进和会把「账面」伪装成比实际更接近 dominator
+         * （探针的 `bookedSumBytes` 与 `HeapRootLedger` 的判据都钉在现有十项上，换口径要另立项）。
+         * 判性 = 同 [displaySegmentCount]：fullScan=false 给 -1，装载臂结构性 0。
+         */
+        val displayTextChars: Long = -1L,
         /**
          * 浮岛（HTML island）条数：`console.htmlIslands().size`（同步快照，行数有限，恒取）。
          * 「待发的打印缓冲」只有 `printingBufferEmpty` 一个布尔读数（无公开计数口，见交付「需组长接线」）——
@@ -393,6 +440,56 @@ object LiveSetCensus {
          * -1 = 无读数。
          */
         val codeCacheInternStrings: Long,
+        /**
+         * 语句条目缓存当前已分配块数（`LazyStatementRecords.cached`；每块 4,096 槽）。
+         *
+         * 判性 = **真读数（块位表判空）**，口径同 [codeCacheNodeBlocks]。上界在册：
+         * `RUNTIME_STMT_ENTRY_BUDGET`（1 shl 17 条）武装后最多 32 块 —— 读数**贴着 32 而
+         * [codeCacheStmtEvictions] 在涨** = 块级 LRU 在干活（上界生效）；读数**超过 32 而
+         * 逐出恒 0** = 上界没接上（2026-11-17 lane-o 补账的正是这条判据）。
+         * -1 = 非惰性池 / 无读数。
+         */
+        val codeCacheStmtBlocks: Long = -1L,
+        /** 语句条目缓存块级逐出累计。判性 = **真读数（计数器）**；-1 = 无读数。 */
+        val codeCacheStmtEvictions: Long = -1L,
+        /**
+         * 语句钉住表当前条数（`StatementPins`；上界 `RUNTIME_STMT_PIN_BUDGET` = 1 shl 14）。
+         * 判性 = **真读数（条数）**。钉住表**不驱逐**，溢出只计 [codeCacheStmtPinOverflow]，
+         * 所以读数贴着 16,384 = 已经顶到上界（代码覆盖率把钉住面用满）。-1 = 无读数。
+         */
+        val codeCacheStmtPins: Long = -1L,
+        /** 钉住表溢出条数（fail-closed 只计数，不静默丢引用）。判性 = **真读数（计数器）**；-1 = 无读数。 */
+        val codeCacheStmtPinOverflow: Long = -1L,
+        /**
+         * 派生 VM 池（`ProcessRuntime.nestedVmPool`）**当前**常驻字节：池里每台
+         * `VirtualMachine` 的执行栈数组实付字节之和（`nestedVmResidentBytes` 反射逐台累加）。
+         *
+         * 判性 = **真读数（数组 `length × 元素宽`，与持有者逐字相同）**，不是「池上限 × 单台估值」
+         * 那种乘法外推：读的是此刻真在池里的那几台，每台按它**自己**的数组算。
+         *
+         * ## 为什么这一项有资格当「峰值」读
+         * 池只借还、**从不裁剪**（`ProcessRuntime.kt:3980` 归还无封顶，同文件的
+         * `refCallScratchPool` 在 `:4021` 有 `REF_CALL_SCRATCH_POOL_MAX` 封顶，本池没有）；
+         * 实例活到会话结束 ⇒ **静止时刻（无嵌套调用在飞）池里那几台 = 整局历史最大并发深度**。
+         * 所以本读数在静止点同时是当前占用与整局峰值，不需要另立可变计数器
+         * （本类禁静态可变，见类 KDoc「线程模型」）。
+         *
+         * ## 单台上界（写死口径，判读用，不入算式）
+         * 底座 313,598 B（7×`IntArray(10_001)` + 2×`BooleanArray(10_001)` + `LongArray(1_024)`
+         * + `arrayOfNulls(1_024)` + 两对 64 槽），执行过栈码变量访问再加
+         * `varHandleTables` 的 `functionCount × 4`（真语料 118,534 函数 ⇒ 474,136 B）。
+         * 池的事实上界来自 `METHOD_STACK_LIMIT = 100`（`ProcessRuntime.kt:5028`）
+         * ⇒ 全池 ≈ 30.7 MiB（纯底座）~ 77 MiB（每台都建了 handle 表）。
+         *
+         * ## 不进 [bookedSumBytes]
+         * 它是**池内实例**的字节，与 `store`/`program` 那几项不重叠但也不互补
+         * （池空 = 0 而 VM 栈确实没占堆）⇒ 入和会把「有没有派生 VM 在飞」混进总量口径。
+         * 需要合计时由读报告的人显式加，故**故意**不挂进 [byteFields]。
+         *
+         * -1 = 取不到（宿主没传池快照 / 反射被拒）；0 = 池确实空（会话还没嵌过方法调用）。
+         * 缺省 -1 让既有构造点与既有用例逐字不变。
+         */
+        val nestedVmResident: Long = -1L,
     ) {
         /** 字节 → MiB（负数原样返回 = 「无读数」哨兵，不折 0）。 */
         fun miB(bytes: Long): Long = if (bytes < 0L) bytes else bytes / BYTES_PER_MIB
@@ -404,50 +501,132 @@ object LiveSetCensus {
          * 字节项折 MiB、计数项原样；每条自带误差方向的关键限定词（「声明」「实占」「容量行」
          * 「已含上两列」），免得读者把结构账面读成 dominator tree 的定论。
          *
-         * **两处面宽度约束（改动前先看这条）**：
+         * **三处面宽度约束（改动前先看这条）**：
          * - 行首 `Java 堆结构账面` 与 `｜装载：函数 <n> 指令 <n>` 的形状被复盘脚本钉住
          *   （`devtools/triage_reports.py` 的 `HEAPCENSUS_RE` + `HEAP_CENSUS_REPORT_PREFIX`），
          *   加项只许**往后追加**或改中段的限定词，动这两处字面要先过 `--selftest`；
          * - 轨迹行没有单行截断（`RunWatch` 只按 `MAX_LINES` 64 行滚动，`RunWatch.kt:400`），
-         *   但这一行进的是 64 行的环形表 ⇒ 别把它写成 1 KiB 的散文，新增项一律「名 数」短形。
+         *   但这一行进的是 64 行的环形表 ⇒ 别把它写成 1 KiB 的散文，新增项一律「名 数」短形；
+         * - **报告面有单行闸 [renderReportLines]，别把 [render] 直接塞进报告行表**：报告拼装侧
+         *   `ErrorReport.clip` 按 `ErrorReport.LINE_MAX_CHARS`（400 字）逐行截断，本行满档已到
+         *   ~430 字 ⇒ 用 [render] 那一整行时「代码缓存：节点块 …」往后全被切掉（2026-11-17
+         *   lane-g-mem 真机三份 OOM 报告实证：读数在、报告里一个字都没有）。
          */
         fun render(): String = buildString {
-            append("Java 堆结构账面（估算口径，非 dominator tree；对象头/对齐不计=低估，串按 UTF-16=高估串本体）")
-            append(" ｜装载：函数 ").append(v(functionCount))
-            append(" 指令 ").append(v(instructionCount))
-            append(" 全局槽 ").append(v(globalSlots))
-            append(" 表达式 ").append(v(exprPoolEntries))
-            append(" 语句 ").append(v(statementPoolEntries))
-            append(" 物化语句 ").append(v(materializedStatements))
-            append(" 物化函数 ").append(v(materializedFunctions))
-            append(" 扁平片驻/建 ").append(v(flatResidentSegments)).append("/").append(v(flatBuiltSegments))
-            append(" ｜指令流常驻 ").append(mibTag(codeResidentBytes)).append("MiB")
-            append(" 行表 ").append(mibTag(lineTableResidentBytes)).append("MiB")
-            append(" 实参索引 ").append(mibTag(callArgIndexResidentBytes)).append("MiB")
-            append(" 串池 ").append(v(stringPoolEntries)).append(" 条")
-            if (stringPoolChars >= 0L) {
-                append("/约 ").append(miB(stringPoolChars * BYTES_PER_CHAR)).append("MiB")
+            append(HEADER)
+            for (s in sectionTexts()) append(s)
+        }
+
+        /**
+         * **报告面**成文：[render] 的同一批段按段装行，每行不超过 [REPORT_LINE_BUDGET] 字。
+         *
+         * 为什么必须另开一口而不是「把 [render] 塞进报告行表」：[render] 是给 `RunWatch` 轨迹
+         * 用的单行（那条路没有单行截断），真机满档读数下这一行 ~430 字，而报告拼装侧
+         * `ErrorReport.clip` 对每行按 400 字剪尾 ⇒ **尾部「代码缓存」四键（节点块/逐出/规范/
+         * 串池）在报告里恒缺**，正是 2026-11-17 三份 OOM 报告里 `代码缓存：节点块 …（超长截断）`
+         * 的形状。修在度量源（本口按段断行）而不是放宽 400 字闸：那一闸是全报告面的口径。
+         *
+         * 装行规则：贪心，装不下就换行；**续行仍以 `Java 堆结构账面（续）` 打头**，于是
+         * `devtools/triage_reports.py` 的 `startswith(HEAP_CENSUS_REPORT_PREFIX)` 判段照样认得
+         * （该脚本只判「有没有这一行的行首」，`triage_reports.py:435-436`，不解析行内字段）。
+         * 单段本身超过预算时（字段随后续加项变长）该段独占一行、**不再硬切** —— 宁可这一行
+         * 被报告面截尾，也不能把一段账目切成两半读错。
+         */
+        fun renderReportLines(): List<String> {
+            val out = ArrayList<String>(SECTION_COUNT)
+            val cur = StringBuilder()
+            for (s in sectionTexts()) {
+                val head = if (out.isEmpty()) HEADER else REPORT_CONTINUATION_PREFIX
+                if (cur.isEmpty()) cur.append(head)
+                if (cur.length > head.length && cur.length + s.length > REPORT_LINE_BUDGET) {
+                    out.add(cur.toString())
+                    cur.setLength(0)
+                    cur.append(REPORT_CONTINUATION_PREFIX)
+                }
+                cur.append(s)
             }
-            append(" ｜运行：全局整数(声明) ").append(mibTag(globalIntBytes)).append("MiB")
-            append(" 全局整数(实占) ").append(mibTag(globalIntResidentBytes)).append("MiB")
-            append(" 全局串格 ").append(mibTag(globalStrSlotBytes)).append("MiB")
-            append(" 角色 ").append(v(charaCount)).append("/容 ").append(v(charaCapacity))
-            append(" 整数(容量行) ").append(mibTag(charaIntBytes)).append("MiB")
-            append(" CSTR ").append(mibTag(charaStrBytes)).append("MiB")
-            append(" 每角色整数 ").append(rawTag(charaIntPerCharBytes)).append("B")
-            append(" 容量冗余(已含上两列) ").append(mibTag(charaReserveBytes)).append("MiB")
-            append(" 驻留串表 ").append(v(strTableEntries)).append(" 条")
-            append(" ｜行缓冲：显示 ").append(v(displayLineCount)).append(" 逻辑 ").append(v(logicalLineCount))
-            if (displaySegmentCount >= 0L) append(" 段 ").append(v(displaySegmentCount))
-            if (pendingPrintBufferNonEmpty >= 0L) {
-                append(" 待发缓冲 ").append(if (pendingPrintBufferNonEmpty == 0L) "空" else "非空")
-            }
-            append(" ｜图形 Java：正号段像素 ").append(mibTag(gfxResidentPixelBytes)).append("MiB")
-            append(" 负号段 CSV ").append(mibTag(csvResidentPixelBytes)).append("MiB")
+            if (cur.isNotEmpty()) out.add(cur.toString())
+            return out
+        }
+
+        /**
+         * 逐段成文（段 = 一个 `｜` 打头的账目块）：[render] 与 [renderReportLines] 共用这一份，
+         * 两条路的字面因此恒等，只差在换行位置。段内不做任何折行。
+         */
+        private fun sectionTexts(): List<String> = listOf(
+            buildString {
+                append(" ｜装载：函数 ").append(v(functionCount))
+                append(" 指令 ").append(v(instructionCount))
+                append(" 全局槽 ").append(v(globalSlots))
+                append(" 表达式 ").append(v(exprPoolEntries))
+                append(" 语句 ").append(v(statementPoolEntries))
+                append(" 物化语句 ").append(v(materializedStatements))
+                append(" 物化函数 ").append(v(materializedFunctions))
+                append(" 扁平片驻/建 ").append(v(flatResidentSegments)).append("/").append(v(flatBuiltSegments))
+                append(" ｜指令流常驻 ").append(mibTag(codeResidentBytes)).append("MiB")
+                append(" 行表 ").append(mibTag(lineTableResidentBytes)).append("MiB")
+                append(" 实参索引 ").append(mibTag(callArgIndexResidentBytes)).append("MiB")
+                append(" 串池 ").append(v(stringPoolEntries)).append(" 条")
+                if (stringPoolChars >= 0L) {
+                    append("/约 ").append(miB(stringPoolChars * BYTES_PER_CHAR)).append("MiB")
+                }
+            },
+            buildString {
+                append(" ｜运行：全局整数(声明) ").append(mibTag(globalIntBytes)).append("MiB")
+                append(" 全局整数(实占) ").append(mibTag(globalIntResidentBytes)).append("MiB")
+                append(" 全局串格 ").append(mibTag(globalStrSlotBytes)).append("MiB")
+                append(" 角色 ").append(v(charaCount)).append("/容 ").append(v(charaCapacity))
+                append(" 整数(容量行) ").append(mibTag(charaIntBytes)).append("MiB")
+                append(" CSTR ").append(mibTag(charaStrBytes)).append("MiB")
+                append(" 每角色整数 ").append(rawTag(charaIntPerCharBytes)).append("B")
+                append(" 容量冗余(已含上两列) ").append(mibTag(charaReserveBytes)).append("MiB")
+                append(" 驻留串表 ").append(v(strTableEntries)).append(" 条")
+                if (strTableChars >= 0L) {
+                    append(" 串池字符 ").append(v(strTableChars))
+                        .append("/约 ").append(miB(strTableChars * BYTES_PER_CHAR)).append("MiB")
+                }
+            },
+            buildString {
+                append(" ｜行缓冲：显示 ").append(v(displayLineCount)).append(" 逻辑 ").append(v(logicalLineCount))
+                if (displaySegmentCount >= 0L) append(" 段 ").append(v(displaySegmentCount))
+                if (displayTextChars >= 0L) {
+                    append(" 字 ").append(v(displayTextChars))
+                        .append("/约 ").append(miB(displayTextChars * BYTES_PER_CHAR)).append("MiB")
+                }
+                if (pendingPrintBufferNonEmpty >= 0L) {
+                    append(" 待发缓冲 ").append(if (pendingPrintBufferNonEmpty == 0L) "空" else "非空")
+                }
+            },
+            buildString {
+                append(" ｜图形 Java：正号段像素 ").append(mibTag(gfxResidentPixelBytes)).append("MiB")
+                append(" 负号段 CSV ").append(mibTag(csvResidentPixelBytes)).append("MiB")
+            },
+            codeCacheText,
+        )
+
+        /**
+         * 代码缓存段成文（段 = `｜代码缓存：…`）。从 [sectionTexts] 提成**属性**（不是函数）：
+         * 一来守住 detekt `LongMethod`（段一多就贴着 60 行上限，本段是唯一还在按波次长个的段），
+         * 二来属性初始化不进 `TooManyFunctions` 计数，`Census` 已有的函数数正好卡在阈值上。
+         *
+         * 口径纪律：**只在段尾追加**，既有键的标签与顺序一字不动
+         * （`devtools/triage_reports.py:154`/`:435-437` 的 startswith 判据只认行首/续行前缀，
+         * 段内追加不破）。
+         */
+        private val codeCacheText: String = buildString {
             append(" ｜代码缓存：节点块 ").append(v(codeCacheNodeBlocks))
             append(" 逐出 ").append(v(codeCacheNodeEvictions))
             append(" 规范 ").append(v(codeCacheInternForms))
             append(" 串池 ").append(v(codeCacheInternStrings))
+            // 语句缓存水位（2026-11-17 lane-o）。
+            append(" 语句缓存 块 ").append(v(codeCacheStmtBlocks))
+            append("/逐出 ").append(v(codeCacheStmtEvictions))
+            append("/钉 ").append(v(codeCacheStmtPins))
+            append("/溢 ").append(v(codeCacheStmtPinOverflow))
+            // 派生 VM 池常驻（2026-11-17 lane-p）：-1 = 宿主没传池快照（不是 0）。
+            // 刻意**不并进** `bookedSumBytes()`：池空给 0 会把「会话还没嵌过方法调用」
+            // 与「嵌过但已归还」混成同一读数（见 [Census.nestedVmResident] 的 KDoc）。
+            append(" 派生池 ").append(mibTag(nestedVmResident)).append("MiB")
         }
 
         /**
@@ -503,6 +682,32 @@ object LiveSetCensus {
 
         /** 亚 MiB 的字节读数：按**字节原值**成文（整除折 MiB 会把 208,768 B 读成 0），-1 仍写 `-`。 */
         private fun rawTag(bytes: Long): String = if (bytes < 0L) "-" else bytes.toString()
+
+        private companion object {
+            /**
+             * 账面行行首。真机满档下这一行的实际长度约 430 字（实测三份 OOM 报告），
+             * 而报告拼装侧的单行闸只有 400 字 ⇒ 这是 [renderReportLines] 存在的唯一理由。
+             */
+            const val HEADER: String =
+                "Java 堆结构账面（估算口径，非 dominator tree；对象头/对齐不计=低估，串按 UTF-16=高估串本体）"
+
+            /**
+             * 报告面续行行首。**故意以 `Java 堆结构账面` 打头**：`devtools/triage_reports.py`
+             * 的 `startswith(HEAP_CENSUS_REPORT_PREFIX)` 判段（`triage_reports.py:435-436`）
+             * 因此对本口产出的任一行都成立，指标「内存节有 Java 堆分项」不因断行而失效。
+             */
+            const val REPORT_CONTINUATION_PREFIX: String = "Java 堆结构账面（续）"
+
+            /**
+             * 报告面单行预算 320 字：报告侧闸是 400 字（`ErrorReport.LINE_MAX_CHARS`），
+             * 留 80 字余量给读数位数增长（指令数已到 7 位、串表 5 位）。
+             * **别把它调到 400 以上** —— 那等于把读数重新交给 400 字闸去切。
+             */
+            const val REPORT_LINE_BUDGET: Int = 320
+
+            /** 账面段数（装载 / 运行 / 行缓冲 / 图形 / 代码缓存）：[sectionTexts] 的长度，兼作装行表初容量。 */
+            const val SECTION_COUNT: Int = 5
+        }
     }
 
     /**
@@ -528,6 +733,12 @@ object LiveSetCensus {
      *                 线程口径由池锁给出：面只在该池监视器内被摸，两线程不会同时在面里
      *                 （`snapshotResourceResidentBytesWithFaceLocked` 的「线程口径」一节）；
      *                 面归调用方所有、每次进池先 `clear()`，本类不缓存不外借。
+     * @param nestedVmPool 派生 VM 池的**只读快照**（`ProcessRuntime.nestedVmPool` 的一次
+     *                 `toList()`；本类不持有池、不加锁、不借不还）。null（缺省）= 宿主没接线，
+     *                 [Census.nestedVmResident] 给 -1，**既有形状逐字不变**。
+     *                 传空集合 = 池确实空（0）。注意快照是有分配的 `toList()`，
+     *                 崩溃终点路径（`GameHost.memoryCensusReportLine`）在 OOM 上可能再抛
+     *                 `OutOfMemoryError` ⇒ 那条路径要由接线方决定是否传池（见交付「需组长接线」）。
      *
      * ## 新增的四枚物化读数与 [fullScan] 无关（本路补的账都在这上面）
      *
@@ -546,10 +757,14 @@ object LiveSetCensus {
         spritePool: SpritePool?,
         fullScan: Boolean,
         residentFace: SpriteEvictScratch? = null,
+        nestedVmPool: Collection<*>? = null,
     ): Census {
         // 代码缓存读数一次取齐（惰性池才非 null；两处 `codeCacheCensus` 都是只读标量 +
         // O(块位表) 判空，热路径钉发也照取，与 [globalIntResidentBytes] 同一廉价档）。
-        val programCache = program?.codeCacheCensus()
+        val programCache = program?.codeCacheCensus
+        val codeCache = codeCacheReadout(programCache)
+        // 行表快照一次取两个读数（段数 + 字符数）：`lines()` 是锁内一次 toList()，只许拷一遍。
+        val lineScan = if (console == null || !fullScan) null else scanLines(console)
         return Census(
             functionCount = program read { functions.size.toLong() },
         instructionCount = program read { instructionCount.toLong() },
@@ -589,20 +804,164 @@ object LiveSetCensus {
             if (spare <= 0L) 0L else spare * characters.rowBytes()
         },
         strTableEntries = store read { pool.distinctCount.toLong() },
+        // 串池字符数是 StringTable 自维护的 O(1) 标量（入池/淘汰增量），所以**不随
+        // [fullScan] 分档**：热路径钉发也照取（理由见字段 KDoc）。
+        strTableChars = store read { pool.charsTotal },
 
         displayLineCount = console read { displayLineCount.toLong() },
         logicalLineCount = console read { lineCount },
-        displaySegmentCount = if (console == null || !fullScan) -1L else countSegments(console),
+        displaySegmentCount = lineScan?.segments ?: -1L,
+        displayTextChars = lineScan?.chars ?: -1L,
         pendingPrintBufferNonEmpty = console read { if (printingBufferEmpty) 0L else 1L },
 
         gfxResidentPixelBytes = gfxPool read { residentBytes() },
         csvResidentPixelBytes = spritePool read { resourceResidentPixelBytes(residentFace) },
 
-        codeCacheNodeBlocks = programCache?.nodeBlocks?.toLong() ?: -1L,
-        codeCacheNodeEvictions = programCache?.nodeEvictions?.toLong() ?: -1L,
-        codeCacheInternForms = programCache?.internForms?.toLong() ?: -1L,
-        codeCacheInternStrings = programCache?.internStrings?.toLong() ?: -1L,
+        // 代码缓存八枚（节点块/逐出/规范/串池 + 语句缓存 块/逐出/钉/溢）统一在 codeCacheReadout
+        // 里取：八枚同源同判空，抽出去也让 census 本体不再因 8 个 `?:` 涨圈复杂度
+        // （detekt CyclomaticComplexMethod 阈值 15，本笔补四枚后实测 17 —— 不用 @Suppress 压）。
+        codeCacheNodeBlocks = codeCache[CodeCacheSlot.NODE_BLOCKS],
+        codeCacheNodeEvictions = codeCache[CodeCacheSlot.NODE_EVICTIONS],
+        codeCacheInternForms = codeCache[CodeCacheSlot.INTERN_FORMS],
+        codeCacheInternStrings = codeCache[CodeCacheSlot.INTERN_STRINGS],
+        codeCacheStmtBlocks = codeCache[CodeCacheSlot.STMT_BLOCKS],
+        codeCacheStmtEvictions = codeCache[CodeCacheSlot.STMT_EVICTIONS],
+        codeCacheStmtPins = codeCache[CodeCacheSlot.STMT_PINS],
+        codeCacheStmtPinOverflow = codeCache[CodeCacheSlot.STMT_PIN_OVERFLOW],
+
+        nestedVmResident = nestedVmResidentBytes(nestedVmPool),
         )
+    }
+
+    /**
+     * 代码缓存段的八枚读数一次取齐，按 [CodeCacheSlot] 下标返回（`CodeCacheCensus` → 长期值
+     * 是 `Long`；缺读数一律 `-1`）。
+     *
+     * 为什么单独抽一个函数、又为什么返回数组而不是一个类：
+     *
+     * - 这八枚的判空形状完全同源（`programCache?.x?.toLong() ?: -1L`），写在 [census] 里会各
+     *   算一个分支点，把圈复杂度顶过 detekt 阈值（实测 17 > 15）。抽出来是为了让「八枚同口径」
+     *   这件事本身可读，不是为了绕闸 —— 判空语义一字未变。
+     * - 用一个八字段的类装会撞 `LongParameterList`（阈值 7）。八枚同类型同语义，数组就是它们的
+     *   自然形状；下标用常量命名，读侧不出现魔数。
+     *
+     * 语句缓存那四枚（[Census.codeCacheStmtBlocks] 等）2026-11-17 才进账面：`CodeCacheCensus`
+     * 早已在册（`core-vm/src/main/kotlin/com/eratw/port/core/code/Program.kt` 的
+     * `CodeCacheCensus`），代码缓存段却只印了前四枚 ⇒「`9a9446621` 的块级 LRU 上界到底生效
+     * 没有」在真机上无法验证。四枚全是只读标量 + O(块位表) 判空，与上一档同廉价。
+     */
+    private fun codeCacheReadout(programCache: CodeCacheCensus?): LongArray =
+        longArrayOf(
+            programCache?.nodeBlocks?.toLong() ?: -1L,
+            programCache?.nodeEvictions?.toLong() ?: -1L,
+            programCache?.internForms?.toLong() ?: -1L,
+            programCache?.internStrings?.toLong() ?: -1L,
+            programCache?.stmtBlocks?.toLong() ?: -1L,
+            programCache?.stmtEvictions?.toLong() ?: -1L,
+            programCache?.stmtPins?.toLong() ?: -1L,
+            programCache?.stmtPinOverflow?.toLong() ?: -1L,
+        )
+
+    /** [codeCacheReadout] 返回数组的下标（顺序即 `CodeCacheCensus` 八枚的账面顺序）。 */
+    private object CodeCacheSlot {
+        /** 段2 节点块位表已分配块数。 */
+        const val NODE_BLOCKS = 0
+
+        /** 节点块级逐出累计。 */
+        const val NODE_EVICTIONS = 1
+
+        /** 形态表（interner）条数。 */
+        const val INTERN_FORMS = 2
+
+        /** 内建串池（同一实例）不同内容条数。 */
+        const val INTERN_STRINGS = 3
+
+        /** 语句条目缓存已分配块数（上界 32 = 1 shl 17 / 4096）。 */
+        const val STMT_BLOCKS = 4
+
+        /** 语句条目缓存块级逐出累计。 */
+        const val STMT_EVICTIONS = 5
+
+        /** 语句钉住表当前条数（上界 1 shl 14，不驱逐）。 */
+        const val STMT_PINS = 6
+
+        /** 钉住表溢出条数（fail-closed 只计数）。 */
+        const val STMT_PIN_OVERFLOW = 7
+    }
+
+    /**
+     * 派生 VM 池当前常驻字节（[Census.nestedVmResident] 的现算面）。
+     *
+     * 逐台反射读 `VirtualMachine` 自己的**数组字段**并按 `length × 元素宽` 累加：IntArray ×4、
+     * LongArray ×8、ShortArray/CharArray ×2、ByteArray/BooleanArray ×1、`Array<*>` 壳 ×4
+     * 且**递归一层**元素（`varHandleTables: Array<IntArray?>` 的元素是本函数那种 handle 表的
+     * 实付字节，只算壳会把它整笔漏掉）。非数组字段一概不计（标量/共享直方图不是这台 VM 的常驻）。
+     *
+     * 口径与边界：
+     * - 只读：`isAccessible` 后 `get`，不改任何执行路径、不加锁、不借不还；全程 `runCatching`。
+     * - null → **-1**（宿主没接线）；空集合 → **0**（池确实空）；
+     * - 单台读失败 → 该台按 0 计，不给整池 -1（不半报假数，但也不因一台坏了丢全池）；
+     * - 数组宽度按**压缩 oops 口径**（引用 4 B）：真机 ART 上 `Array<*>`/`IntArray` 都是 4 B，
+     *   与 [Census.charaIntBytes] 等既有读数同一口径；8 B 引用口径要另乘，**不在本读数里混口径**；
+     * - 对象头/对齐不计（与本类其余读数一致 = 低估方向）。
+     *
+     * 上界判式见 [Census.nestedVmResident]：单台底座 313,598 B，池事实封顶 100 台
+     * （`ProcessRuntime.kt:5028 METHOD_STACK_LIMIT`）。
+     */
+    fun nestedVmResidentBytes(pool: Collection<*>?): Long {
+        if (pool == null) return -1L
+        var total = 0L
+        for (vm in pool) {
+            if (vm == null) continue
+            total += runCatching { instanceArrayBytes(vm) }.getOrDefault(0L)
+        }
+        return total
+    }
+
+    /** 单个对象上所有（含继承来的）非静态数组字段的实付字节；见 [nestedVmResidentBytes]。 */
+    private fun instanceArrayBytes(target: Any): Long {
+        var total = 0L
+        val seen = HashSet<String>()
+        var cls: Class<*>? = target.javaClass
+        while (cls != null && cls != Any::class.java) {
+            for (field in cls.declaredFields) {
+                if (isCountedField(field, seen)) total += fieldArrayBytes(target, field)
+            }
+            cls = cls.superclass
+        }
+        return total
+    }
+
+    /**
+     * 该字段要不要计入：**非静态**且是同类族里**首次**出现的字段名。
+     * 同名字段只算最靠下的那一个（VM 无此形态，防御性去重）。
+     */
+    private fun isCountedField(field: java.lang.reflect.Field, seen: MutableSet<String>): Boolean =
+        !java.lang.reflect.Modifier.isStatic(field.modifiers) && seen.add(field.name)
+
+    /**
+     * 单个字段的值折算字节；取不到（`setAccessible` 被拒 / 取值抛）一律 0 ——
+     * 一个读不了字段不许拖垮整台 VM 的读数。
+     */
+    private fun fieldArrayBytes(target: Any, field: java.lang.reflect.Field): Long = runCatching {
+        field.isAccessible = true
+        arrayChainBytes(field.get(target), 0)
+    }.getOrDefault(0L)
+
+    /**
+     * 数组本体字节；`Array<*>` 递归 [VM_ARRAY_CHAIN_MAX] 层元素（够穿透 `Array<IntArray?>`）。
+     * 非数组一律 0（标量、集合、`Program` 引用都不属于这台 VM 的常驻开销）。
+     */
+    private fun arrayChainBytes(value: Any?, depth: Int): Long = when (value) {
+        is IntArray -> value.size.toLong() * BYTES_PER_INT_SLOT
+        is LongArray -> value.size.toLong() * BYTES_PER_LONG_SLOT
+        is ShortArray -> value.size.toLong() * BYTES_PER_SHORT_SLOT
+        is CharArray -> value.size.toLong() * BYTES_PER_SHORT_SLOT
+        is ByteArray -> value.size.toLong() * BYTES_PER_BYTE_SLOT
+        is BooleanArray -> value.size.toLong() * BYTES_PER_BYTE_SLOT
+        is Array<*> -> value.size.toLong() * BYTES_PER_REF +
+            if (depth < VM_ARRAY_CHAIN_MAX) value.sumOf { arrayChainBytes(it, depth + 1) } else 0L
+        else -> 0L
     }
 
     /**
@@ -620,10 +979,22 @@ object LiveSetCensus {
         return total
     }
 
-    /** 行段总数：一次 `lines()` 快照（synchronized 内 toList），逐行 `segments.size` 累加；抛则 -1。 */
-    private fun countSegments(console: LineBufferConsoleSink): Long = runCatching {
-        console.lines().sumOf { it.segments.size.toLong() }.toLong()
-    }.getOrDefault(-1L)
+    /** 行表一次快照的两个读数（段总数 / 段内字符总数）；任一步抛则整对 -1，不半报。 */
+    private class LineScan(val segments: Long, val chars: Long)
+
+    /**
+     * 行段读数：一次 `lines()` 快照（synchronized 内 toList），逐行累加 `segments.size` 与
+     * 逐段累加 `text.length`；抛则整对 -1。
+     */
+    private fun scanLines(console: LineBufferConsoleSink): LineScan = runCatching {
+        var segments = 0L
+        var chars = 0L
+        for (line in console.lines()) {
+            segments += line.segments.size.toLong()
+            for (seg in line.segments) chars += seg.text.length.toLong()
+        }
+        LineScan(segments, chars)
+    }.getOrDefault(LineScan(-1L, -1L))
 
     /** `x read { ... }` 的读数糖：null 接收者或抛出都给 -1L（`runCatching` 同语义，不遮蔽 stdlib 名）。 */
     private inline infix fun <T : Any> T?.read(block: T.() -> Long): Long =

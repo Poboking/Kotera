@@ -186,7 +186,7 @@ class SpritePoolBudgetTest {
         materialize(pool, "S1"); materialize(pool, "S2"); materialize(pool, "S3")
         val effective = GraphicsPool.sharedPixelBudgetBytes() - 0L
         assertTrue(effective > sheetBytes * 3, "本挡默认预算必须容得下三张小图（没超就不退）")
-        assertEquals(0L, pool.evictDeferredPixelsWithinSharedBudget(0L))
+        assertEquals(0L, pool.evictDeferredPixelsWithinSharedBudget(0L, usedHeapBytes = 0L, maxMemoryBytes = Long.MAX_VALUE))
         assertEquals(sheetBytes * 3, pool.resourceResidentPixelBytes())
     }
 
@@ -210,7 +210,7 @@ class SpritePoolBudgetTest {
         materialize(pool, "S1"); materialize(pool, "S2"); materialize(pool, "S3")
 
         // 共用预算 4 档、正号占了 2 ⇒ 负号只许持 2，超出的那 1 张被退。
-        val freed = pool.evictDeferredPixelsWithinSharedBudget(gfx.residentBytes())
+        val freed = pool.evictDeferredPixelsWithinSharedBudget(gfx.residentBytes(), usedHeapBytes = 0L, maxMemoryBytes = Long.MAX_VALUE)
         assertEquals(sheetPixels, freed, "负号段额度 = 总预算 − 正号段驻留")
         assertEquals(sheetBytes * 2, pool.resourceResidentPixelBytes())
 
@@ -225,7 +225,7 @@ class SpritePoolBudgetTest {
             buffer.pixels
         }
         assertEquals(sheetBytes * 4, gfx.residentBytes(), "正号段自己没超档，预算档不该动它")
-        val freedRest = pool.evictDeferredPixelsWithinSharedBudget(gfx.residentBytes())
+        val freedRest = pool.evictDeferredPixelsWithinSharedBudget(gfx.residentBytes(), usedHeapBytes = 0L, maxMemoryBytes = Long.MAX_VALUE)
         assertEquals(sheetPixels * 2, freedRest)
         assertEquals(0L, pool.resourceResidentPixelBytes())
     }
@@ -240,14 +240,14 @@ class SpritePoolBudgetTest {
         val only = materialize(pool, "S1")
         assertEquals(sheetBytes, pool.resourceResidentPixelBytes())
 
-        assertEquals(0L, pool.evictDeferredPixelsWithinSharedBudget(0L), "不可知堆 ⇒ 负号段预算档不生效")
+        assertEquals(0L, pool.evictDeferredPixelsWithinSharedBudget(0L, usedHeapBytes = 0L, maxMemoryBytes = Long.MAX_VALUE), "不可知堆 ⇒ 负号段预算档不生效")
         assertEquals(sheetBytes, pool.resourceResidentPixelBytes(), "驻留读数一格不动")
         assertEquals(sheetBytes, only.pixelBytes, "父图必须还在驻留态")
 
         // 对照：把共用预算拉到 1 字节 ⇒ 同一张必须退。上面那个 0 是预算给的，不是压根没候选
         // （否则本用例改成「永远返回 0」也会绿）。
         System.setProperty(GraphicsPool.PIXEL_BUDGET_OVERRIDE_PROPERTY, "1")
-        assertEquals(sheetPixels, pool.evictDeferredPixelsWithinSharedBudget(0L))
+        assertEquals(sheetPixels, pool.evictDeferredPixelsWithinSharedBudget(0L, usedHeapBytes = 0L, maxMemoryBytes = Long.MAX_VALUE))
         assertEquals(0L, pool.resourceResidentPixelBytes())
     }
 

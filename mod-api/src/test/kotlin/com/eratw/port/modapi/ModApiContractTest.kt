@@ -141,6 +141,58 @@ class ModApiContractTest {
     }
 
     @Test
+    fun `ModDeclarations 维长与 index 边界校验`() {
+        // 负/零维长在声明构造期即拒：core 侧 dimProduct 同判据（负维 = CodeEE 拒分配），
+        // 而 manifest global dims 今天零生产消费者，不在构造期拒 = 坏声明静默进冻结快照。
+        assertThrows<IllegalArgumentException> { GlobalDimDecl(name = "X", dims = listOf(-5)) }
+        assertThrows<IllegalArgumentException> { GlobalDimDecl(name = "X", dims = listOf(2, 0)) }
+        assertThrows<IllegalArgumentException> { PrivateDimDecl(name = "X", dims = listOf(-1)) }
+        assertThrows<IllegalArgumentException> { PrivateDimDecl(name = "X", dims = listOf(3, 0)) }
+        // csv 关键字 index：只许 -1（自动分配）或非负下标（与 core CsvKeywordPatch 同判据）。
+        assertThrows<IllegalArgumentException> { CsvKeywordDecl(table = "CFLAG", index = -5, keyword = "K") }
+        // 合法形态不受影响：标量（dims 空）、正维长、index=-1 自动分配。
+        GlobalDimDecl(name = "X")
+        GlobalDimDecl(name = "X", dims = listOf(2, 3))
+        PrivateDimDecl(name = "X", dims = listOf(4))
+        CsvKeywordDecl(table = "CFLAG", index = -1, keyword = "K")
+    }
+
+    @Test
+    fun `导出宏声明构造期校验`() {
+        // 宏域没有 *Decl 载体（String→String map）：重复信息在 DSL 收集处就被 LinkedHashMap
+        // 覆盖吃掉，core 声明事务无从闸起；空白宏名透传 manifest / 线格式 / 指纹全链无闸
+        //（生产代码零编译期消费者，与 global dims 同型）——唯一闸位 = 声明构造期。
+        assertThrows<IllegalArgumentException> { modDeclarations("m") { exportedMacro("", "1") } }
+        assertThrows<IllegalArgumentException> { modDeclarations("m") { exportedMacro(" ", "1") } }
+        // 同包重复声明 = 笔误，静默末位生效不可接受（与 settings/writeGrants 键唯一同口径）。
+        assertThrows<IllegalArgumentException> {
+            modDeclarations("m") {
+                exportedMacro("MAX_HP", "999")
+                exportedMacro("MAX_HP", "1000")
+            }
+        }
+        assertThrows<IllegalArgumentException> {
+            modDeclarations("m") {
+                exportedMacro("M", "1")
+                exportedMacro("M", "1")
+            }
+        }
+        // 手写 ModManifest 路径同闸：键唯一在 manifest 层不可查（Map 已去重），空白键两层都拒。
+        assertThrows<IllegalArgumentException> {
+            ModManifest(packageId = "m", exportedMacros = mapOf("" to "1"))
+        }
+        assertThrows<IllegalArgumentException> {
+            ModManifest(packageId = "m", exportedMacros = mapOf(" " to "1"))
+        }
+        // 合法形态不受影响：不同名宏照常收进 manifest。
+        val manifest = modDeclarations("m") {
+            exportedMacro("MAX_HP", "999")
+            exportedMacro("GREETING", "hello")
+        }
+        assertEquals(mapOf("MAX_HP" to "999", "GREETING" to "hello"), manifest.exportedMacros)
+    }
+
+    @Test
     fun `CharaRouteDecl 非空与格下标校验`() {
         assertThrows<IllegalArgumentException> { CharaRouteDecl(variable = "") }
         assertThrows<IllegalArgumentException> { CharaRouteDecl(variable = " ") }

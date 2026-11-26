@@ -5,7 +5,8 @@ package com.eratw.port.modapi
  *
  * Runtime 支持 **Mod 自己定义的游戏阶段**：相位名经 [ModManifest.phases] 声明、进声明事务
  * （与引擎固定相位同全局命名空间），运行期 [subscribe] 把处理器绑到已声明相位。引擎按
- * 声明序 + priority 确定性派发（复用 §6.1 贡献点纪律），不认识相位名里的任何玩法含义。
+ * 包链接序 + 包内注册序确定性派发（ABI-10 落地口径；同一包对同一相位可注册多个处理器，
+ * 按注册序执行），不认识相位名里的任何玩法含义。
  *
  * ## 与既有件的边界（勿混）
  *
@@ -19,8 +20,13 @@ package com.eratw.port.modapi
 interface PhaseApi {
     /**
      * 订阅一个相位（引擎固定相位或本包/他包已声明相位）。相位名按大写归一。
+     * 同一包对同一相位可注册多个处理器，按注册序执行（与 [InteractionApi.registerHook]
+     * 同口径）；要移除用返回的 [Registration] 反注册。
      *
-     * @throws IllegalArgumentException 相位未声明、或同一包对同一相位重复订阅
+     * 同一包对同一相位可重复订阅：每个处理器各自生效，按注册序派发；
+     * 取消其中一笔请用返回的 [Registration.unregister]，不影响其他处理器。
+     *
+     * @throws IllegalArgumentException 相位未声明
      */
     fun subscribe(phase: String, handler: PhaseHandler): Registration
 }
@@ -34,12 +40,12 @@ data class GameTime(val day: Long, val phase: String = "")
  * 它们与原版事件名派发同纪律；Mod 自定义相位不得占用这些名字（声明事务拒绝）。
  */
 object BuiltinPhase {
-    const val DAY_START: String = "DAY_START"
-    const val DAY_END: String = "DAY_END"
-    const val ACTION: String = "ACTION"
+    val DAY_START: PhaseKey = PhaseKey("DAY_START")
+    val DAY_END: PhaseKey = PhaseKey("DAY_END")
+    val ACTION: PhaseKey = PhaseKey("ACTION")
 
     /** 全部固定相位（大写归一后的集合）。 */
-    val ALL: Set<String> = setOf(DAY_START, DAY_END, ACTION)
+    val ALL: Set<String> = setOf(DAY_START.name, DAY_END.name, ACTION.name)
 }
 
 /** 相位回调上下文（只读；改游戏状态仍经 [RuntimeScheduler.submit]，§18.5）。 */

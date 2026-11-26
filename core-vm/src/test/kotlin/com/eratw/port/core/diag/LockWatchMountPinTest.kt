@@ -149,8 +149,14 @@ class LockWatchMountPinTest {
             val text = source(rel) ?: throw AssertionError("读不到 $rel")
             val guards =
                 Regex("if \\(watch === null\\) 0L else System\\.nanoTime\\(\\)").findAll(text).count()
+            // 获锁钟的**两种等价写法**都算数（9a94466217 把 statementAt 的
+            // `var acquiredNs = 0L` + `if (watch !== null) acquiredNs = …` 收成块内 `val`；
+            // 语义仍是「挂载时恰一发、关时不取时钟」，只是文本形态变了）。
             val acquired =
-                Regex("if \\(watch !== null\\) acquiredNs = System\\.nanoTime\\(\\)").findAll(text).count()
+                Regex(
+                    "if \\(watch !== null\\) acquiredNs = System\\.nanoTime\\(\\)|" +
+                        "val acquiredNs = if \\(watch !== null\\) System\\.nanoTime\\(\\) else 0L",
+                ).findAll(text).count()
             val records = Regex("watch\\.noteSegment\\(").findAll(text).count()
             assertEquals(2, guards, "$rel 的守卫式取时钟应是 2 处（两个挂载点各一处），实读 $guards")
             assertEquals(2, acquired, "$rel 块内的 acquiredNs 应是 2 处，实读 $acquired")

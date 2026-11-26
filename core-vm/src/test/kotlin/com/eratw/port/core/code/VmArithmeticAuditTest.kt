@@ -20,25 +20,27 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * BH3-VMCORE 判据 ④：算术溢出与截断语义。
+ * BH3-VMCORE 判据 ④：算术溢出与截断语义（2026-11-20 按 4.981 溢出族改钉）。
  *
- * 原版口径（C#）：表达式层二元/一元运算全在 `OperatorMethodManager`：
- * * 加减乘 = 普通 `long` 运算，**unchecked 回绕**（spec: OperatorMethodManager.cs:24/:57/:71）；
- * * 整除 `DivIntInt`：1.824（`OperatorMethodManager.cs:129-137`）先查 0 抛 DivideByZero；
- *   **4.981 已改为** `OperatorMethod.cs:374` → `SafeArithmetic.SafeDivide`（:67-77），
- *   `b == 0` 时打「零除: a / 0」警告并**返回 0**，不再中断。非零时仍是 .NET long
- *   整除**向零截断**；`long.MinValue / -1` 仍是唯一溢出的整除，抛 OverflowException；
- * * 取余 `ModIntInt`：4.981 `OperatorMethod.cs:388` → `SafeModulo`（:79-88）同法钳制，
- *   警告用反斜杠「零除: a \ 0」；非零时 `%` 符号随被除数，`MinValue % -1` 得 0 不抛；
- * * 取负 `MinusInt`（:559-566）：操作数是 MinValue 时**打一行系统提示**后仍返回
- *   `-MinValue`（回绕成 MinValue，:565）；
+ * 原版口径（4.981，`reference/emuera-skia-4.981`）：
+ * * 加减乘 = `SafeArithmetic`（`SafeArithmetic.cs:7-50`），接线点
+ *   `OperatorMethod.cs:278`（PlusIntInt）/ `:307`（MinusIntInt）/ `:321`（MultIntInt）：
+ *   `checked` 越界 ⇒ `PrintWarning("整数溢出: a op b")` + **饱和**（`SafeAdd`/`SafeSubtract`
+ *   取 `a > 0 ? MAX : MIN`；`SafeMultiply` 取 `(a > 0) == (b > 0) ? MAX : MIN`），
+ *   **不再 unchecked 回绕**。这是 2026-11-20 的判据订正：旧断言钉的是 1.824
+ *   `OperatorMethodManager.cs:24/:57/:71` 的回绕口径，属于版本漂移，不是回归。
+ * * 整除 `DivIntInt`：4.981 `OperatorMethod.cs:374` → `SafeArithmetic.SafeDivide`
+ *   （:67-77），`b == 0` 时打「零除: a / 0」警告并**返回 0**，不再中断。非零时仍是 .NET
+ *   long 整除**向零截断**；`long.MinValue / -1` 仍是唯一溢出的整除，抛 OverflowException；
+ * * 取余 `ModIntInt`：4.981 `OperatorMethod.cs:388` → `SafeModulo`（:79-88）同法钳制；
+ * * 取负 `MinusInt`（`OperatorMethod.cs:753-765`）→ `SafeNegate`（:52-65）：`-MIN`
+ *   告警并返回 **MAX**（恒 MAX，不看符号）；
  * * `POWER` **语句**（spec: Process.cs:1350-1370）与 `POWER` **方法**
  *   （spec: FunctionMethodCreator.cs:4172-4190）同构：`Math.Pow` 双精度幂 →
  *   NaN/Infinity/`|d| >= 9.223372036854776E+18` 三闸抛错 → `(long)d` 向零截断。
  *
- * JVM 侧 `ladd/lsub/lmul/ldiv/lrem/lneg` 与上述逐条同语义，唯一差别是
- * `MinValue / -1`：JVM ldiv 静默回绕成 MinValue，.NET 抛 OverflowException ——
- * 按原版抛 [CodeEE]（Vm.kt `_DIV` 分支注释，既有用例已锁；本文件复钉）。
+ * 三条通道（表达式池 `_EVAL_INT` / 寄存器 `_ADD` 一族 / 栈码 `_STK_ADD` 一族）同语义
+ * （ADR-001），本文件对寄存器与栈码各钉一遍。
  */
 class VmArithmeticAuditTest {
 
@@ -55,7 +57,22 @@ class VmArithmeticAuditTest {
         return VirtualMachine(p, host).run()
     }
 
-    private fun neg(v: Long): Long {
+    /** 栈码支：`l r <op>` 弹两个压一个。 */
+    private fun stackArith(op: String, l: Long, r: Long, host: VmHost = StringHost()): Long {
+        val p = Assembler.assemble(
+            """
+            .func main slots=2
+              _STK_PUSH_IMM $l
+              _STK_PUSH_IMM $r
+              $op
+              _STK_POP_SLOT_I R0
+              _RET R0
+            """.trimIndent(),
+        )
+        return VirtualMachine(p, host).run()
+    }
+
+    private fun neg(v: Long, host: VmHost = StringHost()): Long {
         val p = Assembler.assemble(
             """
             .func main slots=2
@@ -64,35 +81,68 @@ class VmArithmeticAuditTest {
               _RET R1
             """.trimIndent(),
         )
-        return VirtualMachine(p, StringHost()).run()
+        return VirtualMachine(p, host).run()
     }
 
     // ------------------------------------------------------------------
-    // Long 回绕（C# unchecked：OperatorMethodManager.cs:24/:57/:71）
+    // 4.981 SafeArithmetic 饱和（SafeArithmetic.cs:7-50）
     // ------------------------------------------------------------------
 
     @Test
-    fun `加减乘按 C# unchecked 回绕`() {
-        // ADD
-        assertEquals(Long.MIN_VALUE, arith("_ADD", Long.MAX_VALUE, 1), "MAX+1 应回绕成 MIN")
-        assertEquals(Long.MAX_VALUE, arith("_ADD", Long.MIN_VALUE, -1), "MIN+(-1) 应回绕成 MAX")
-        assertEquals(-2L, arith("_ADD", Long.MAX_VALUE, Long.MAX_VALUE), "MAX+MAX 应回绕成 -2")
-        // SUB
-        assertEquals(Long.MAX_VALUE, arith("_SUB", Long.MIN_VALUE, 1), "MIN-1 应回绕成 MAX")
-        assertEquals(0L, arith("_SUB", Long.MIN_VALUE, Long.MIN_VALUE), "MIN-MIN = 0")
-        // MUL
-        assertEquals(-2L, arith("_MUL", Long.MAX_VALUE, 2), "MAX*2 应回绕成 -2")
-        assertEquals(0L, arith("_MUL", Long.MIN_VALUE, 2), "MIN*2 = 2^64 回绕成 0")
-        assertEquals(0L, arith("_MUL", 4611686018427387904L, 4), "2^62*4 = 2^64 回绕成 0")
-        assertEquals(Long.MIN_VALUE, arith("_MUL", Long.MIN_VALUE, -1), "MIN*(-1) 回绕成 MIN（不抛）")
+    fun `加减乘按 4_981 SafeArithmetic 饱和并告警`() {
+        // ADD：SafeAdd 的饱和判据是**左操作数**（a > 0 ? MAX : MIN）。
+        val addHost = StringHost()
+        assertEquals(Long.MAX_VALUE, arith("_ADD", Long.MAX_VALUE, 1, addHost), "MAX+1 应饱和成 MAX")
+        assertEquals("整数溢出: 9223372036854775807 + 1\n", addHost.output.toString())
+        assertEquals(Long.MIN_VALUE, arith("_ADD", Long.MIN_VALUE, -1), "MIN+(-1) 应饱和成 MIN")
+        assertEquals(Long.MAX_VALUE, arith("_ADD", Long.MAX_VALUE, Long.MAX_VALUE), "MAX+MAX 左操作数为正 ⇒ MAX")
+
+        // SUB：同样看左操作数符号。
+        val subHost = StringHost()
+        assertEquals(Long.MIN_VALUE, arith("_SUB", Long.MIN_VALUE, 1, subHost), "MIN-1 应饱和成 MIN")
+        assertEquals("整数溢出: -9223372036854775808 - 1\n", subHost.output.toString())
+        val subHost2 = StringHost()
+        assertEquals(Long.MAX_VALUE, arith("_SUB", Long.MAX_VALUE, -1, subHost2), "MAX-(-1) 应饱和成 MAX")
+        assertEquals("整数溢出: 9223372036854775807 - -1\n", subHost2.output.toString())
+        assertEquals(0L, arith("_SUB", Long.MIN_VALUE, Long.MIN_VALUE), "MIN-MIN = 0 不触发")
+
+        // MUL：符号相同 ⇒ MAX，符号相反 ⇒ MIN（判据是两操作数符号是否一致）。
+        val mulHost = StringHost()
+        assertEquals(Long.MAX_VALUE, arith("_MUL", Long.MAX_VALUE, 2, mulHost), "MAX*2 应饱和成 MAX")
+        assertEquals("整数溢出: 9223372036854775807 * 2\n", mulHost.output.toString())
+        assertEquals(Long.MIN_VALUE, arith("_MUL", Long.MIN_VALUE, 2), "MIN*2 应饱和成 MIN（符号相反）")
+        assertEquals(Long.MAX_VALUE, arith("_MUL", 4611686018427387904L, 4), "2^62*4 应饱和成 MAX")
+        assertEquals(Long.MAX_VALUE, arith("_MUL", Long.MIN_VALUE, -1), "MIN*(-1) 两负 ⇒ MAX")
     }
 
     @Test
-    fun `取负对最小整数回绕而不是抛错`() {
-        // C# MinusInt（OperatorMethodManager.cs:561-565）：MinValue 只多打一行系统提示，
-        // 返回值仍是 -MinValue = MinValue（回绕）。
-        assertEquals(Long.MIN_VALUE, neg(Long.MIN_VALUE), "NEG(MIN) 应回绕成 MIN")
-        assertEquals(1L, neg(-1))
+    fun `栈码三条算术通道与寄存器支同口径`() {
+        val addHost = StringHost()
+        assertEquals(Long.MAX_VALUE, stackArith("_STK_ADD", Long.MAX_VALUE, 1, addHost))
+        assertEquals("整数溢出: 9223372036854775807 + 1\n", addHost.output.toString())
+
+        val subHost = StringHost()
+        assertEquals(Long.MIN_VALUE, stackArith("_STK_SUB", Long.MIN_VALUE, 1, subHost))
+        assertEquals("整数溢出: -9223372036854775808 - 1\n", subHost.output.toString())
+
+        val mulHost = StringHost()
+        assertEquals(Long.MIN_VALUE, stackArith("_STK_MUL", Long.MIN_VALUE, 2, mulHost))
+        assertEquals("整数溢出: -9223372036854775808 * 2\n", mulHost.output.toString())
+
+        // 正常值不告警、不回绕。
+        val okHost = StringHost()
+        assertEquals(6L, stackArith("_STK_ADD", 1, 5, okHost))
+        assertEquals("", okHost.output.toString())
+    }
+
+    @Test
+    fun `取负对最小整数饱和到最大整数而不是回绕`() {
+        // 4.981 MinusInt（OperatorMethod.cs:753-765）→ SafeNegate（SafeArithmetic.cs:52-65）：
+        // 恒返回 long.MaxValue；文案是 C# 插值 `-{a}` 拼出的双负号。
+        val host = StringHost()
+        assertEquals(Long.MAX_VALUE, neg(Long.MIN_VALUE, host), "NEG(MIN) 应饱和成 MAX")
+        assertEquals("整数溢出: --9223372036854775808\n", host.output.toString())
+        assertEquals(1L, neg(-1), "非 MIN 不触发")
         assertEquals(-5L, neg(5))
     }
 

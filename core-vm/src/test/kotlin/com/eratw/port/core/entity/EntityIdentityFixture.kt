@@ -140,6 +140,7 @@ private class NoOpProjector : ICharaSlotProjector {
     override fun syncFromCharaSlot(entityId: Long) = Unit
     override fun onCharacterRowsPermuted(oldToNewIndexMap: IntArray) = Unit
     override fun onCharacterRowDeleted(deletedIndex: Int) = Unit
+    override fun onWorldReset() = Unit
 }
 
 /** 造一个带 NoOp 桥的 [SaveService]（virtualNoRegistry 缺省 null，本装置不涉虚拟 NO）。 */

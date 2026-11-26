@@ -1,5 +1,6 @@
 package com.eratw.port.erbcc.compile
 
+import com.eratw.port.core.frontend.SignatureExport
 import com.eratw.port.core.loader.BootMetadata
 import com.eratw.port.core.patch.BaseSignatureCatalog
 import com.eratw.port.core.proc.FuncMeta

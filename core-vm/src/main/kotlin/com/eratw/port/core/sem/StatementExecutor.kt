@@ -2,6 +2,7 @@ package com.eratw.port.core.sem
 
 import com.eratw.port.core.data.save.SaveUnclaimedPassthrough
 import com.eratw.port.core.err.CodeEE
+import com.eratw.port.core.err.clampWarnings
 import com.eratw.port.core.expr.EvalContext
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.OperandType
@@ -84,6 +85,7 @@ import com.eratw.port.core.stmt.StrDataArgument
 import com.eratw.port.core.stmt.VarDeclStmt
 import com.eratw.port.core.save.SaveDiagnostics
 import com.eratw.port.core.save.SaveWiring
+import com.eratw.port.core.save.formatDoubleG
 import com.eratw.port.core.vars.VariableStore
 import com.eratw.port.core.vars.oorInstructionArg
 import com.eratw.port.core.code.ErbcFormat
@@ -97,6 +99,25 @@ import com.eratw.port.core.sem.FlatStmtSource
  * 注意豁免的是**变量引用**而非取值：取 -1（未设置）是合法输入，交 PickUpChara 跳过。
  */
 private val PICKUP_CHARA_EXEMPT_VARS = setOf("MASTER", "ASSI", "TARGET")
+
+/**
+ * long 域上界在 double 上的表示（恰为 2^63）。
+ *
+ * TIMES 的 eramaker 模拟路要把 `double` 与它比较再收窄：C# 的 `checked { (long)d }`
+ * 在 `d >= 2^63` 或 `d < -2^63` 时抛 `OverflowException`（`Instraction.Child.cs:1442-1450`），
+ * 恰好 `d == -2^63`（= `Long.MIN_VALUE`）是合法值，故负侧用**严格**小于。
+ * 不用十进制字面量：`Long.MAX_VALUE.toDouble()` 在任何平台上都精确等于 2^63，
+ * 而 `9.223372036854776E18` 要依赖解析舍入才落到同一个 double。
+ */
+private val LONG_RANGE_EDGE: Double = Long.MAX_VALUE.toDouble()
+
+/**
+ * TIMES 整数溢出文案前缀（4.981 `Instraction.Child.cs:1447` / `:1457` 的
+ * `$"TIMES整数溢出: {d}"`）。数值形态由调用点按路径先渲染：rigorous 路是 `decimal`
+ * 的十进制展开，eramaker 路是 `double` 的 .NET `G` 格式（`save/SaveTextFormat.kt`
+ * 的 `formatDoubleG`，本仓该格式的唯一真源）。
+ */
+private const val TIMES_OVERFLOW_PREFIX = "TIMES整数溢出: "
 
 /** 语句执行结果。控制流（CALL/GOTO/循环）由编译后的 VM 指令处理，不在此层。 */
 sealed class ExecResult {
@@ -644,18 +665,29 @@ class StatementExecutor {
 
             // ---- 输入 ----
             FunctionCode.WAIT -> {
-                // MesSkip 中 WAIT 由输入循环直接跑过（EmueraConsole.cs:1451-1455：NeedValue=false
-                // 且未 StopMesskip 时 while 继续），不发起等待。
-                // 原版输入循环吞掉无值等待后无条件 MesSkip = false（EmueraConsole.cs:1456）——
-                // 不清标志会让下一个 INPUT(canSkip) 快路径静默写默认值（2026-10-26 fixcore 审查 C4）。
-                if (ctx.mesSkip) ctx.mesSkip = false else readAnyKey(ctx); ExecResult.Normal // spec: FunctionIdentifier.cs:762-784
+                // MesSkip 中 WAIT 由输入循环直接跑过（EmueraConsole.cs:1451-1455 / 蛇版
+                // 4.981 :1502-1514：NeedValue=false 且未 StopMesskip 时 while 继续喂空提交），
+                // 不发起等待。**标志不清**：原版 `MesSkip = false`（:1456 / 蛇版 :1515）在
+                // while 循环**之后**，跳过态跨连续无值等待存活，直到撞取值等待（[waitInput]
+                // 阻塞前清零）或 FORCEWAIT（[readAnyKey] stopMesSkip 支清零）才结束。
+                // 2026-11-17 根因订正：旧口径「吞掉后无条件清标志」把 :1456 误读进循环内，
+                // 一次长按只推进一页、且 INPUT(canSkip) 快路径（:853）在快进中读不到跳过态
+                // ——均为与原版不一致（2026-10-26 fixcore 审查 C4 的判据即此误读，已撤）。
+                if (!ctx.mesSkip) {
+                    readAnyKey(ctx)
+                }
+                ExecResult.Normal // spec: FunctionIdentifier.cs:762-784
             }
             FunctionCode.FORCEWAIT -> {
                 readAnyKey(ctx, anyKey = false, stopMesSkip = true); ExecResult.Normal
             }
             FunctionCode.WAITANYKEY -> {
-                // 同 C4：吞掉后无条件清 MesSkip（EmueraConsole.cs:1456）。
-                if (ctx.mesSkip) ctx.mesSkip = false else readAnyKey(ctx, anyKey = true); ExecResult.Normal // spec: FunctionIdentifier.cs:786-798
+                // 同 WAIT：跳过态跨连续无值等待存活，清标志只发生在取值等待与 FORCEWAIT
+                // （EmueraConsole.cs:1451-1456 / 蛇版 :1502-1515）。
+                if (!ctx.mesSkip) {
+                    readAnyKey(ctx, anyKey = true)
+                }
+                ExecResult.Normal // spec: FunctionIdentifier.cs:786-798
             }
             FunctionCode.TWAIT -> {
                 /*
@@ -689,8 +721,8 @@ class StatementExecutor {
                 // （:1451-1455 的 NeedValue=false 自动推进）。
                 armIsTimeout(ctx, req)
                 if (ctx.mesSkip && !req.needValue) {
-                    // 同 C4：TWAIT 的无值等待被 MesSkip 吞掉后无条件清标志（EmueraConsole.cs:1456）。
-                    ctx.mesSkip = false
+                    // 跳过态下无值形态直接跑过，标志跨连续无值等待存活（同 WAIT；
+                    // 原版清标志在 while 循环之后，EmueraConsole.cs:1451-1456 / 蛇版 :1502-1515）。
                 } else {
                     val outcome = waitInput(ctx, req)
                     updateIsTimeout(ctx, req, outcome)
@@ -1206,6 +1238,8 @@ class StatementExecutor {
                 }
                 if (!ops(ctx).saveData(no.toInt(), text)) {
                     ctx.console.printError("SAVEDATA命令在存档时发生了意料之外的错误")
+                    com.eratw.port.core.save.SaveDiagnostics.consumeSaveFailure()
+                        ?.let { ctx.console.printError("（存档失败原因：$it）") }
                 }
                 ExecResult.Normal
             }
@@ -1745,8 +1779,8 @@ class StatementExecutor {
                 // 跳过实际发生在控制台输入循环——MesSkip 为真时把 NeedValue=false 且 StopMesskip=false 的
                 // 等待自动吞掉（spec: EmueraConsole.cs:1451-1455）。PRINT 系等待恒为 stopMesskip=false，
                 // sem 层等价语义 = mesSkip 为真时不发起等待（换行不受影响）。等待只经 ExecContext.input 表达。
-                // 同 C4：PRINT 系 W 位吞掉后无条件清 MesSkip（EmueraConsole.cs:1456）。
-                if (flag and 512 != 0) { if (ctx.mesSkip) ctx.mesSkip = false else readAnyKey(ctx) }
+                // 标志不清（同 WAIT）：跳过态跨连续无值等待存活到取值等待 / FORCEWAIT。
+                if (flag and 512 != 0) { if (!ctx.mesSkip) readAnyKey(ctx) }
             }
         }
         // 窗口终点。spec: FunctionIdentifier.cs:227（OutputToConsole 内 ExpressionMediator.cs:68 的
@@ -2302,49 +2336,75 @@ class StatementExecutor {
         openTag(a, code, ErbcFormat.ArgTag.SP_TIMES)
         val dest = a.varRefNN()
         val doubleValue = a.f64()
-        // 双路径按 Config.TimesNotRigorousCalculation 分派（ConfigData.cs:111 出厂 false，
-        // 本游戏 emuera.config「IMITATE BEHAVIOR FOR TIMES:NO」同值）：
-        // - 默认（:1326-1338）：`(decimal)IntValue * (decimal)DoubleValue` —— decimal 携带
-        //   double 的**精确二进制值**（.NET Decimal(Double) 保留到 28 位有效数字），
-        //   乘积落在 long 域内向零截断；这正是 |IntValue| > 2^53 时与 double 乘路径
-        //   可观测分叉的来源（double 只有 53 位尾数，(double)IntValue 本身先失真）。
-        // - eramaker 模拟（:1322-1325）：`(double)IntValue * DoubleValue` 后 `(long)` 截断。
-        // `(long)num2` 越界分支的 `(long)(double)num2`（:1339-1341）在 C# x64 产「整数不定值」
-        // = Long.MIN_VALUE（cvttsd2si；JLS 5.1.3 的饱和语义正溢出给 MAX_VALUE，两侧分叉）——
-        // 两个分支都按 MIN_VALUE 复刻（2026-10-26 fixcore 审查 B4，替代旧「沿饱和」TODO）。
         val name = dest.name
         val idx = resolveIndices(dest, ctx)
         val cur = ctx.variables.readInt(name, idx)
+        execTimesInt(name, idx, cur, doubleValue, ctx)
+        return ExecResult.Normal
+    }
+
+    /**
+     * TIMES 的整数落点（两条通道共用）—— 4.981 `Instraction.Child.cs:1435-1460`。
+     *
+     * 双路径按 `Config.TimesNotRigorousCalculation` 分派（`ConfigData.cs:111` 出厂 false，
+     * 本游戏 emuera.config「IMITATE BEHAVIOR FOR TIMES:NO」同值）：
+     *
+     * * **默认**（:1452-1459）：`decimal d = var.GetIntValue(exm) * (decimal)multiplier;`
+     *   落在 long 域内就 `(long)d`（向零截断），否则 `PrintWarning("TIMES整数溢出: {d}")`
+     *   并写 `d > 0 ? long.MaxValue : long.MinValue`。
+     * * **eramaker 模拟**（:1442-1450）：`double d = var.GetIntValue(exm) * multiplier;`
+     *   然后 `checked { var.SetValue((long)d, exm); }` —— checked 的浮点→整数转换在
+     *   NaN 或越出 long 域时抛 `OverflowException`，catch 里同样告警并写
+     *   `d > 0 ? long.MaxValue : long.MinValue`（NaN 不 > 0 ⇒ MIN）。
+     *
+     * **2026-11-20 判据订正**：此前两路越界都静默折成 `Long.MIN_VALUE`（正溢出也折成
+     * MIN），KDoc 引的是「2026-10-26 fixcore 审查 B4 的 cvttsd2si 不定值」——那是 C# 对
+     * **未 checked** 的 `(long)(double)` 强转的口径；4.981 这两条路一条是 `checked`
+     * 转换、一条是显式 `decimal` 域比较，**都不是**同一条路。按 4.981 改为
+     * 「告警 + 按符号饱和」，正溢出落 MAX、负溢出落 MIN。
+     *
+     * 告警去向与 4.981 的 `PrintWarning(null, 1)` 同口径：`EmueraConsole.PrintWarning`
+     * 在 `position == null` 时转 `PrintError`（`EmueraConsole.Print.cs:352-380`），
+     * 这里走 `ctx.console.printError`；同时落 `ClampWarnings` 的 overflow 桶供报告取证。
+     */
+    private fun execTimesInt(name: String, idx: LongArray, cur: Long, multiplier: Double, ctx: ExecContext) {
         if (ctx.config.timesNotRigorousCalculation) {
-            val r = cur.toDouble() * doubleValue
-            // eramaker 路径的 `(long)num` 同为 x64 不定值口径：NaN / ≥2^63 一律 Long.MIN_VALUE
-            // （负溢出 JVM 饱和本就给 MIN_VALUE，与 x64 一致，无需特判）。
+            val d = cur.toDouble() * multiplier
+            if (d.isNaN() || d >= LONG_RANGE_EDGE || d < -LONG_RANGE_EDGE) {
+                warnTimesOverflow(formatDoubleG(d, '.'), ctx)
+                ctx.variables.writeInt(name, idx, if (d > 0.0) Long.MAX_VALUE else Long.MIN_VALUE)
+            } else {
+                ctx.variables.writeInt(name, idx, d.toLong())
+            }
+            return
+        }
+        // (decimal)DoubleValue：.NET Decimal(Double) 把 double 的精确值舍入到
+        // 28 位有效数字（banker's rounding）⇒ BigDecimal(exact).round(28, HALF_EVEN)。
+        // TODO(verify): 乘积超过 28 位有效数字时 .NET decimal 乘法的舍入方向
+        // （HALF_EVEN vs HALF_UP）未逐行取证，仅在 |IntValue| ≳ 1e10 且倍数含长尾
+        // 时才可能触到该第 28 位，语料 TIMES（3143 处）无此量级读数。
+        val d = java.math.BigDecimal(multiplier)
+            .round(java.math.MathContext(28, java.math.RoundingMode.HALF_EVEN))
+        val product = java.math.BigDecimal(cur).multiply(d)
+        if (product <= java.math.BigDecimal(java.lang.Long.MAX_VALUE) &&
+            product >= java.math.BigDecimal(java.lang.Long.MIN_VALUE)
+        ) {
+            ctx.variables.writeInt(name, idx, product.setScale(0, java.math.RoundingMode.DOWN).longValueExact())
+        } else {
+            // 4.981 :1457-1459：`PrintWarning($"TIMES整数溢出: {d}")` + 按 d 的符号饱和。
+            warnTimesOverflow(product.toPlainString(), ctx)
             ctx.variables.writeInt(
                 name, idx,
-                if (r.isNaN() || r >= 9.223372036854776E18) Long.MIN_VALUE else r.toLong(),
+                if (product.signum() > 0) Long.MAX_VALUE else Long.MIN_VALUE,
             )
-        } else {
-            // (decimal)DoubleValue：.NET Decimal(Double) 把 double 的精确值舍入到
-            // 28 位有效数字（banker's rounding）⇒ BigDecimal(exact).round(28, HALF_EVEN)。
-            // TODO(verify): 乘积超过 28 位有效数字时 .NET decimal 乘法的舍入方向
-            // （HALF_EVEN vs HALF_UP）未逐行取证，仅在 |IntValue| ≳ 1e10 且倍数含长尾
-            // 时才可能触到该第 28 位，语料 TIMES（3143 处）无此量级读数。
-            val d = java.math.BigDecimal(doubleValue)
-                .round(java.math.MathContext(28, java.math.RoundingMode.HALF_EVEN))
-            val product = java.math.BigDecimal(cur).multiply(d)
-            val r = if (product <= java.math.BigDecimal(java.lang.Long.MAX_VALUE) &&
-                product >= java.math.BigDecimal(java.lang.Long.MIN_VALUE)
-            ) {
-                product.setScale(0, java.math.RoundingMode.DOWN).longValueExact()
-            } else {
-                // C# x64 `(long)(double)` 越界 = cvttsd2si 的「整数不定值」= Long.MIN_VALUE
-                // （正溢出也得 MIN_VALUE；JLS 5.1.3 饱和语义正溢出给 MAX_VALUE —— 两侧不同，
-                // 2026-10-26 fixcore 审查 B4 钉死）。
-                Long.MIN_VALUE
-            }
-            ctx.variables.writeInt(name, idx, r)
         }
-        return ExecResult.Normal
+    }
+
+    /** TIMES 整数溢出的唯一告警出口：上屏（`PrintError`）+ overflow 桶留痕。 */
+    private fun warnTimesOverflow(rendered: String, ctx: ExecContext) {
+        val message = TIMES_OVERFLOW_PREFIX + rendered
+        ctx.variables.aux.clampWarnings().overflow(message)
+        ctx.console.printError(message)
     }
 
     /** ENCODETOUNI 直读 —— [execEncodeToUni] 逐字复刻。spec: Process.cs:1773-1789（写 RESULT 数组） */
@@ -2948,8 +3008,8 @@ class StatementExecutor {
                 // 跳过实际发生在控制台输入循环——MesSkip 为真时把 NeedValue=false 且 StopMesskip=false 的
                 // 等待自动吞掉（spec: EmueraConsole.cs:1451-1455）。PRINT 系等待恒为 stopMesskip=false，
                 // sem 层等价语义 = mesSkip 为真时不发起等待（换行不受影响）。等待只经 ExecContext.input 表达。
-                // 同 C4：PRINT 系 W 位吞掉后无条件清 MesSkip（EmueraConsole.cs:1456）。
-                if (spec.flag and 512 != 0) { if (ctx.mesSkip) ctx.mesSkip = false else readAnyKey(ctx) }
+                // 标志不清（同 WAIT）：跳过态跨连续无值等待存活到取值等待 / FORCEWAIT。
+                if (spec.flag and 512 != 0) { if (!ctx.mesSkip) readAnyKey(ctx) }
             }
         }
         // 窗口终点。spec: FunctionIdentifier.cs:227（OutputToConsole 内 ExpressionMediator.cs:68 的
@@ -3242,18 +3302,29 @@ class StatementExecutor {
 
         // ---- 输入 ----
         FunctionCode.WAIT -> {
-            // MesSkip 中 WAIT 由输入循环直接跑过（EmueraConsole.cs:1451-1455：NeedValue=false
-            // 且未 StopMesskip 时 while 继续），不发起等待。
-            // 原版输入循环吞掉无值等待后无条件 MesSkip = false（EmueraConsole.cs:1456）——
-            // 不清标志会让下一个 INPUT(canSkip) 快路径静默写默认值（2026-10-26 fixcore 审查 C4）。
-            if (ctx.mesSkip) ctx.mesSkip = false else readAnyKey(ctx); ExecResult.Normal // spec: FunctionIdentifier.cs:762-784
+            // MesSkip 中 WAIT 由输入循环直接跑过（EmueraConsole.cs:1451-1455 / 蛇版
+            // 4.981 :1502-1514：NeedValue=false 且未 StopMesskip 时 while 继续喂空提交），
+            // 不发起等待。**标志不清**：原版 `MesSkip = false`（:1456 / 蛇版 :1515）在
+            // while 循环**之后**，跳过态跨连续无值等待存活，直到撞取值等待（[waitInput]
+            // 阻塞前清零）或 FORCEWAIT（[readAnyKey] stopMesSkip 支清零）才结束。
+            // 2026-11-17 根因订正：旧口径「吞掉后无条件清标志」把 :1456 误读进循环内，
+            // 一次长按只推进一页、且 INPUT(canSkip) 快路径（:853）在快进中读不到跳过态
+            // ——均为与原版不一致（2026-10-26 fixcore 审查 C4 的判据即此误读，已撤）。
+            if (!ctx.mesSkip) {
+                readAnyKey(ctx)
+            }
+            ExecResult.Normal // spec: FunctionIdentifier.cs:762-784
         }
         FunctionCode.FORCEWAIT -> {
             readAnyKey(ctx, anyKey = false, stopMesSkip = true); ExecResult.Normal
         }
         FunctionCode.WAITANYKEY -> {
-            // 同 C4：吞掉后无条件清 MesSkip（EmueraConsole.cs:1456）。
-            if (ctx.mesSkip) ctx.mesSkip = false else readAnyKey(ctx, anyKey = true); ExecResult.Normal // spec: FunctionIdentifier.cs:786-798
+            // 同 WAIT：跳过态跨连续无值等待存活，清标志只发生在取值等待与 FORCEWAIT
+            // （EmueraConsole.cs:1451-1456 / 蛇版 :1502-1515）。
+            if (!ctx.mesSkip) {
+                readAnyKey(ctx, anyKey = true)
+            }
+            ExecResult.Normal // spec: FunctionIdentifier.cs:786-798
         }
         FunctionCode.TWAIT -> {
             /*
@@ -3287,8 +3358,8 @@ class StatementExecutor {
             // （:1451-1455 的 NeedValue=false 自动推进）。
             armIsTimeout(ctx, req)
             if (ctx.mesSkip && !req.needValue) {
-                // 同 C4：TWAIT 的无值等待被 MesSkip 吞掉后无条件清标志（EmueraConsole.cs:1456）。
-                ctx.mesSkip = false
+                // 跳过态下无值形态直接跑过，标志跨连续无值等待存活（同 WAIT；
+                // 原版清标志在 while 循环之后，EmueraConsole.cs:1451-1456 / 蛇版 :1502-1515）。
             } else {
                 val outcome = waitInput(ctx, req)
                 updateIsTimeout(ctx, req, outcome)
@@ -3368,49 +3439,12 @@ class StatementExecutor {
         }
         FunctionCode.TIMES -> {
             val arg = stmt.args as SpTimesArgument
-            // spec: FunctionIdentifier.cs:1314-1342 TIMES_Instruction.DoInstruction ——
-            // 双路径按 Config.TimesNotRigorousCalculation 分派（ConfigData.cs:111 出厂 false，
-            // 本游戏 emuera.config「IMITATE BEHAVIOR FOR TIMES:NO」同值）：
-            // - 默认（:1326-1338）：`(decimal)IntValue * (decimal)DoubleValue` —— decimal 携带
-            //   double 的**精确二进制值**（.NET Decimal(Double) 保留到 28 位有效数字），
-            //   乘积落在 long 域内向零截断；这正是 |IntValue| > 2^53 时与 double 乘路径
-            //   可观测分叉的来源（double 只有 53 位尾数，(double)IntValue 本身先失真）。
-            // - eramaker 模拟（:1322-1325）：`(double)IntValue * DoubleValue` 后 `(long)` 截断。
-            // `(long)num2` 越界分支的 `(long)(double)num2`（:1339-1341）在 C# x64 产「整数不定值」
-            // = Long.MIN_VALUE（cvttsd2si；JLS 5.1.3 的饱和语义正溢出给 MAX_VALUE，两侧分叉）——
-            // 两个分支都按 MIN_VALUE 复刻（2026-10-26 fixcore 审查 B4，替代旧「沿饱和」TODO）。
+            // 语义（双路径 + 溢出饱和 + 告警）统一在 [execTimesInt]；树通道与扁平通道
+            // 只差实参来源，不许再各写一份（ADR-001：同脚本换产物结果必须一致）。
             val name = arg.dest.name
             val idx = resolveIndices(arg.dest, ctx)
             val cur = ctx.variables.readInt(name, idx)
-            if (ctx.config.timesNotRigorousCalculation) {
-                val r = cur.toDouble() * arg.doubleValue
-                // eramaker 路径的 `(long)num` 同为 x64 不定值口径：NaN / ≥2^63 一律 Long.MIN_VALUE
-                // （负溢出 JVM 饱和本就给 MIN_VALUE，与 x64 一致，无需特判）。
-                ctx.variables.writeInt(
-                    name, idx,
-                    if (r.isNaN() || r >= 9.223372036854776E18) Long.MIN_VALUE else r.toLong(),
-                )
-            } else {
-                // (decimal)DoubleValue：.NET Decimal(Double) 把 double 的精确值舍入到
-                // 28 位有效数字（banker's rounding）⇒ BigDecimal(exact).round(28, HALF_EVEN)。
-                // TODO(verify): 乘积超过 28 位有效数字时 .NET decimal 乘法的舍入方向
-                // （HALF_EVEN vs HALF_UP）未逐行取证，仅在 |IntValue| ≳ 1e10 且倍数含长尾
-                // 时才可能触到该第 28 位，语料 TIMES（3143 处）无此量级读数。
-                val d = java.math.BigDecimal(arg.doubleValue)
-                    .round(java.math.MathContext(28, java.math.RoundingMode.HALF_EVEN))
-                val product = java.math.BigDecimal(cur).multiply(d)
-                val r = if (product <= java.math.BigDecimal(java.lang.Long.MAX_VALUE) &&
-                    product >= java.math.BigDecimal(java.lang.Long.MIN_VALUE)
-                ) {
-                    product.setScale(0, java.math.RoundingMode.DOWN).longValueExact()
-                } else {
-                    // C# x64 `(long)(double)` 越界 = cvttsd2si 的「整数不定值」= Long.MIN_VALUE
-                    // （正溢出也得 MIN_VALUE；JLS 5.1.3 饱和语义正溢出给 MAX_VALUE —— 两侧不同，
-                    // 2026-10-26 fixcore 审查 B4 钉死）。
-                    Long.MIN_VALUE
-                }
-                ctx.variables.writeInt(name, idx, r)
-            }
+            execTimesInt(name, idx, cur, arg.doubleValue, ctx)
             ExecResult.Normal
         }
         FunctionCode.ENCODETOUNI -> {
@@ -3836,6 +3870,8 @@ class StatementExecutor {
             }
             if (!ops(ctx).saveData(no.toInt(), text)) {
                 ctx.console.printError("SAVEDATA命令在存档时发生了意料之外的错误")
+                com.eratw.port.core.save.SaveDiagnostics.consumeSaveFailure()
+                    ?.let { ctx.console.printError("（存档失败原因：$it）") }
             }
             ExecResult.Normal
         }

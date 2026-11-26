@@ -96,7 +96,209 @@ class ErrorReportTest {
         assertTrue(text.contains("\nx${ErrorReport.EXTRA_MAX_LINES + 5}"))
     }
 
-    // ---- 构建指纹（2026-10-28：一个 versionName 三个包，报告必须能定位到 APK） ----
+    // ---- 多物理行读数（2026-11-17 lane-g-mem）：内嵌换行不许被当成一行 400 字剪 ----
+
+    /**
+     * 真机量级的合成读数：**四键（节点块/逐出/规范/串池）都在尾部**、整串 > [ErrorReport.LINE_MAX_CHARS]。
+     *
+     * 数字取自 2026-11-17 真机三份 OOM 报告（`1794882330035-eratw-report-20261116-114529.txt:181`
+     * 那行的形态：装载段 + 运行段 + 行缓冲段 + 图形段 + 代码缓存段），长度按 425-435 字量级复现。
+     * 不用真 census 现算：本用例证的是「断行 + 单行闸」这条缝，与度量源字段表无关。
+     */
+    private fun deviceShapedCensusLine(): String =
+        "Java 堆结构账面（估算口径，非 dominator tree；对象头/对齐不计=低估，串按 UTF-16=高估串本体）" +
+            " ｜装载：函数 119163 指令 5095619 全局槽 0 表达式 357793 语句 1940630" +
+            " 物化语句 41887 物化函数 6920 扁平片驻/建 0/0" +
+            " ｜指令流常驻 0MiB 行表 0MiB 实参索引 1MiB 串池 18405 条/约 0MiB" +
+            " ｜运行：全局整数(声明) 15MiB 全局整数(实占) 15MiB 全局串格 0MiB 角色 168/容 193" +
+            " 整数(容量行) 40MiB CSTR 0MiB 每角色整数 220096B 容量冗余(已含上两列) 5MiB 驻留串表 81959 条" +
+            " ｜行缓冲：显示 1500 逻辑 74516 段 2910 待发缓冲 空" +
+            " ｜图形 Java：正号段像素 70MiB 负号段 CSV 22MiB" +
+            " ｜代码缓存：节点块 256 逐出 16 规范 131072 串池 4096"
+
+    /** 四个键名（2026-11-15 补账的代码缓存段；真机上恒被 400 字闸切掉，正是本笔要修的缺口）。 */
+    private val codeCacheKeys = listOf("｜代码缓存：节点块 256", " 逐出 16", " 规范 131072", " 串池 4096")
+
+    /**
+     * 把一条账面按**段界 `｜`** 断成多物理行，断点贪心装行（每行不超 [budget]）。
+     *
+     * 这是度量源侧 `LiveSetCensus.Census.renderReportLines` 的等价极小实现：测试不去拼真 census
+     * （那会把用例耦合到 29 个字段上），只复现「一条逻辑读数 → 多物理行」这个形状。
+     */
+    private fun censusLineBrokenAtSections(line: String, budget: Int = 320): List<String> {
+        val segs = line.split(" ｜").let { listOf(it.first()) + it.drop(1).map { s -> " ｜$s" } }
+        val out = ArrayList<String>()
+        var cur = ""
+        for (s in segs) {
+            if (cur.isNotEmpty() && cur.length + s.length > budget) {
+                out.add(cur)
+                cur = "Java 堆结构账面（续）"
+            }
+            cur += s
+        }
+        if (cur.isNotEmpty()) out.add(cur)
+        return out
+    }
+
+    /** 报告里 `[补充现场]` 一节的正文行（节标题后到下一个分隔栏 / 空行为止）。 */
+    private fun extraSectionOf(text: String): List<String> =
+        text.lines().let { lines ->
+            val start = lines.indexOfFirst { it == "[补充现场]" }
+            if (start < 0) return emptyList()
+            lines.drop(start + 1)
+                .takeWhile { l -> l.isNotEmpty() && !l.all { it == '-' } && !l.all { it == '=' } }
+        }
+
+    @Test
+    fun 多物理行读数的四个键都进报告且每行不超单行闸() {
+        val line = deviceShapedCensusLine()
+        assertTrue(
+            line.length > ErrorReport.LINE_MAX_CHARS,
+            "合成串必须比单行闸长，否则这条缝根本没被测到：${line.length}",
+        )
+        // 度量源侧（GameHost.memoryCensusReportLine 同款）把一条逻辑读数断成多物理行：
+        // 断点就是账面自己的段界 `｜`，续行仍以 `Java 堆结构账面` 打头（保 triage 的 startswith）。
+        val broken = censusLineBrokenAtSections(line)
+        assertEquals(2, broken.size, "合成串按段应断成两行：$broken")
+        val text = ErrorReport(
+            kind = "应用崩溃",
+            timestampText = "t",
+            errorType = "java.lang.OutOfMemoryError",
+            errorMessage = "",
+            extraSectionLines = listOf(broken.joinToString("\n")),
+        ).render()
+        // 四个键一个不少。
+        for (k in codeCacheKeys) assertTrue(k in text, "读数没进报告：`$k`")
+        // 每一读数行都不超单行闸（截断标记不出现 = 没有任何一行被剪）。
+        val section = extraSectionOf(text)
+        assertEquals(2, section.size, "补充现场应当正好两行读数：$section")
+        for (l in section) {
+            assertTrue(
+                l.length <= ErrorReport.LINE_MAX_CHARS,
+                "单行超闸会被剪尾（长度 ${l.length}）：$l",
+            )
+            assertFalse("超长截断" in l, "读数行被单行闸剪了：$l")
+        }
+    }
+
+    /**
+     * 反向证明：**同一条读数整段当一行**进去，尾部四键全丢 —— 这正是 2026-11-17 真机的样子
+     * （`代码缓存：节点块 …（超长截断）`）。
+     *
+     * 这条与上一条共用同一份合成串：差别只在「有没有先摊平成物理行」。
+     * 若哪天有人把 `extraSectionLines` 的摊平去掉、或把度量源改回 `render()` 单行，上一条红。
+     */
+    @Test
+    fun 反向_整段当一行进报告则尾部四键被单行闸剪掉() {
+        val line = deviceShapedCensusLine()
+        val text = ErrorReport(
+            kind = "应用崩溃",
+            timestampText = "t",
+            errorType = "java.lang.OutOfMemoryError",
+            errorMessage = "",
+            extraSectionLines = listOf(line),
+        ).render()
+        assertTrue("（超长截断）" in text, "整段一行必被单行闸剪：本用例的前提失效了")
+        assertTrue("｜装载：函数 " in text, "被剪的必须是尾部，不是头部")
+        val surviving = codeCacheKeys.count { it in text }
+        assertTrue(
+            surviving < codeCacheKeys.size,
+            "整段一行时尾部四键应当有键丢失，否则单行闸没咬到、本用例证不到东西（存活 $surviving/${codeCacheKeys.size}）",
+        )
+    }
+
+    // ---- 度量源读数单独成节（2026-11-17 lane-k）：堆账面别再被补充现场的尾窗挤掉 ----
+
+    /** `devtools/triage_reports.py:154` 的 `HEAP_CENSUS_REPORT_PREFIX`，逐字复制，改一处即红。 */
+    private val HEAP_CENSUS_PREFIX = "Java 堆结构账面"
+
+    /**
+     * 真机满档形状的填充：装载轨迹 25 行 + 冻结现场 31 行 + 心跳/留痕 44 行 = 100 行，
+     * 全部走 [ErrorReport.extraSectionLines]（这一节按 [ErrorReport.EXTRA_MAX_LINES] 尾部保留）。
+     * 行数取「远超 80」是因为缺陷的形状就是「叠加过窗」，具体数字不影响判据。
+     */
+    private fun crowdOutFillers(): List<String> =
+        (1..25).map { "load-trace $it ERB/MAIN.ERB" } +
+            (1..31).map { "stall-scene $it" } +
+            (1..44).map { "heartbeat $it" }
+
+    /** 报告里 `[度量源读数]` 一节的正文行（判法与 [extraSectionOf] 同形）。 */
+    private fun metricSectionOf(text: String): List<String> =
+        text.lines().let { lines ->
+            val start = lines.indexOfFirst { it.startsWith("[度量源读数]") }
+            if (start < 0) return emptyList()
+            lines.drop(start + 1)
+                .takeWhile { l -> l.isNotEmpty() && !l.all { it == '-' } && !l.all { it == '=' } }
+        }
+
+    @Test
+    fun 度量源读数单独成节_满档现场行不再挤掉堆账面整段() {
+        val broken = censusLineBrokenAtSections(deviceShapedCensusLine())
+        val fillers = crowdOutFillers()
+        assertTrue(fillers.size > ErrorReport.EXTRA_MAX_LINES, "填充必须超过补充现场窗口，否则测不到挤压")
+        val text = ErrorReport(
+            kind = "应用崩溃",
+            timestampText = "t",
+            errorType = "java.lang.OutOfMemoryError",
+            errorMessage = "",
+            extraSectionLines = fillers,
+            metricSectionLines = broken,
+        ).render()
+        // 1) 整段读数一条不少：段 5「代码缓存」四键全在（0.2.46 真机报告正是缺这一段）。
+        for (k in codeCacheKeys) assertTrue(k in text, "读数没进报告：`$k`")
+        // 2) 逐行仍守单行闸：没有任何一行被「超长截断」剪尾（不许靠抬 400 字闸换存活）。
+        val section = metricSectionOf(text)
+        assertEquals(broken.size, section.size, "度量源读数节应当正好 ${broken.size} 行：$section")
+        for (l in section) {
+            assertTrue(
+                l.length <= ErrorReport.LINE_MAX_CHARS,
+                "单行超闸会被剪尾（长度 ${l.length}）：$l",
+            )
+            assertFalse("超长截断" in l, "读数行被单行闸剪了：$l")
+        }
+        // 3) triage 判据仍成立：每一行都以 Java 堆结构账面 打头（续行同前缀）。
+        for (l in section) {
+            assertTrue(
+                l.startsWith(HEAP_CENSUS_PREFIX),
+                "行首不是账面前缀，triage_reports.py:435 的 startswith 会漏判：$l",
+            )
+        }
+        // 4) 提前：它在 [补充现场] 之前（现场行再多也压不到它）。
+        val metricAt = text.lines().indexOfFirst { it.startsWith("[度量源读数]") }
+        val extraAt = text.lines().indexOfFirst { it == "[补充现场]" }
+        assertTrue(metricAt in 0 until extraAt, "度量源读数节必须排在补充现场之前：metric=$metricAt extra=$extraAt")
+        // 5) 补充现场自己的窗口口径没被改（仍是 80 行尾部保留）。
+        assertEquals(ErrorReport.EXTRA_MAX_LINES, extraSectionOf(text).size, "补充现场窗口口径不许顺带改动")
+    }
+
+    /**
+     * 反向证明：**同一批账面行只走 [ErrorReport.extraSectionLines]**（即接线前的老路），
+     * 100 行填充就把它们整段挤出 80 行尾窗 —— 这就是 0.2.46 真机报告「账面止于图形段、
+     * 没有代码缓存段」的机制。
+     *
+     * 若哪天有人把 `metricSectionLines` 并回补充现场（或把它也塞进那个尾窗），
+     * 上一条用例红；本用例红的方式则是「读数居然还在」，说明窗口/位置又被改回去了。
+     */
+    @Test
+    fun 反向_账面只走补充现场时被满档尾窗整段挤掉() {
+        val broken = censusLineBrokenAtSections(deviceShapedCensusLine())
+        val text = ErrorReport(
+            kind = "应用崩溃",
+            timestampText = "t",
+            errorType = "java.lang.OutOfMemoryError",
+            errorMessage = "",
+            extraSectionLines = broken + crowdOutFillers(),
+        ).render()
+        val survivors = codeCacheKeys.count { it in text }
+        assertEquals(0, survivors, "老路上四键应当一个不剩（存活 $survivors/${codeCacheKeys.size}）")
+        assertFalse(
+            text.lines().any { it.startsWith(HEAP_CENSUS_PREFIX) },
+            "老路上账面行整段被挤出报告：这正是本笔要修的形状",
+        )
+        // 填充的尾部行照旧在（证明窗口本身没坏，被剪的是账面）。
+        assertTrue(text.contains("\nheartbeat 44"))
+    }
+
 
     @Test
     fun 构建标识与产物指纹成节且指纹只取前12位() {

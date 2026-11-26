@@ -211,25 +211,30 @@ class FuncMeta(
     internal val positionPacked: Boolean get() = flags and F_POS_PACKED != 0
 
     /**
-     * 事件执行桶（`LabelDictionary.cs:90-105` 的 `array[0..3]`）：
-     * ONLY=0 → PRI=1 → NORMAL=2 → LATER=3，执行序由 [FunctionTable.eventCallOrder] 的稳定
-     * 排序给出（同桶内保装载序）。
+     * 事件执行桶**集合**：C# `LabelDictionary.cs:134-141`（SortLabel）与 `:228-235`
+     * （SortLabels）是四个**平行** if —— `IsOnly → array[0]`、`IsPri → array[1]`、
+     * `IsLater → array[3]`、`!IsPri && !IsLater → array[2]`，同一成员命中几条就进几条桶，
+     * 于是被 `CalledFunction.cs:228-243` 的 `ShiftNext` 派发相应次数。`LabelDictionary.cs:233`
+     * 原注「#PRIかつ#LATERなら二重に登録する。eramakerの仕様」说明双旗标落两桶是eramaker
+     * 的既定语义。4.981 宿主 PC 实测（在册 B23）确认 `#PRI`+`#LATER` 成员确实被调用两次，
+     * 装载期同时上屏「警告Lv1:…同时使用#PRI和#LATER是重复的(这个函数会被调用2次)」。
      *
-     * **与 C# 的一处已知分叉（TODO(verify)，当前语料不可达）**：C# 对同一 label 是**并列**
-     * 加桶 —— `if (IsOnly) array[0].Add; if (IsPri) array[1].Add; if (IsLater) array[3].Add;
-     * if (!IsPri && !IsLater) array[2].Add;`（`LabelDictionary.cs:90-105`），因此
-     * `IsPri && IsLater` 或 `IsOnly` 的 label 会同时落**两个桶**、被 `ShiftNext`
-     * （`CalledFunction.cs:228-243`）派发**两次**；本字段是**排他**桶，只派发一次。
-     * 可达性：语料全树扫描 `#ONLY`/`#SINGLE` 命中 0、同一函数体内同时含 `#PRI` 与
-     * `#LATER` 的定义 0 处 ⇒ 现值不可观测。要严格复刻需把本字段改成「桶集合」并让
-     * `eventCallOrder` 产出重复项（属跨文件接口变更，留给组长裁定）。
+     * 派生口径（逐字对齐四个平行 if）：
+     * - 无旗标 → `[2]`；`#PRI` → `[1]`；`#LATER` → `[3]`；
+     * - `#PRI`+`#LATER` 同体 → `[1, 3]`（守卫 `!IsPri && !IsLater` 使它不进桶 2）；
+     * - `#ONLY` → `[0, 2]`（解析期 `#ONLY` 清掉 `#PRI`/`#LATER`，
+     *   `LogicalLineParser.cs:131-145` ⇒ 正常语料下 ONLY 成员必带桶 2；运行期桶 0 命中即
+     *   `FinishEvent` 终止整链（`ProcessState.cs:312-347`），桶 2 的那份因此不可达）。
+     *
+     * 派发序由 [FunctionTable.eventDispatchOrder] 按「外层桶序 0→1→2→3、同桶内保装载序」展开；
+     * 本属性是派生值，不进 [equals] / [hashCode]。
      */
-    val eventBucket: Int
-        get() = when {
-            isOnly -> 0
-            isPri -> 1
-            isLater -> 3
-            else -> 2
+    val eventBuckets: List<Int>
+        get() = buildList {
+            if (isOnly) add(BUCKET_ONLY)
+            if (isPri) add(BUCKET_PRI)
+            if (!isPri && !isLater) add(BUCKET_NORMAL)
+            if (isLater) add(BUCKET_LATER)
         }
 
     /**
@@ -335,6 +340,12 @@ class FuncMeta(
         internal const val F_RETURNS_STR = 64
         internal const val F_POS_PACKED = 128
         internal const val F_RETURNS_FLOAT = 256
+
+        /** 四桶编号（`LabelDictionary.cs:243-246` 的 eventLabels 下标 0..3）。 */
+        internal const val BUCKET_ONLY = 0
+        internal const val BUCKET_PRI = 1
+        internal const val BUCKET_NORMAL = 2
+        internal const val BUCKET_LATER = 3
 
         /** 下标域宽（与装载器 FUNC_COUNT_MAX = 1 shl 20 同源）。 */
         internal const val INDEX_BITS = 20
@@ -509,15 +520,32 @@ class FunctionTable(metasIn: List<FuncMeta>) {
     fun nonEvent(key: String): FuncMeta? = nonEventByKey[keyOf(key)]
 
     /**
-     * 事件的执行序：桶 ONLY(0) → PRI(1) → NORMAL(2) → LATER(3)，同桶按装载序。
-     * spec: CalledFunction.cs:228-243（ShiftNext 逐桶推进）+ LabelDictionary.cs:77-105（分桶）。
+     * 事件的派发序，展开成 (成员, 桶位) 对：外层桶 ONLY(0) → PRI(1) → NORMAL(2) → LATER(3)，
+     * 同桶内按装载序（init 的 loadOrder 已按 defIndex 非降装配）。
+     * spec: CalledFunction.cs:228-243（ShiftNext 逐桶推进）+ LabelDictionary.cs:134-141 /
+     * :228-235（四个平行 if 的并列加桶）。
+     *
+     * 成员命中几个桶就在这里出现几次（`#PRI`+`#LATER` 两次、`#ONLY` 在桶 0 与桶 2 各一次），
+     * 与 [com.eratw.port.core.code.EventRegistry] 的 `Member(bucket=…)` 展开逐行同序。
+     * 展开只依赖「桶号 + 装载序」两个显式键，不依赖 HashMap 的迭代次序。
      * 非事件名或未知名返回 null。
      */
-    fun eventCallOrder(key: String): List<FuncMeta>? {
+    fun eventDispatchOrder(key: String): List<Pair<FuncMeta, Int>>? {
         val members = eventMembersByKey[keyOf(key)] ?: return null
-        // 稳定排序：sortBy 对相等元素保持原次序（装载序）
-        return members.sortedBy { it.eventBucket }
+        val out = ArrayList<Pair<FuncMeta, Int>>(members.size)
+        for (bucket in FuncMeta.BUCKET_ONLY..FuncMeta.BUCKET_LATER) {
+            for (m in members) {
+                if (bucket in m.eventBuckets) out += m to bucket
+            }
+        }
+        return out
     }
+
+    /**
+     * 事件成员的桶序列表（[eventDispatchOrder] 的成员投影，**含重复项**：双桶成员出现两次）。
+     * 非事件名或未知名返回 null。
+     */
+    fun eventCallOrder(key: String): List<FuncMeta>? = eventDispatchOrder(key)?.map { it.first }
 
     /** 名字的三态分类，供 CALL / CALLFORM / CALLEVENT 的运行期解析。 */
     enum class TargetKind { NON_EVENT, EVENT, NOT_FOUND }

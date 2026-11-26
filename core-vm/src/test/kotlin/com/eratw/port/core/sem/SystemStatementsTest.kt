@@ -207,8 +207,28 @@ class SystemStatementsTest {
         env.ctx.systemOps = object : SystemOps {
             override fun saveData(no: Int, text: String): Boolean = false
         }
+        com.eratw.port.core.save.SaveDiagnostics.recordSaveFailure(null)
         env.run(instr(FunctionCode.SAVEDATA, com.eratw.port.core.stmt.SpSaveDataArgument(iLit(1), sLit("t"))))
         assertEquals(listOf("printError(SAVEDATA命令在存档时发生了意料之外的错误)"), env.console.events)
+    }
+
+    @Test
+    fun `SAVEDATA 失败时把现场原因追加到屏上`() {
+        val env = SemTestEnv()
+        env.ctx.systemOps = object : SystemOps {
+            override fun saveData(no: Int, text: String): Boolean = false
+        }
+        com.eratw.port.core.save.SaveDiagnostics.recordSaveFailure("stage=capture FileSystemException: 半截写")
+        env.run(instr(FunctionCode.SAVEDATA, com.eratw.port.core.stmt.SpSaveDataArgument(iLit(1), sLit("t"))))
+        assertEquals(
+            listOf(
+                "printError(SAVEDATA命令在存档时发生了意料之外的错误)",
+                "printError(（存档失败原因：stage=capture FileSystemException: 半截写）)",
+            ),
+            env.console.events,
+        )
+        // 取走即失效：第二次失败不应再撞上次的残影。
+        assertEquals(null, com.eratw.port.core.save.SaveDiagnostics.consumeSaveFailure())
     }
 
     @Test

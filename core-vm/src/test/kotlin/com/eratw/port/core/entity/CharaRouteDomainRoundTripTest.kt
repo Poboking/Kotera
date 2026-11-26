@@ -311,7 +311,10 @@ class CharaRouteDomainRoundTripTest {
         assertEquals(42L, f.store.readInt("CFLAG", longArrayOf(r1.toLong(), 0)), "路由域逐格注回")
         val r2 = f.projector.project(e2)
         assertEquals(4, r2)
-        assertEquals(200L, f.projector.readCell(r1, key2), "重投射进场：图边值写回原生格，度数无损")
+        // e1/e2 都退场过：虚拟 NO 随行删除回收（旧号作废），重投射各拿新号；
+        // 关系格列键按重投射后的活 NO 现取（持久身份是 EntityId，不是 NO）。
+        val key2b = requireNotNull(f.reg.virtualNoOf(e2)).toLong()
+        assertEquals(200L, f.projector.readCell(r1, key2b), "重投射进场：图边值写回原生格，度数无损")
     }
 
     // ------------------------------------------------------------------

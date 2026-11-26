@@ -184,6 +184,17 @@ class ButtonLayer(
     private var pointerDown = false
 
     /**
+     * 悬停指针源标记（外接鼠标/触控板/悬停手写笔；装配层
+     * `View.setOnHoverListener` 接线，触屏设备不产 `ACTION_HOVER_*` ⇒ 恒 false）。
+     *
+     * 原版 `isFocus` / `isSelecting` **都由 MoveMouse 悬停驱动**
+     * （`ConsoleButtonString.cs:279-280` + `EmueraConsole.cs:2752-2756`），按下只是
+     * 悬停上的瞬时态；移植侧触屏用「按下」代偿这个高亮（GFX-09），hover 标志把
+     * 真正的悬停路补还给指针设备。
+     */
+    private var pointerHover = false
+
+    /**
      * div 子行按钮的命中表（帧口径：像素几何）。
      *
      * 与 [targets] **分开存**：格坐标表只服务正文行（原版 `displayLineList` 各行，
@@ -682,13 +693,23 @@ class ButtonLayer(
     }
 
     /**
-     * 记录指针（触摸）位置，只影响绘制标记。
+     * 记录指针位置，只影响绘制标记。
      * [pressed] 为 true 表示按下态（原版 `selectingButton`，松开时才产输入）。
+     * [hover] 为 true 表示指针来自悬停（鼠标/触控板/悬停手写笔）——绘制高亮口径见
+     * [isHighlighted]（原版 `isSelecting` / `isFocus` 都是 hover 驱动，
+     * `ConsoleButtonString.cs:279-280`），触屏按下路恒传 false。
      */
-    fun setPointer(row: Int, col: Int, pressed: Boolean, acceptance: ButtonAcceptance = ButtonAcceptance.ANY) {
+    fun setPointer(
+        row: Int,
+        col: Int,
+        pressed: Boolean,
+        acceptance: ButtonAcceptance = ButtonAcceptance.ANY,
+        hover: Boolean = false,
+    ) {
         pointerRow = row
         pointerCol = col
         pointerDown = pressed
+        pointerHover = hover
         pointerAcceptance = acceptance
     }
 
@@ -700,6 +721,7 @@ class ButtonLayer(
         pointerRow = -1
         pointerCol = -1
         pointerDown = false
+        pointerHover = false
         pointerAcceptance = ButtonAcceptance.ANY
     }
 
@@ -965,6 +987,16 @@ class ButtonLayer(
 
     /** 该目标当前是否处于按下态 —— 纯绘制标记。 */
     fun isPressed(target: HitTarget): Boolean = pointerDown && isFocused(target)
+
+    /** 指针是否处于活动态（按下或悬停）：绘制侧要不要算高亮区间的前置闸。 */
+    fun pointerActive(): Boolean = pointerDown || pointerHover
+
+    /**
+     * 绘制高亮口径 = 原版 `isSelecting || isFocus`（`ConsoleButtonString.cs:279-280`，
+     * PC 上两者都由 MoveMouse 悬停驱动）。移植侧等价：**按下（触屏）或悬停（指针设备）× 焦点**。
+     * 按钮内 img 的换图（`buttonResource` / `spriteNameB`）与按钮变色都消费本口径。
+     */
+    fun isHighlighted(target: HitTarget): Boolean = pointerActive() && isFocused(target)
 
     /**
      * 触屏目标外扩（平台适配的最小触摸尺寸，安卓口径 48dp）。

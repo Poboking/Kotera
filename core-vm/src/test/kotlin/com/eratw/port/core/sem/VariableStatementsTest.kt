@@ -271,6 +271,10 @@ class VariableStatementsTest {
         assertEquals(9007199254740992L, env.store.readInt("DAY", longArrayOf(3)))
     }
 
+    // ------------------------------------------------------------------
+    // TIMES 整数溢出：见 TimesOverflowTest（族②；拆出以免本类推过 detekt LargeClass 闸）
+    // ------------------------------------------------------------------
+
     // ---------------- 角色库 ----------------
 
     private fun envWithTemplate(): SemTestEnv {

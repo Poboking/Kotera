@@ -172,35 +172,47 @@ class KojoOverrideContractTest {
     }
 
     // ------------------------------------------------------------------
-    // 3：负控（链接期整组拒绝）
+    // 3：负控（2026-11-23 KI 改判：链接期整组拒载改告警放行，BOARD KI-2）
     // ------------------------------------------------------------------
 
     @Test
-    fun `MODERN 未声明覆盖即拒`() {
-        val ex = assertFailsWith<SymbolConflictException> {
-            ModuleLinker.link(
-                LinkInputs(
-                    buildBase(), baseMetas,
-                    listOf(module(override = emptySet())),
-                    ResolverPolicy.MODERN, sigOf,
-                ),
-            )
-        }
-        assertTrue(ex.message!!.contains("KOJO_MESSAGE_SEND"), "冲突报告要点名符号，实际: ${ex.message}")
+    fun `KI-2 MODERN 未声明覆盖改告警放行_链接照常产胜者`() {
+        val diags = mutableListOf<String>()
+        val linked = ModuleLinker.link(
+            LinkInputs(
+                buildBase(), baseMetas,
+                listOf(module(override = emptySet())),
+                ResolverPolicy.MODERN, sigOf,
+                diagnostics = { diags += it },
+            ),
+        )
+        assertTrue(
+            diags.any { it.contains("KOJO_MESSAGE_SEND") && it.contains("未声明覆盖") },
+            "未声明覆盖告警点名符号: $diags",
+        )
+        assertEquals(
+            linked.catalog.winnerIndexOf("KOJO_MESSAGE_SEND"),
+            linked.catalog.winnerIndexOf("KOJO_MESSAGE_SEND"),
+            "链接照常产出胜者绑定（last-wins 不变）",
+        )
     }
 
     @Test
-    fun `签名不可验证即拒`() {
-        assertFailsWith<OverrideSignatureException> {
-            ModuleLinker.link(
-                LinkInputs(
-                    buildBase(), baseMetas,
-                    listOf(module()),
-                    ResolverPolicy.MODERN,
-                    { "" },   // base 侧未导出签名 ⇒ fail-closed
-                ),
-            )
-        }
+    fun `KI-2 签名不可验证改告警放行_不再 fail-closed`() {
+        val diags = mutableListOf<String>()
+        ModuleLinker.link(
+            LinkInputs(
+                buildBase(), baseMetas,
+                listOf(module()),
+                ResolverPolicy.MODERN,
+                { "" },   // base 侧未导出签名 ⇒ 改判后告警放行（原 fail-closed 拒）
+                diagnostics = { diags += it },
+            ),
+        )
+        assertTrue(
+            diags.any { it.contains("签名指纹缺失") && it.contains("ABI 未校验") },
+            "缺指纹覆盖告警: $diags",
+        )
     }
 
     // ------------------------------------------------------------------

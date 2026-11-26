@@ -911,33 +911,11 @@ object ArgBuilders {
     private fun call(ctx: ArgCtx, callf: Boolean, form: Boolean): Argument {
         val st = CharStream(ctx.argText)
         ctx.lexer.skipWhiteSpace(st)
-        val rawNameTerm: Expr = if (form) {
-            if (st.current == '"') {
-                // 带引号的 FORM 名字（`GOTOFORM "TAIL"`）：原版经词法 token 层，引号作为
-                // StringLiteral 定界符被消费（LexicalAnalyzer.cs），字面内容再作为 FORM 串
-                // 解析（{expr}/%% 插值在引号内仍有效）。直接对原文跑 AnalyseFormattedString
-                // 会把外层引号当普通文本吞进 Text 段（endWith != DoubleQuotation），
-                // 导致按名查表拿到 `"TAIL"` 查不到 $TAIL。
-                st.shiftNext()   // 越过开引号（readString 把 '"' 当结束符）
-                val inner = ctx.lexer.readString(st, StrEndWith.DoubleQuotation, ctx.line)
-                if (st.current == '"') st.shiftNext()   // 越过闭引号，否则后续 analyse 再遇 '"' 报未闭合
-                val f = ctx.lexer.analyseFormattedString(
-                    CharStream(inner), FormStrEndWith.LeftParenthesis_Bracket_Comma_Semicolon,
-                    trim = false, ctx.line,
-                )
-                FormStringTerm.fromLexerStrForm(f, ctx.resolver, ctx.config, ctx.line, 0)
-            } else {
-                val f = ctx.lexer.analyseFormattedString(
-                    st, FormStrEndWith.LeftParenthesis_Bracket_Comma_Semicolon, trim = true, ctx.line,
-                )
-                FormStringTerm.fromLexerStrForm(f, ctx.resolver, ctx.config, ctx.line, 0)
-            }
-        } else {
-            StrLiteral(
-                ctx.lexer.readString(st, StrEndWith.LeftParenthesis_Bracket_Comma_Semicolon, ctx.line).trim(' ', '\t'),
-            )
-        }
-        val nameTerm: Expr = foldTryConstFormName(ctx, rawNameTerm)
+        val nameTerm: Expr = foldTryConstFormName(ctx, readCallNameTerm(ctx, st, form))
+        // 名字与实参之间的空白要先跳：引号名分支在吃闭引号后 `st` 停在空白上，不跳则
+        // terminator 判成空格 ⇒ 逗号实参整段不解析、调用点 argc=0（原版词法层早已吞掉空白，
+        // ArgumentParser.cs:802-875）。
+        ctx.lexer.skipWhiteSpace(st)
         val terminator = if (st.eos) CharStream.END_OF_STRING else st.current
         val tokens = toExprTokens(ctx.lexer.analyse(st, LexEndWith.EoL, LexAnalyzeFlag.NONE, ctx.line))
         var pos = if (tokens.isEmpty()) 0 else 1 // 原版 ShiftNext 跳过终结符
@@ -977,6 +955,39 @@ object ArgBuilders {
             arg.constStr = it
         }
         return arg
+    }
+
+    /**
+     * 读 `CALL`/`CALLFORM` 族的名字项，游标 `st` 前移到名字之后（空白由调用方跳过）。
+     *
+     * 带引号的 FORM 名字（`GOTOFORM "TAIL"`）：原版经词法 token 层，引号作为 StringLiteral
+     * 定界符被消费（LexicalAnalyzer.cs），字面内容再作为 FORM 串解析（{expr}/%% 插值在引号内
+     * 仍有效）。直接对原文跑 AnalyseFormattedString 会把外层引号当普通文本吞进 Text 段
+     * （endWith != DoubleQuotation），导致按名查表拿到 `"TAIL"` 查不到 $TAIL。
+     */
+    private fun readCallNameTerm(ctx: ArgCtx, st: CharStream, form: Boolean): Expr = when {
+        !form -> StrLiteral(
+            ctx.lexer.readString(st, StrEndWith.LeftParenthesis_Bracket_Comma_Semicolon, ctx.line).trim(' ', '\t'),
+        )
+        st.current == '"' -> readQuotedFormName(ctx, st)
+        else -> {
+            val f = ctx.lexer.analyseFormattedString(
+                st, FormStrEndWith.LeftParenthesis_Bracket_Comma_Semicolon, trim = true, ctx.line,
+            )
+            FormStringTerm.fromLexerStrForm(f, ctx.resolver, ctx.config, ctx.line, 0)
+        }
+    }
+
+    /** 引号形态的 FORM 名字（`GOTOFORM "TAIL"`）：越过引号、只把字面内容当 FORM 串解析。 */
+    private fun readQuotedFormName(ctx: ArgCtx, st: CharStream): Expr {
+        st.shiftNext()   // 越过开引号（readString 把 '"' 当结束符）
+        val inner = ctx.lexer.readString(st, StrEndWith.DoubleQuotation, ctx.line)
+        if (st.current == '"') st.shiftNext()   // 越过闭引号，否则后续 analyse 再遇 '"' 报未闭合
+        val f = ctx.lexer.analyseFormattedString(
+            CharStream(inner), FormStrEndWith.LeftParenthesis_Bracket_Comma_Semicolon,
+            trim = false, ctx.line,
+        )
+        return FormStringTerm.fromLexerStrForm(f, ctx.resolver, ctx.config, ctx.line, 0)
     }
 
     /**

@@ -16,8 +16,10 @@ import com.eratw.port.core.frontend.Symbols
 import com.eratw.port.core.lexer.LexerConfig
 import com.eratw.port.core.lexer.LogicalLineReader
 import com.eratw.port.core.loader.BootMetadata
+import com.eratw.port.core.mod.ModChainTrace
 import com.eratw.port.core.patch.ManifestCodec
 import com.eratw.port.core.patch.ManifestSource
+import com.eratw.port.core.patch.OverridePolicy
 import com.eratw.port.core.proc.FuncMeta
 import com.eratw.port.core.proc.FunctionTable
 import com.eratw.port.core.proc.GameSession
@@ -47,7 +49,7 @@ import kotlin.test.assertTrue
  * 3. 合成事件入口退役：入口 meta 不进模块、成员 meta 保留 isEvent；
  * 4. 私有 #DIM 进 descriptor，并经 plan 进会话注册链（`privateDimFailures` 空）；
  * 5. 生产装配路：事件成员与 overlay 路同成员集/同序，真 VM 执行新函数与事件成员；
- * 6. 负控：直接 CALL 事件名 / base 目录缺名 / 空函数集。
+ * 6. 负控：base 目录缺名 / 空函数集；S9 改判：CALL 事件名放行为导入（不拒）。
  */
 class PatchImportTranscoderTest {
 
@@ -320,13 +322,218 @@ class PatchImportTranscoderTest {
     }
 
     // ------------------------------------------------------------------
+    // 判据 4（R7-①）：撞 base 同名的补丁按**声明式覆盖**装载并在真会话顶掉原实现
+    // ------------------------------------------------------------------
+
+    /**
+     * 覆盖用补丁：重新定义 base 的 `@A_ONE`（原版语义 = 后装载者胜出，spec:
+     * LabelDictionary.cs:107-113 + ErbLoader.cs:466-475）。
+     */
+    private val overridePatchSource = """
+        @A_ONE
+        PRINTL OVR-ONE
+        RETURN 0
+    """.trimIndent()
+
+    private fun compileOverridePatch(
+        meta: BootMetadata,
+        counts: PatchCompiler.BaseCounts,
+    ): PatchCompiler.PatchResult = PatchCompiler(
+        meta,
+        counts,
+        symbols(),
+        // 2026-11-23 KI 改判：overrideDeclarable 判据参数已撤销（撞名一律覆盖装载）。
+    ).compile(listOf(PatchCompiler.SourceFile("mods/kojo.ERB", overridePatchSource)), "A_ONE")
+
+    @Test
+    fun `覆盖声明_同名补丁不再整包拒_键进descriptor并导出补丁真实签名`() {
+        val (_, metas, counts) = compileBase()
+        val result = compileOverridePatch(baseMeta(metas), counts)
+        // 融合方案：容器签名段写补丁真实签名（不是 base 签名）。正常覆盖 = 两侧 ABI 相同，
+        // 故 base 侧也用同一指纹（模拟签名相符）；签名不符的负例由独立用例钉死。
+        val patchSig = result.signatures.getValue("A_ONE")
+        assertTrue(patchSig.length == 64, "补丁签名必须是 SHA-256 指纹，实际 $patchSig")
+
+        val t = PatchImportTranscoder.transcode(
+            result,
+            counts,
+            metas.associate { it.index to it.key },
+            "kojo.override",
+            { if (it == "A_ONE") patchSig else "" },
+        )
+        assertEquals(setOf("A_ONE"), t.descriptor.overrideFunctions)
+        assertEquals(patchSig, t.module.signatures["A_ONE"], "模块指纹 = 补丁真实签名（签名单源）")
+        assertTrue(t.descriptor.policyFor("A_ONE") == OverridePolicy.OVERWRITE, "声明即 OVERWRITE 策略")
+
+        // 线格式往返：覆盖声明与指纹必须随 manifest / 容器一起存活（导入产物落盘再读回的同一条路）。
+        val decoded = ManifestCodec.decode(ManifestCodec.encode(t.descriptor))
+        assertEquals(setOf("A_ONE"), decoded.overrideFunctions, "override-functions 段过往返")
+        val roundTrip = ErbModuleContainer.decode(ErbModuleContainer.encode(t.module))
+        assertEquals(patchSig, roundTrip.signatures["A_ONE"], "容器签名段过往返")
+    }
+
+    @Test
+    fun `KI-2 ABI不符不再拒装_容器仍持补丁真实签名_装配告警放行`() {
+        // 融合方案数据面钉（2026-11-23 KI 改判后语义更新）：容器写的是补丁真实签名（不是
+        // base 顶替值）——改判后 ABI 不符不再拒装（原抛 OverrideSignatureException），改为
+        // 装配成功 + diagnostics 告警（last-wins 放行，SUPER 链照建）。本例钉：容器签名
+        // 数据面不回退 + 装配链告警放行到位。
+        val (base, metas, counts) = compileBase()
+        val result = compileOverridePatch(baseMeta(metas), counts)
+        val patchSig = result.signatures.getValue("A_ONE")
+        val otherSig = "f".repeat(64) // 与补丁真实签名不等的 base 指纹 = ABI 不符
+        val t = PatchImportTranscoder.transcode(
+            result,
+            counts,
+            metas.associate { it.index to it.key },
+            "kojo.override.abi-bad",
+            { if (it == "A_ONE") otherSig else "" },
+        )
+        assertEquals(patchSig, t.module.signatures["A_ONE"], "容器必须持有补丁真实签名（不是 base 顶替值）")
+        val diags = mutableListOf<String>()
+        val chain = ModChainAssembler.assemble(
+            listOf(ManifestSource("kojo.override.abi-bad.manifest", ManifestCodec.encode(t.descriptor))),
+            listOf(t.module.toCompiledModule()),
+            base,
+            metas,
+            baseSignatureOf = { if (it == "A_ONE") otherSig else "" },
+            trace = ModChainTrace().apply { overrideDiagnostics = { diags += it } },
+        )
+        assertTrue(
+            diags.any { it.contains("A_ONE") && it.contains("签名不一致") },
+            "ABI 不符覆盖必须出装配告警: $diags",
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // 可选收窄声明（pack.json `overrideFunctions`）：只约束事实，不提供名单
+    // ------------------------------------------------------------------
+
+    /** 覆盖场景转码：base 侧签名 = 补丁真实签名（模拟 ABI 相符），可带显式声明。 */
+    private fun transcodeWithDeclared(
+        result: PatchCompiler.PatchResult,
+        counts: PatchCompiler.BaseCounts,
+        metas: List<FuncMeta>,
+        allowList: List<String>?,
+    ): PatchImportTranscoder.Transcoded {
+        // 加性补丁没有 A_ONE 切片 ⇒ 空串（无可覆盖键时签名口根本不会被查）。
+        val sig = result.signatures["A_ONE"] ?: ""
+        return PatchImportTranscoder.transcode(
+            result,
+            counts,
+            metas.associate { it.index to it.key },
+            "kojo.test.declared",
+            PatchImportTranscoder.OverrideInputs({ if (it == "A_ONE") sig else "" }, allowList),
+        )
+    }
+
+    @Test
+    fun `显式声明与推导集一致即放行_小写键按大写归一`() {
+        val (_, metas, counts) = compileBase()
+        val result = compileOverridePatch(baseMeta(metas), counts)
+        // 声明写小写 a_one：键按大写归一对齐模块侧口径，不因大小写误判成「多列」。
+        val t = transcodeWithDeclared(result, counts, metas, listOf("a_one"))
+        assertEquals(setOf("A_ONE"), t.descriptor.overrideFunctions, "名单仍由推导集给出")
+    }
+
+    @Test
+    fun `显式声明多列不可覆盖目标即拒_不静默放宽`() {
+        val (_, metas, counts) = compileBase()
+        val result = compileOverridePatch(baseMeta(metas), counts)
+        val e = assertFailsWith<IllegalArgumentException>("声明覆盖了实际覆盖不了的目标必须拒") {
+            transcodeWithDeclared(result, counts, metas, listOf("A_ONE", "NOT_A_BASE_FN"))
+        }
+        val msg = e.message ?: ""
+        assertTrue(msg.contains("NOT_A_BASE_FN"), "要点名多列的那个键：$msg")
+        assertTrue(msg.contains("不可覆盖"), "要说清是「不可覆盖」而不是别的原因：$msg")
+    }
+
+    @Test
+    fun `显式声明漏列同名函数即拒_防改源后意外多覆盖`() {
+        val (_, metas, counts) = compileBase()
+        val result = compileOverridePatch(baseMeta(metas), counts)
+        // [] = 显式声明「本包不覆盖任何函数」，但补丁里 @A_ONE 与 base 同名 ⇒ 硬拒。
+        val e = assertFailsWith<IllegalArgumentException>("空声明 + 撞名函数必须拒") {
+            transcodeWithDeclared(result, counts, metas, emptyList())
+        }
+        val msg = e.message ?: ""
+        assertTrue(msg.contains("A_ONE"), "要点名没声明的那个函数：$msg")
+        assertTrue(msg.contains("显式声明不覆盖任何函数"), "要交代空声明的含义：$msg")
+    }
+
+    @Test
+    fun `显式声明不覆盖_加性补丁无撞名时合法且零覆盖`() {
+        val (_, metas, counts) = compileBase()
+        val result = compilePatch(baseMeta(metas), counts)
+        val t = transcodeWithDeclared(result, counts, metas, emptyList())
+        assertTrue(t.descriptor.overrideFunctions.isEmpty(), "加性包声明不覆盖 = 合法（无撞名即无冲突）")
+    }
+
+    @Test
+    fun `覆盖会话_base调用点一字不改也走覆盖者`() {
+        val (base, metas, counts) = compileBase()
+        val result = compileOverridePatch(baseMeta(metas), counts)
+        // 正常覆盖 = 补丁签名与 base 签名相同（同一 SignatureExport 口径），故两侧同指纹。
+        val patchSig = result.signatures.getValue("A_ONE")
+        val t = PatchImportTranscoder.transcode(
+            result,
+            counts,
+            metas.associate { it.index to it.key },
+            "kojo.override",
+            { if (it == "A_ONE") patchSig else "" },
+        )
+        val chain = ModChainAssembler.assemble(
+            listOf(ManifestSource("kojo.override.manifest", ManifestCodec.encode(t.descriptor))),
+            listOf(t.module.toCompiledModule()),
+            base,
+            metas,
+            baseSignatureOf = { if (it == "A_ONE") patchSig else "" },
+        )
+        val plan = assertNotNull(ModChainRuntimePlan.of(chain), "覆盖必须产出非旁路 plan")
+        assertTrue(plan.hasOverrides, "覆盖 ⇒ HAS_OVERRIDES 为真，dispatch 才交给 VM")
+
+        val root = Files.createTempDirectory("m2-4-override").also { it.toFile().deleteOnExit() }
+        val direct = GameSession(root, base, baseMeta(metas), modChain = plan)
+        direct.runtime.callFunction("A_ONE")
+        assertContentEquals(listOf("OVR-ONE"), direct.console.loggedLines(), "按名直调走覆盖者")
+
+        // 判据的另一半：base 段里 `A_TWO → CALL A_ONE` 的调用点一字节没动（下方 linked 前的
+        // base 产物就是 compileBase 的原实例），运行期靠 dispatch 把它带到覆盖者。
+        val viaBaseCallSite = GameSession(root, base, baseMeta(metas), modChain = plan)
+        viaBaseCallSite.runtime.callFunction("A_TWO")
+        assertContentEquals(
+            listOf("OVR-ONE"),
+            viaBaseCallSite.console.loggedLines(),
+            "base 调用点经 dispatch 也执行覆盖者（否则 684 处按名调用点仍打回原实现）",
+        )
+    }
+
+    @Test
+    fun `KI-2 缺base签名指纹转码不再拒_降级清单点名键`() {
+        // 2026-11-23 KI 改判（BOARD KI-2）：base 指纹缺失的覆盖键照常声明（链接期
+        // last-wins 放行 + ABI 未校验告警），键收进降级清单随 Transcoded 出口供
+        // 导入告警面消费；不再抛 IllegalArgumentException 不落半成品。
+        val (_, metas, counts) = compileBase()
+        val result = compileOverridePatch(baseMeta(metas), counts)
+        val t = PatchImportTranscoder.transcode(
+            result,
+            counts,
+            metas.associate { it.index to it.key },
+            "kojo.override",
+            { "" },
+        )
+        assertEquals(setOf("A_ONE"), t.descriptor.overrideFunctions, "缺指纹键照常声明覆盖")
+        assertEquals(listOf("A_ONE"), t.degradedOverrideKeys, "降级清单点名缺指纹键")
+    }
+
+    // ------------------------------------------------------------------
     // 判据 5：负控
     // ------------------------------------------------------------------
 
     @Test
-    fun `负控_直接CALL事件名拒绝并点名`() {
+    fun `S9改判_CALL事件名放行为导入不拒绝`() {
         val (_, metas, counts) = compileBase()
-        val bad = compilePatch(
+        val patched = compilePatch(
             baseMeta(metas),
             counts,
             source = """
@@ -336,8 +543,11 @@ class PatchImportTranscoderTest {
             """.trimIndent(),
             entry = "B_BAD",
         )
-        val e = assertFailsWith<IllegalArgumentException> { transcode(bad, counts, metas) }
-        assertTrue(e.message!!.contains("事件名"), e.message!!)
+        // S9 改判 T1/T2：事件名进 imports（链接期缺名残桩，运行期按 CompatiCallEvent
+        // 配置解析）；转码不再拒绝。
+        val t = transcode(patched, counts, metas)
+        assertTrue(t.imports.contains("EVENTSHOP"), t.imports.toString())
+        assertTrue(t.descriptor.externalCalls.contains("EVENTSHOP"), t.descriptor.externalCalls.toString())
     }
 
     @Test
@@ -364,5 +574,25 @@ class PatchImportTranscoderTest {
         )
         val e = assertFailsWith<IllegalArgumentException> { transcode(empty, counts, metas) }
         assertTrue(e.message!!.contains("空函数集"), e.message!!)
+    }
+
+    // ------------------------------------------------------------------
+    // 判据 6：产物版本号的 core 侧默认值
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `版本号_转码默认读数恒为1_与改造前逐字一致`() {
+        val (_, metas, counts) = compileBase()
+        val result = compilePatch(baseMeta(metas), counts)
+        val t = transcode(result, counts, metas)
+
+        // core 层只给历史默认值 "1"；作者版本由 app 导入端读包元数据后覆盖 descriptor 再编码
+        // （传导链见 ModImportPackMetaEndToEndTest）。这里守的是「不让 core 自己长出策略」。
+        assertEquals("1", t.descriptor.version, "core 默认读数必须与改造前硬编码值逐字相同")
+        assertEquals(
+            "1",
+            ManifestCodec.decode(ManifestCodec.encode(t.descriptor)).version,
+            "manifest 编解码往返不丢默认版本号",
+        )
     }
 }

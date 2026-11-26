@@ -53,6 +53,9 @@ variables, loading, save format, RNG, patch container, and error texts. See
 | `sqlite-adapter` | AndroidX SQLite adapter for the `SqlDriver` port: seeds bundled databases into writable copies with atomic refresh (platform wiring of the real SQLite engine) |
 | `mod-api` | RT2 Mod SDK API surface: entity / event / function / hook declarations and the host context |
 | `mod-family` / `mod-memory` / `mod-livingworld` | Built-in official Mods: family lineage, memory, living world (source of truth for the bundled manifests) |
+| `mod-registry` | Carrier registry: scans the `@ModCarrier`-annotated declaration objects across the `mod-*` modules at build time and generates the single `ModRegistry` (the host no longer names carrier modules one by one) |
+| `mod-template` | Mod author toolchain: a minimal carrier template skeleton (for copying only — it stays out of the production `ModRegistry`) |
+| `mod-testing` | Mod author toolchain: in-memory implementations of the `:mod-api` capability surface plus `runMod` assembly, so authors can exercise their Mod logic without booting the engine |
 | `tools/erbcc` | ERB / ERH → `erbc.v1` bytecode container compiler; corpus compilation, symbol audit, Rust parity wiring |
 | `tools/erbcc-rs` | Rust-side erbcc implementation (Cargo project) used for byte-for-byte parity against the Kotlin compiler |
 | `tools/modgen` | RT2 module / manifest generator (build entry for the built-in and demo Mods) |
@@ -77,12 +80,13 @@ Requires JDK 17+. Run all commands from the repository root.
 ./gradlew :tools:vmdbg:installDist  # debug CLI
 ```
 
-The CI-equivalent command runs all twelve modules:
+The CI-equivalent command runs all fifteen modules:
 
 ```bash
 ./gradlew --no-daemon \
   :core-vm:test :render:test :sqlite-adapter:test \
   :mod-api:test :mod-family:test :mod-memory:test :mod-livingworld:test \
+  :mod-registry:test :mod-testing:test :mod-template:test \
   :tools:erbcc:test :tools:modgen:test :tools:modgen-accessors:test \
   :tools:vmdbg:test :tools:uipreview:test
 ```

@@ -82,13 +82,18 @@ class BaseSignatureCatalogTest {
     private fun build(query: (String) -> String, modHash: String): SymbolCatalog =
         SymbolCatalog.build(baseOf(query) + modOf(modHash), ResolverPolicy.MODERN)
 
-    /** 断言空指纹被拒，且报告可定位（函数名 + 「签名信息不完整」）。 */
-    private fun assertRejected(table: Map<String, String>, modHash: String) {
-        val ex = assertFailsWith<OverrideSignatureException> {
-            build(BaseSignatureCatalog.signatureHashOf(table), modHash)
-        }
-        assertEquals(key, ex.key, "拒绝报告要点名函数键")
-        assertTrue(ex.message!!.contains("签名信息不完整"), "消息可定位，实际: ${ex.message}")
+    /** 断言空指纹/坏档形态按 KI 改判告警放行（原 fail-closed 拒装反转，BOARD KI-2）。 */
+    private fun assertDegradedAccepted(table: Map<String, String>, modHash: String) {
+        val diags = mutableListOf<String>()
+        val catalog = SymbolCatalog.build(
+            baseOf(BaseSignatureCatalog.signatureHashOf(table)) + modOf(modHash),
+            ResolverPolicy.MODERN,
+        ) { diags += it }
+        assertEquals(1, catalog.winnerIndexOf(key), "last-wins：覆盖者仍胜出")
+        assertTrue(
+            diags.any { it.contains(key) && it.contains("ABI 未校验") },
+            "缺指纹告警: $diags",
+        )
     }
 
     // ------------------------------------------------------------------
@@ -152,8 +157,8 @@ class BaseSignatureCatalogTest {
         val modHash = BaseSignatureCatalog.fingerprint(good)
 
         // 缺段（空文本）与旧档（无签名段）⇒ 读侧空表 ⇒ 空指纹 ⇒ 闸拒。
-        assertRejected(emptyMap(), modHash)
-        assertRejected(BaseSignatureCatalog.parse(oldMetaText()), modHash)
+        assertDegradedAccepted(emptyMap(), modHash)
+        assertDegradedAccepted(BaseSignatureCatalog.parse(oldMetaText()), modHash)
 
         // 缺任一要素 / 坏档形态的规范串 ⇒ 该条不进表 ⇒ 空指纹 ⇒ 闸拒，逐条断言。
         val badCanonicals = listOf(
@@ -169,14 +174,14 @@ class BaseSignatureCatalogTest {
         for (bad in badCanonicals) {
             val table = BaseSignatureCatalog.parse(withSection(record(bad)))
             assertTrue(table.isEmpty(), "坏规范串不得进表: $bad")
-            assertRejected(table, modHash)
+            assertDegradedAccepted(table, modHash)
         }
 
         // 段头计数非法 / 重复键 ⇒ 整段空表 ⇒ 闸拒。
         val badHeader = oldMetaText() + "signatures NaN\nsignature FOO $good\n"
-        assertRejected(BaseSignatureCatalog.parse(badHeader), modHash)
+        assertDegradedAccepted(BaseSignatureCatalog.parse(badHeader), modHash)
         val dup = withSection(record(good), record(good))
-        assertRejected(BaseSignatureCatalog.parse(dup), modHash)
+        assertDegradedAccepted(BaseSignatureCatalog.parse(dup), modHash)
     }
 
     // ------------------------------------------------------------------
@@ -194,12 +199,18 @@ class BaseSignatureCatalogTest {
         assertEquals(1, catalog.winnerIndexOf(key), "相等须放行且胜者为覆盖者")
         assertTrue(catalog.hasSuper(key), "覆盖者 super 链回指 base")
 
-        // 任一要素不等（哪怕只差一个默认值）⇒ 拒，且消息可定位「签名不一致」。
+        // 任一要素不等（哪怕只差一个默认值）⇒ 2026-11-23 KI 改判告警放行（原拒反转）。
         val otherHash = BaseSignatureCatalog.fingerprint(different)
         assertNotEquals(goodHash, otherHash, "差一个默认值 ⇒ 指纹不同")
-        val ex = assertFailsWith<OverrideSignatureException> { build(query, otherHash) }
-        assertEquals(key, ex.key)
-        assertTrue(ex.message!!.contains("签名不一致"), "消息可定位，实际: ${ex.message}")
+        val diags = mutableListOf<String>()
+        val mismatched = SymbolCatalog.build(
+            baseOf(query) + modOf(otherHash), ResolverPolicy.MODERN,
+        ) { diags += it }
+        assertEquals(1, mismatched.winnerIndexOf(key), "不一致指纹覆盖照样 last-wins 胜出")
+        assertTrue(
+            diags.any { it.contains(key) && it.contains("签名不一致") },
+            "不一致告警: $diags",
+        )
     }
 
     // ------------------------------------------------------------------

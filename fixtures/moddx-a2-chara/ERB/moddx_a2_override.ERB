@@ -1,0 +1,6 @@
+; MODDX3-A2 覆盖声明探针（探针②）：与 mini base 侧车的 A_ONE 同名。
+; 期望行为由 ModDx3CharaTrackProbeTest 的探针B1（无签名段 ⇒ 按覆盖装载放行、告警点名 ABI 未校验，
+; 且 catalog 归因 / sink 留痕 / 会话派发三层归因本包）与探针B2（签名段给得出指纹 ⇒ 声明式覆盖装载、无该告警）双侧钉死。
+@A_ONE
+PRINTL MODDX3-A2 覆盖探针
+RETURN 0

@@ -5,6 +5,7 @@ import com.eratw.port.core.data.save.SaveData
 import com.eratw.port.core.data.save.SaveFormat
 import com.eratw.port.core.data.save.SaveUnclaimedPassthrough
 import com.eratw.port.core.err.CodeEE
+import com.eratw.port.core.fn.EmDataNames
 import com.eratw.port.core.fn.EraDataState
 import com.eratw.port.core.fn.EmDataPools
 import com.eratw.port.core.fn.SaveFileKind
@@ -288,6 +289,7 @@ class FileSystemOps(
         // 阶段标记只为留痕（见 SaveDiagnostics 的类文档）：原版把这一段整个吞成 false，
         // 玩家报「不能覆盖旧存档」时无法区分「抓变量池失败 / 序列化失败 / 落盘失败」。
         var stage = "capture"
+        SaveDiagnostics.recordSaveFailure(null)
         try {
             return captureAndWrite(no, text, path) { stage = it }
         } catch (e: OutOfMemoryError) {
@@ -297,6 +299,7 @@ class FileSystemOps(
         } catch (e: Throwable) {
             // 原版 catch (Exception) { return false; }（VariableEvaluator.cs:2666-2669）
             SaveDiagnostics.report("SAVEDATA", path, stage, e, saveDirContext())
+            SaveDiagnostics.recordSaveFailure("stage=$stage ${e.javaClass.simpleName}: ${e.message}")
             return false
         }
     }
@@ -308,8 +311,10 @@ class FileSystemOps(
      *
      * ## 三条落盘路（SAVE-STREAM 波，2026-11-13）
      *
-     * - **侧车配对**（mod 总闸开）：`captureAndWritePair`。配对事务要拿 `.sav` 全字节算
-     *   CRC32 当绑定第三位，必须物化，故这条路保持原样。
+     * - **侧车配对**（mod 总闸开）：`captureAndWritePair`。事务要拿 `.sav` 全字节当成员载荷、
+     *   并用它算绑定第三位的 CRC32，所以**字节数组**必须成型；但发射本身就是
+     *   [SaveCapture.emitNormal] 直写那个 `ByteArrayOutputStream`，不经池级物化的
+     *   `SaveData`（2026-11-20 修：0.2.48 缺省开配对路后又把 OOM 请了回来）。
      * - **二进制**（eratw 生产口径 `SaveConfig.ERATW`）：[writeBinaryStream] —— payload
      *   逐条目直写，列走零拷贝视图，堆峰值与变量池大小**解耦**。
      * - **文本**（`SystemSaveInBinary=false`，非 eratw 口径）：[writeTextMaterialized] ——
@@ -437,9 +442,16 @@ class FileSystemOps(
             val settled = SavePlanExecutor.recoverAndExecute(txIo, sidecarJournalPathOf(path))
         ) {
             is SavePlanExecutor.ExecutionResult.Halted -> {
+                // port.warn 只进 mod 日志（进不了错误报告），这里补存档诊断环留痕：
+                // 否则 Halt 折成「SAVEDATA命令在存档时发生了意料之外的错误」后无现场。
+                SaveDiagnostics.report(
+                    "SAVEDATA", path, "recover-halt",
+                    IllegalStateException(settled.reason), saveDirContext(),
+                )
                 sidecar.port.warn(
                     "存档事务恢复判定 Halt，拒绝覆盖：slot=$no path=$path reason=${settled.reason}",
                 )
+                SaveDiagnostics.recordSaveFailure("存档事务恢复判定 Halt：${settled.reason}")
                 return false
             }
             else -> Unit
@@ -450,18 +462,8 @@ class FileSystemOps(
         val sink = sidecar.csvPlan?.let { plan ->
             ModCsvValueBagSink(plan) { message -> sidecar.port.warn(message) }
         }
-        val data = SaveCapture.normal(
-            store, text,
-            compressed = compressed(),
-            emData = emSets.save,
-            sink = sink,
-        )
-        mark("encode")
-        // .sav 新字节物化：同一编码器同一入参，产物与流式写逐字节一致（OOM 重试路同用例）。
-        val savBytes = java.io.ByteArrayOutputStream().use { buf ->
-            SaveCodec.writeTo(data, store.registry, config, buf)
-            buf.toByteArray()
-        }
+        // .sav 新字节（字节生产见类外的 [encodeSlotBytes]）。
+        val savBytes = encodeSlotBytes(store, text, SlotBytesPlan(config, emSets.save, sink, mark))
         val rt2Path = sidecarPathOf(path)
         val groups = sidecar.port.captureChunks(sink?.bag ?: ModCsvValueBag.EMPTY)
         val rt2Bytes = sidecar.port.captureRt2Bytes(
@@ -506,6 +508,7 @@ class FileSystemOps(
                     "SAVEDATA", path, "transaction",
                     IllegalStateException(result.reason), saveDirContext(),
                 )
+                SaveDiagnostics.recordSaveFailure("存档事务被拒（stage=transaction）：${result.reason}")
                 false
             }
         }
@@ -524,6 +527,10 @@ class FileSystemOps(
             val settled = SavePlanExecutor.recoverAndExecute(txIo, sidecarJournalPathOf(path))
         ) {
             is SavePlanExecutor.ExecutionResult.Halted -> {
+                SaveDiagnostics.report(
+                    "LOADDATA", path, "recover-halt",
+                    IllegalStateException(settled.reason), saveDirContext(),
+                )
                 sidecar.port.warn("读档事务恢复判定 Halt：slot=$no path=$path reason=${settled.reason}")
                 return
             }
@@ -645,6 +652,9 @@ class FileSystemOps(
         )
         if (reclaimed <= 0L) {
             SaveDiagnostics.report("SAVEDATA", path, "$firstStage(oom)", first, saveDirContext())
+            SaveDiagnostics.recordSaveFailure(
+                "stage=$firstStage OutOfMemoryError（回收 ${reclaimed / 1024}KiB，未重试）：${first.message}",
+            )
             return false
         }
         var stage = "capture(retry)"
@@ -653,9 +663,11 @@ class FileSystemOps(
         } catch (e: OutOfMemoryError) {
             // 重试又贴顶：不再循环，按失败收口（再来一次也只是再 OOM）。
             SaveDiagnostics.report("SAVEDATA", path, "retry(oom)", e, saveDirContext())
+            SaveDiagnostics.recordSaveFailure("stage=retry OutOfMemoryError：${e.message}")
             false
         } catch (e: Throwable) {
             SaveDiagnostics.report("SAVEDATA", path, stage, e, saveDirContext())
+            SaveDiagnostics.recordSaveFailure("stage=$stage ${e.javaClass.simpleName}: ${e.message}")
             false
         }
     }
@@ -672,32 +684,7 @@ class FileSystemOps(
      * 只报**相对**信息（目录名 + 文件名 + 体积），不报绝对路径：错误报告与 logcat 都可能
      * 被玩家贴到公开场合，`/data/user/0/<包名>/...` 没有诊断价值。
      */
-    private fun saveDirContext(): String = try {
-        describeSaveDir()
-    } catch (_: Throwable) {
-        // 本函数跑在**失败的 catch 块里**，其中就包括 OOM：列目录与字符串拼接都要分配内存，
-        // 在这里再抛一次会把「存档失败」升级成「进程崩溃」，比没有现场更糟。
-        "现场不可用"
-    }
-
-    private fun describeSaveDir(): String {
-        val rooted = io as? RootedSaveFileIo ?: return "io=${io.javaClass.simpleName}（无目录面）"
-        val dir = if (config.useSaveFolder) rooted.rootedPath.resolve(SaveFolderMigration.SAV_FOLDER)
-        else rooted.rootedPath
-        val label = if (config.useSaveFolder) "sav/" else "<root>"
-        val entries = runCatching {
-            if (!java.nio.file.Files.isDirectory(dir)) emptyList()
-            else java.nio.file.Files.list(dir).use { s ->
-                s.map { p ->
-                    val size = runCatching { java.nio.file.Files.size(p) }.getOrNull()
-                    "${p.fileName}(${size ?: "?"})"
-                }.sorted().toList()
-            }
-        }.getOrElse { listOf("<列目录失败 ${it.javaClass.simpleName}>") }
-        return "dir=$label 存在=${java.nio.file.Files.isDirectory(dir)} " +
-            "binary=${config.systemSaveInBinary} zip=${config.zipSaveData} " +
-            "条目=${entries.ifEmpty { listOf("(空)") }}"
-    }
+    private fun saveDirContext(): String = saveDirContextOf(io, config)
 
     /**
      * [SystemOps.loadData]：成功即把整帧写回变量池；失败按原版抛 [CodeEE]。
@@ -745,12 +732,19 @@ class FileSystemOps(
         // applyTo 分配撞墙被这里包装成文案，挂因后一眼可辨）。
         @Suppress("TooGenericExceptionCaught")
         try {
-            data.applyTo(
-                store,
-                restoreCharacters = true,
-                setLastLoad = true,
-                floatSink = store::writeFloat,
-            )
+            // 读档前整表替换的作用域声明（task-55）：applyTo 内部对 NORMAL 档会
+            // deleteAllCharacters（core/data/save/SaveData.kt:325），但读档是「同一世界的
+            // 存档替换」——虚拟 NO / 关系身份归 .rt2 侧车（restoreBundle :142 并入），
+            // 清空处不得按世界重置回收投射身份面。作用域外的清空（DELALLCHARA /
+            // RESETDATA / 回标题）仍是世界重置语义，见 VariableStore.deleteAllCharacters。
+            store.withCharacterReplacement {
+                data.applyTo(
+                    store,
+                    restoreCharacters = true,
+                    setLastLoad = true,
+                    floatSink = store::writeFloat,
+                )
+            }
             // LoadVariableBinary 的第二段（EM 条目，:4095-4124）；接受集 = Save* ∪ Global*。
             EmDataPools.restore(store, data.emData, emSets.loadAccept)
         } catch (e: Throwable) {
@@ -846,8 +840,14 @@ class FileSystemOps(
             saveGlobalPairUnderTransaction(sidecar)
         } catch (e: CodeEE) {
             throw e
-        } catch (_: Throwable) {
-            throw CodeEE(MES_SAVE_GLOBAL)
+        } catch (e: Throwable) {
+            // 收敛成与原版一字不差的 CodeEE（见上），但异常本体必须留痕：否则玩家屏上只有
+            // MES_SAVE_GLOBAL 那一句、端点报告里查不到任何现场（0.2.48 的 SAVEGLOBAL 开局崩
+            // 就是被裸 catch 吃干净的 —— 现场只剩一句无归因文案）。
+            // 留痕走两条互补通道（0.2.47 扩散普查 族③）：SaveDiagnostics 进端点报告，
+            // initCause 把根因挂进 JVM 因果链 —— 口径同 loadData 两处（526c667cf / 本文件 :720-750）。
+            SaveDiagnostics.report("SAVEGLOBAL", config.globalPath(), "write", e, saveDirContext())
+            throw CodeEE(MES_SAVE_GLOBAL).apply { initCause(e) }
         }
     }
 
@@ -887,8 +887,13 @@ class FileSystemOps(
                 groups.orphanChunks,
             )
             savBytes to rt2
-        } catch (_: Throwable) {
-            throw CodeEE(MES_SAVE_GLOBAL)
+        } catch (e: Throwable) {
+            // 同样的收敛，但抓取段的异常本体必须留痕（见 saveGlobalPair 的收敛壳）：
+            // 「抓取抛了什么」与「落盘抛了什么」在报告里必须是两种 stage，抓取沿用
+            // 同文件既有口径 capture+encode（见 saveGlobal 的流式/物化两条路）。
+            // 双通道：SaveDiagnostics 进端点报告 + initCause 进因果链（族③口径）。
+            SaveDiagnostics.report("SAVEGLOBAL", config.globalPath(), "capture+encode", e, saveDirContext())
+            throw CodeEE(MES_SAVE_GLOBAL).apply { initCause(e) }
         }
         commitGlobalPairTransaction(txIo, path, bytes, rt2Bytes)
     }
@@ -987,6 +992,10 @@ class FileSystemOps(
             val settled = SavePlanExecutor.recoverAndExecute(txIo, sidecarJournalPathOf(path))
         ) {
             is SavePlanExecutor.ExecutionResult.Halted -> {
+                SaveDiagnostics.report(
+                    "LOADGLOBAL", path, "recover-halt",
+                    IllegalStateException(settled.reason), saveDirContext(),
+                )
                 sidecar.port.warn("全局档读事务恢复判定 Halt：path=$path reason=${settled.reason}")
                 return null
             }
@@ -1025,20 +1034,32 @@ class FileSystemOps(
                         SaveCapture.emitGlobal(store, w, emSets.global)
                     }
                 }
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                // 抓取/序列化在原版 catch 范围内（VariableEvaluator.cs:2476-2509）⇒ 同句收敛；
+                // 但异常本体必须留痕（2026-11-19 玩家「SYSTEM_TITLE 行14 SAVEGLOBAL」报障：
+                // 报告只有一句文案推不出根因），口径 = captureAndWrite 的 SAVEDATA 先例。
+                SaveDiagnostics.report("SAVEGLOBAL", path, "capture+encode", e, saveDirContext())
+                throw CodeEE(MES_SAVE_GLOBAL).apply { initCause(e) }
+            }
+            if (!ok) {
+                // IO 层的底层异常已由 RootedSaveFileIo 的 WRITE 留痕带出；这里补现场快照。
+                SaveDiagnostics.note("SAVEGLOBAL", path, "io.write 返回 false；现场=${saveDirContext()}")
                 throw CodeEE(MES_SAVE_GLOBAL)
             }
-            if (!ok) throw CodeEE(MES_SAVE_GLOBAL)
             return
         }
         // 文本格式（非 eratw 口径）：保持物化口径，理由同 [writeTextMaterialized]。
         val bytes = try {
             val data = SaveCapture.global(store, compressed = compressed(), emData = emSets.global)
             SaveCodec.write(data, store.registry, config)
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            SaveDiagnostics.report("SAVEGLOBAL", path, "capture+encode", e, saveDirContext())
+            throw CodeEE(MES_SAVE_GLOBAL).apply { initCause(e) }
+        }
+        if (!writeTreatOomAsFailure(path, bytes)) {
+            SaveDiagnostics.note("SAVEGLOBAL", path, "io.write 返回 false；现场=${saveDirContext()}")
             throw CodeEE(MES_SAVE_GLOBAL)
         }
-        if (!writeTreatOomAsFailure(path, bytes)) throw CodeEE(MES_SAVE_GLOBAL)
     }
 
     /** [SystemOps.loadGlobal]：true = RESULT 1。spec: VariableEvaluator.cs:2513-2589 */
@@ -1325,3 +1346,85 @@ private class EmLoadAccept(sets: EmSaveSets) {
     /** 容器名是否在当前装载接受集里（区分大小写，与 `HashSet<string>` 的默认序数比较同口径）。 */
     fun contains(name: String): Boolean = name in maps || name in xmls || name in dts
 }
+/**
+ * 存档目录的现场快照（诊断用，只在存档失败折点取）。
+ *
+ * 为什么要把目录清单也打出来：玩家报的「不能覆盖旧存档」在桌面（JVM）上复现不出来
+ * （同一份语料 + 同一份存档，覆盖 / 新建 / 删档三条链全绿，见
+ * `PluginSaveSlotFlowTest`），分叉只可能在 Android 侧的落盘。现场最需要的三件事是
+ * 「`SavDir` 到底解析到哪个目录 / 该目录在不在 / 里面已经有谁」，这三条拿到就能把
+ * 「目录口径不一致」与「写失败」区分开，而不必让玩家再复现一次。
+ *
+ * 只报**相对**信息（目录名 + 文件名 + 体积），不报绝对路径：错误报告与 logcat 都可能
+ * 被玩家贴到公开场合，`/data/user/0/<包名>/...` 没有诊断价值。
+ *
+ * 放在类体之外（2026-11-19）：纯「io + config → 字符串」的诊断函数不占类体规模，
+ * FileSystemOps 的类体按既有纪律保持在 LargeClass 闸内。
+ */
+private fun saveDirContextOf(io: SaveFileIo, config: SaveConfig): String = try {
+    describeSaveDirOf(io, config)
+} catch (_: Throwable) {
+    // 本函数跑在**失败的 catch 块里**，其中就包括 OOM：列目录与字符串拼接都要分配内存，
+    // 在这里再抛一次会把「存档失败」升级成「进程崩溃」，比没有现场更糟。
+    "现场不可用"
+}
+
+private fun describeSaveDirOf(io: SaveFileIo, config: SaveConfig): String {
+    val rooted = io as? RootedSaveFileIo ?: return "io=${io.javaClass.simpleName}（无目录面）"
+    val dir = if (config.useSaveFolder) rooted.rootedPath.resolve(SaveFolderMigration.SAV_FOLDER)
+    else rooted.rootedPath
+    val label = if (config.useSaveFolder) "sav/" else "<root>"
+    val entries = runCatching {
+        if (!java.nio.file.Files.isDirectory(dir)) emptyList()
+        else java.nio.file.Files.list(dir).use { s ->
+            s.map { p ->
+                val size = runCatching { java.nio.file.Files.size(p) }.getOrNull()
+                "${p.fileName}(${size ?: "?"})"
+            }.sorted().toList()
+        }
+    }.getOrElse { listOf("<列目录失败 ${it.javaClass.simpleName}>") }
+    return "dir=$label 存在=${java.nio.file.Files.isDirectory(dir)} " +
+        "binary=${config.systemSaveInBinary} zip=${config.zipSaveData} " +
+        "条目=${entries.ifEmpty { listOf("(空)") }}"
+}
+
+/**
+ * 槽档 `.sav` 的新字节。
+ *
+ * 二进制口径**直接流式发射**：配对事务要整份字节当成员载荷、还要拿它算绑定第三位的 CRC32，
+ * 所以字节数组本身必须成型；但不必再经 `SaveCapture.normal` 绕一圈「池级物化 → 回读成
+ * SaveData → 重编码」。那条绕路对单次 SAVEDATA 是 50 MiB 量级的瞬时分配，正是 0.2.47 用
+ * 流式直写治好的 OOM（`VariableEvaluator.cs:2591-2606` 原版就是活变量逐条直写、零副本）；
+ * 配对路 0.2.48 缺省开启后又把它请了回来。字节等价由 `SaveStreamByteIdentityTest` 的
+ * 「流式 vs 物化」对拍钉住（压缩两档）。
+ *
+ * 文本口径没有流式编码器（`SaveTextFormat` 逐行、只回 ByteArray），保持物化。
+ */
+private fun encodeSlotBytes(store: VariableStore, text: String, plan: SlotBytesPlan): ByteArray {
+    val config = plan.config
+    val compressed = config.systemSaveInBinary && config.zipSaveData
+    if (config.systemSaveInBinary) {
+        plan.mark("capture+encode")
+        return java.io.ByteArrayOutputStream().use { buf ->
+            SaveFormat.writeStreaming(compressed, buf) { w ->
+                SaveCapture.emitNormal(store, text, w, plan.emData, plan.sink)
+            }
+            buf.toByteArray()
+        }
+    }
+    plan.mark("capture")
+    val data = SaveCapture.normal(store, text, compressed = compressed, emData = plan.emData, sink = plan.sink)
+    plan.mark("encode")
+    return java.io.ByteArrayOutputStream().use { buf ->
+        SaveCodec.writeTo(data, store.registry, config, buf)
+        buf.toByteArray()
+    }
+}
+
+/** [encodeSlotBytes] 的入参束：口径、EM 名字表、CSV 注入面与阶段留痕回调。 */
+private class SlotBytesPlan(
+    val config: SaveConfig,
+    val emData: EmDataNames,
+    val sink: ModCsvValueBagSink?,
+    val mark: (String) -> Unit,
+)
