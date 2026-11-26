@@ -7,6 +7,7 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.util.Base64
+import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.test.Test
@@ -134,7 +135,16 @@ class RealCodeProductFixtureTest {
     }
 
     private fun putFixedEntry(zip: ZipOutputStream, name: String, bytes: ByteArray) {
-        zip.putNextEntry(zipEntry(name))
+        // STORED（不压缩）：条目字节 = 内容原样 ⇒ 内层 code.mod 的 sha256 **跨机稳定**。
+        // DEFLATE 的压缩流随 JDK 自带的 zlib 版本而变 ⇒ 内层 sha 会漂 ⇒ 连带改掉内容寻址
+        // 文件名 ⇒ 连带改掉外层包内容 ⇒ 冻结夹具在别的 JDK 上判红（2026-11-27 在 Linux CI
+        // 上实测）。这里要的是**跨机稳定的内容寻址**，不是压缩率。
+        val entry = zipEntry(name)
+        entry.method = ZipEntry.STORED
+        entry.size = bytes.size.toLong()
+        entry.compressedSize = bytes.size.toLong()
+        entry.crc = CRC32().apply { update(bytes) }.value
+        zip.putNextEntry(entry)
         zip.write(bytes)
         zip.closeEntry()
     }
@@ -175,27 +185,27 @@ class RealCodeProductFixtureTest {
 
         /** 真产物 Base64（与 app 侧 `ModImportRealCodeProductEndToEndTest.FIXTURE_BASE64` 同源）。 */
         const val REAL_PACK_BASE64 =
-        "UEsDBBQACAgIAAAAIQAAAAAAAAAAAAAAAAAIAAkAY29kZS5tb2RVVAUAAYA1zhIL8GZmEWHg4OBgYGBQZEAG3AycDMk5icXFqcV6" +
-        "KakVoSGsDIwNpueEvD3XPjAyMEtlYAjwZufY+eS3IRdQNUh/AE6zeIFm5SbmZaalFpfoZRXn58FNWx2m5eFzzs/H/6tP4KagU+fO" +
-        "n7puamTk6WPsbxpwKVDLW1fr3JnzzKckmCpXVqq6TmX9ObNS1aHxyZ+YvVcWHZlUtPfJnylXQhaH2KYrvM2a8mr2fKaQ2RETJNku" +
-        "50Rwg9239cWNPTFAF6SB3cfIJMKAcCGy20G+RQXY/I5uArLpvCgm+AAxdh8HeLOygVQwAWEbkH4DVg8AUEsHCFtXnhHuAAAAiAEA" +
-        "AFBLAwQUAAgICAAAACEAAAAAAAAAAAAAAAAADwAJAGVyYXR3LXBhY2suanNvblVUBQABgDXOEqtWKk7OSM1NVLIy1FEqSEzOTkxP" +
-        "9UxRslLKzs/K1zUyMklMM081UNJRKkstKs7MzwPKGOoZKNUCAFBLBwiVgbsdOQAAADgAAABQSwMEFAAICAgAAAAhAAAAAAAAAAAA" +
-        "AAAAAB8ACQBrb2pvLTIyNGFmN2UwLmFzc2V0cy9SRUFETUUudHh0VVQFAAGANc4SS85PSdVNNUpVSCwuTi3hAgBQSwcINNsf7BEA" +
-        "AAAPAAAAUEsDBBQACAgIAAAAIQAAAAAAAAAAAAAAAAAIAAkAbWFpbi5FUkJVVAUAAYA1zhJzcIr3cPXx8edydvTxUXCM9/dz1TDW" +
-        "5AoI8vQL8VEAS8UHOIY4e3AFuYaEBvkpGHABAFBLBwj6BXSzMgAAADMAAABQSwECFAAUAAgICAAAACEAW1eeEe4AAACIAQAACAAJ" +
-        "AAAAAAAAAAAAAAAAAAAAY29kZS5tb2RVVAUAAYA1zhJQSwECFAAUAAgICAAAACEAlYG7HTkAAAA4AAAADwAJAAAAAAAAAAAAAAAt" +
-        "AQAAZXJhdHctcGFjay5qc29uVVQFAAGANc4SUEsBAhQAFAAICAgAAAAhADTbH+wRAAAADwAAAB8ACQAAAAAAAAAAAAAArAEAAGtv" +
-        "am8tMjI0YWY3ZTAuYXNzZXRzL1JFQURNRS50eHRVVAUAAYA1zhJQSwECFAAUAAgICAAAACEA+gV0szIAAAAzAAAACAAJAAAAAAAA" +
-        "AAAAAAATAgAAbWFpbi5FUkJVVAUAAYA1zhJQSwUGAAAAAAQABAAaAQAAhAIAAAAA"
+        "UEsDBBQACAgIAAAAIQAAAAAAAAAAAAAAAAAIAAkAY29kZS5tb2RVVAUAAYA1zhIL8GZm4WJg4GAAAkWGnU9+G4KYIMzNwMmQ" +
+        "nJNYXJxarJeSWhEawsrA2GB6TgjI5jIwNmUIQNG59cWNPWlAFgjzAnXmJuZlpqUWl+hlFefnwfVWKxUkJmcnpqd6pihZKWXn" +
+        "Z+XrGhmZJKaZpxoo6SiVpRYVZ+bnAWUMgbzUvJKiyoL8zLwSoEByfq5ealFiSblecn5KaqpRqp4zkHY1SvXNTwGqTSzIDINp" +
+        "NqwN8GZk4mLA7StUgM2P6Cag+w4BrIAYu18DvFnZQCqYgLANSF8BqwcAUEsHCFFqHi7TAAAAcAEAAFBLAwQUAAgICAAAACEA" +
+        "AAAAAAAAAAAAAAAADwAJAGVyYXR3LXBhY2suanNvblVUBQABgDXOEqtWKk7OSM1NVLIy1FEqSEzOTkxP9UxRslLKzs/K1zUy" +
+        "MklMM081UNJRKkstKs7MzwPKGOoZKNUCAFBLBwiVgbsdOQAAADgAAABQSwMEFAAICAgAAAAhAAAAAAAAAAAAAAAAAB8ACQBr" +
+        "b2pvLTIyNGFmN2UwLmFzc2V0cy9SRUFETUUudHh0VVQFAAGANc4SS85PSdVNNUpVSCwuTi3hAgBQSwcINNsf7BEAAAAPAAAA" +
+        "UEsDBBQACAgIAAAAIQAAAAAAAAAAAAAAAAAIAAkAbWFpbi5FUkJVVAUAAYA1zhJzcIr3cPXx8edydvTxUXCM9/dz1TDW5AoI" +
+        "8vQL8VEAS8UHOIY4e3AFuYaEBvkpGHABAFBLBwj6BXSzMgAAADMAAABQSwECFAAUAAgICAAAACEAUWoeLtMAAABwAQAACAAJ" +
+        "AAAAAAAAAAAAAAAAAAAAY29kZS5tb2RVVAUAAYA1zhJQSwECFAAUAAgICAAAACEAlYG7HTkAAAA4AAAADwAJAAAAAAAAAAAA" +
+        "AAASAQAAZXJhdHctcGFjay5qc29uVVQFAAGANc4SUEsBAhQAFAAICAgAAAAhADTbH+wRAAAADwAAAB8ACQAAAAAAAAAAAAAA" +
+        "kQEAAGtvam8tMjI0YWY3ZTAuYXNzZXRzL1JFQURNRS50eHRVVAUAAYA1zhJQSwECFAAUAAgICAAAACEA+gV0szIAAAAzAAAA" +
+        "CAAJAAAAAAAAAAAAAAD4AQAAbWFpbi5FUkJVVAUAAYA1zhJQSwUGAAAAAAQABAAaAQAAaQIAAAAA"
 
         /** 代码产物 sha256 前 16 位十六进制（app 侧 `<sha16>.mod` 的文件名主体）。 */
-        const val SHA16_HEX = "1c0db36226c68428"
+        const val SHA16_HEX = "dcdcd9e5844cefed"
 
         /** 整包 sha256（跨模块哨兵，与 app 侧两个 e2e 测试的同名常量同值）。 */
         /** 真产物 zip 的**内容摘要**（与 app 侧 `FIXTURE_ZIP_CONTENT_SHA` 同值；跨机可比）。 */
         const val FIXTURE_ZIP_CONTENT_SHA =
-            "67cf96333bd29a61739f000a61b7282878461b34d5331c77a5630c952678a9b9"
+            "444ad36fd4beb5d9d1dd6fdd7c1c885ded8d7c52ac6e58e543112143c2cb0e80"
 
         fun zipEntry(name: String): ZipEntry = ZipEntry(name).apply { setTimeLocal(FIXED_ENTRY_TIMESTAMP) }
 
