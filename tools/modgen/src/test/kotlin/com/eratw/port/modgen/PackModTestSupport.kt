@@ -1,10 +1,13 @@
 package com.eratw.port.modgen
 
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -62,6 +65,31 @@ internal fun sha256Of(run: PackRun): String {
 }
 
 /** 读 zip 中央目录的条目名，保持写盘顺序。 */
+/**
+ * zip 内容摘要（跨机可比）。
+ *
+ * 只取**条目名 + 未压缩字节**：压缩流随 JDK 自带的 zlib 版本而变，同一份内容在不同
+ * JDK 上压出来的原始字节可能不同（2026-11-27 在 Linux CI 上实测判红，而解包后的
+ * 条目内容逐字节相同）。要冻的是**包内容**这条合同，不是压缩实现的副产品。
+ */
+internal fun zipContentDigest(zipBytes: ByteArray): String {
+    val perEntry = sortedMapOf<String, ByteArray>()
+    ZipInputStream(ByteArrayInputStream(zipBytes)).use { zis ->
+        while (true) {
+            val entry = zis.nextEntry ?: break
+            perEntry[entry.name] = zis.readBytes()
+        }
+    }
+    val digest = MessageDigest.getInstance("SHA-256")
+    for ((name, content) in perEntry) {
+        digest.update(name.toByteArray(Charsets.UTF_8))
+        digest.update(0)
+        digest.update(MessageDigest.getInstance("SHA-256").digest(content))
+        digest.update(0)
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
 internal fun entryNames(zip: Path): List<String> =
     ZipFile(zip.toFile()).use { file -> file.entries().asSequence().map { it.name }.toList() }
 

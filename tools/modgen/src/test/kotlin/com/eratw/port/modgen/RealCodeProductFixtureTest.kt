@@ -37,7 +37,7 @@ import org.junit.jupiter.api.io.TempDir
  * `NewModTemplates`/`PackModZip` 格式的波次必须同步刷新 [REAL_PACK_BASE64] 与 app 侧同名常量
  * （本类每次运行都会把最新 Base64 写到 `tools/modgen/build/code-e2e-fixture.txt`，一条命令可重取）。
  *
- * 跨模块哨兵（entrymanifest 波之后，内层清单带 `entrypoint`）：[FIXTURE_ZIP_SHA256]（整包 sha256）
+ * 跨模块哨兵（entrymanifest 波之后，内层清单带 `entrypoint`）：[FIXTURE_ZIP_CONTENT_SHA]（包内容摘要）
  * 与 [SHA16_HEX]（内层 `code.mod` sha256 前 16 位）在 app 侧
  * `ModImportRealCodeProductEndToEndTest` / `ModCodeCarrierAssemblyEndToEndTest` 有同值常量，两侧
  * 各自对本侧解码字节复算后断言；只重钉一侧 Base64 或只改一侧 digest 都会在那一侧红。
@@ -103,7 +103,10 @@ class RealCodeProductFixtureTest {
 
         val base64 = Base64.getEncoder().encodeToString(Files.readAllBytes(first))
         // app 侧对本侧解码字节复算同一整包 sha256（跨模块哨兵），只重钉一侧时那一侧必红。
-        assertEquals(FIXTURE_ZIP_SHA256, sha256Hex(Files.readAllBytes(first)))
+        // app 侧对本侧解码字节复算同一**内容摘要**（跨模块哨兵），只重钉一侧时那一侧必红。
+        // 比内容摘要而非整包 sha256：压缩流随 JDK 的 zlib 版本而变，跨机不可比（2026-11-27
+        // 在 Linux CI 上实测判红，解包后的条目内容逐字节相同）。
+        assertEquals(FIXTURE_ZIP_CONTENT_SHA, zipContentDigest(Files.readAllBytes(first)))
         // 内层清单键序/入口的写侧 pin：app 侧装载面靠 `entrypoint` 解析入口类，键序由
         // `encodeInnerManifest` 固定（改序 = 同步重钉两侧的显式契约，不是读侧依赖）。
         assertEquals(
@@ -190,7 +193,9 @@ class RealCodeProductFixtureTest {
         const val SHA16_HEX = "1c0db36226c68428"
 
         /** 整包 sha256（跨模块哨兵，与 app 侧两个 e2e 测试的同名常量同值）。 */
-        const val FIXTURE_ZIP_SHA256 = "f4734bb9c6e3fa76b2663e8ff5dc05512b4c8a3f3612d58da1dc09e2c1da0d16"
+        /** 真产物 zip 的**内容摘要**（与 app 侧 `FIXTURE_ZIP_CONTENT_SHA` 同值；跨机可比）。 */
+        const val FIXTURE_ZIP_CONTENT_SHA =
+            "67cf96333bd29a61739f000a61b7282878461b34d5331c77a5630c952678a9b9"
 
         fun zipEntry(name: String): ZipEntry = ZipEntry(name).apply { setTimeLocal(FIXED_ENTRY_TIMESTAMP) }
 
