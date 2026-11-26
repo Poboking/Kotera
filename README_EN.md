@@ -108,6 +108,14 @@ self-contained. That is exactly the tier public CI runs.
 When `ERATW_CORPUS` is unset, corpus-dependent tasks such as `compileCorpus`
 fail with a clear message instead of silently producing an empty package.
 
+**The authoritative corpus root is the Kotera root** (`eratw-画蛇添足版eratw4.980`,
+NOW_VERSION 20260326). Every corpus-dependent frozen reading (the label counts in
+`ErbccCorpusProfile`, the `.webp` inventory in `WebpDecoderTest`, the `.als` aliases in
+`AliasLoaderTest`, the source anchors in `RandSfCorpusE2ETest`, …) is frozen against that
+root, and both public repos share one baseline — running against a different root will
+disagree with the frozen values, which is a **corpus version change**, not a regression.
+`RealCorpus` also probes that root by default (`GAME_DIR_NAME`).
+
 ### erbcc-rs parity
 
 The Rust side needs Cargo. Build it, then use the Gradle wiring:

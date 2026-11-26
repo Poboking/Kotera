@@ -173,11 +173,13 @@ class AliasLoaderTest {
         assertEquals(9, tables[0].keywordIndex("亲密"))
         assertEquals(9, tables[0].keywordIndex("親密"))
         assertEquals(42, tables[0].keywordIndex("战斗能力"))
-        // Base.als: 0,体力 与 CSV 同名；10,情绪 —— 261017 的 CSV 是 ムード、.als 双行（情绪/情緒），
-        // 261111 上游把 CSV 本身简体化成 情绪 并删掉 .als 的繁体情緒行 ⇒ 情緒 不再映射（null）。
+        // Base.als: 0,体力 与 CSV 同名；10,情绪 —— 权威语料根（Kotera 根 = 4.980 口径）的
+        // CSV 是 ムード、.als 双行（情绪/情緒）⇒ 情緒 也映射到 10。
+        // （4.981 档 261111 根把 CSV 简体化成 情绪 并删掉 .als 的繁体情緒行，那里是 null ——
+        //   本仓以 Kotera 根为权威，冻结读数按 4.980 口径。）
         assertEquals(0, tables[7].keywordIndex("体力"))
         assertEquals(10, tables[7].keywordIndex("情绪"))
-        assertEquals(null, tables[7].keywordIndex("情緒"), "261111 上游删了 .als 的繁体情緒别名行（CSV 已简体化为 情绪）；261017 此处 = 10")
+        assertEquals(10, tables[7].keywordIndex("情緒"), "权威语料根（4.980 口径）：.als 保留繁体情緒别名行；4.981 档 261111 删掉该行（那里 = null）")
         // Item.als: 0,ローター（与 CSV 同名），别名列后多余的金额列被忽略
         assertEquals(0, tables[6].keywordIndex("ローター"))
         // ex.als: 6,二重绝顶（CSV 是 二重絶頂）

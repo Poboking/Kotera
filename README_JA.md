@@ -107,6 +107,13 @@ CI と同等のコマンド（15 モジュールをまとめて実行）：
 `ERATW_CORPUS` が未設定の場合、`compileCorpus` などのコーパス依存タスクは
 空パッケージを黙って作らず、明確なエラーで停止します。
 
+**権威ある語料根 = Kotera 根**（`eratw-画蛇添足版eratw4.980`、NOW_VERSION 20260326）。
+語料関連の凍結読み数（`ErbccCorpusProfile` のラベル数、`WebpDecoderTest` の `.webp` 一覧、
+`AliasLoaderTest` の `.als` 別名、`RandSfCorpusE2ETest` の原文アンカー等）はすべてこの根で
+凍結しており、二つの公開倉は同一の基準を共有します —— 別の根で走ると凍結値と食い違いま
+すが、それは**語料世代の交代**であって回退ではありません。`RealCorpus` の既定探索も
+この根を指します（`GAME_DIR_NAME`）。
+
 ### erbcc-rs 対拍
 
 Rust 側には Cargo が必要です。ビルド後、Gradle 接続を使います：
