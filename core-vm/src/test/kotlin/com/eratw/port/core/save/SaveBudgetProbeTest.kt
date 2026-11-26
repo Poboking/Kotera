@@ -29,8 +29,9 @@ import kotlin.test.assertTrue
  * 3. 计量源确知不足：照旧 `Rejected` 且一个字节都不写 —— 证明闸没被上面两条架空。
  *
  * 「core-vm 主源集不许出现 getFileStore」的源码级机械闸不在这里：按 2026-11-19 的分工，
- * 它归 savedata lane 的 SaveVolumeProbeSentinelTest 独占（覆盖 core-vm + platform、
- * 抹注释与字符串），本 lane 不重复造第二套判据。
+ * 它归 savedata lane 的卷空间源码哨兵独占（覆盖 core-vm + platform、抹注释与字符串），
+ * 那道闸公开分仓后随壳层真源一起迁到壳层仓（eratw-pocket 的 com.eratw.port.sentinel），
+ * 本 lane 不重复造第二套判据。
  */
 class SaveBudgetProbeTest {
 

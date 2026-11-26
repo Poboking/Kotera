@@ -12,12 +12,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 壳层仓必须与本仓同级检出：pack 侧的三道打包限额闸（tools/modgen）要读壳层真源
+      # （app 侧 ModZipGuard / ModStore）比同源值 —— 那是 pack/app 对偶契约的一半，
+      # 另一半（app 侧 ModImportPackModGuardDualityTest）在壳层仓自己的 CI 里。
+      # 与壳层仓 CI 互检本仓是同一口径（各读对方 main，不触发对方 CI）。
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/eratw-pocket
+          ref: main
+          path: eratw-pocket
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
 
       - uses: gradle/actions/setup-gradle@v4
+
+      - name: 把 eratw-pocket 链接到本仓同级
+        run: ln -s "$GITHUB_WORKSPACE/eratw-pocket" "$GITHUB_WORKSPACE/../eratw-pocket"
 
       - name: 编译 + 单测
         # 语料 / 真产物 / 真存档依赖用例由 ERATW_* 环境变量门控：CI 上无变量时按

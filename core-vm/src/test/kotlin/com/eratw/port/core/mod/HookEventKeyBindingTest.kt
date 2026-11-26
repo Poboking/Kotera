@@ -19,7 +19,6 @@ import com.eratw.port.modapi.Registration
 import com.eratw.port.modapi.RuntimeScheduler
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
-import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -143,29 +142,5 @@ class HookEventKeyBindingTest {
             ctx.hooks.register("ANYTHING", HookPhase.PREFIX) { HookResult.Continue }
         }
         assertTrue(e.message!!.contains("槽未声明"), "空集口径 = 拼错闸旁路，实际：${e.message}")
-    }
-
-    @Test
-    fun `生产装配面灌的是并集_防回退哨兵`() {
-        // 防回退：ModRuntimeAssembly.attach 的灌源行必须含 events 键。直接读源码行（与
-        // ModContextImplTest 的 readSource 同口径），且回退成 bindings 单源时哨兵红。
-        val candidates = listOf(
-            File("app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt"),
-            File("../app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt"),
-            File("eratw-android/app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt"),
-            // 公开分仓后壳层真源在同级壳层仓（eratw-pocket），不在本仓工程根下。
-            File("../../eratw-pocket/app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt"),
-        )
-        // 壳层真源在同级壳层仓（eratw-pocket）：不在场时跳过（见 CallSharpOverrideTest 同口径）。
-        val file = candidates.firstOrNull { it.isFile }
-            ?: throw org.opentest4j.TestAbortedException(
-                "定位不到 ModRuntimeAssembly.kt（需同级检出壳层仓 eratw-pocket）：跳过壳层接线守卫" +
-                    "；cwd=${System.getProperty("user.dir")}",
-            )
-        val source = file.readText()
-        assertTrue(
-            source.contains("linkCatalog?.events?.keys?.let { addAll(it) }"),
-            "B4 防回退：hook 目标键灌源必须含事件键（bindings ∪ events 并集）",
-        )
     }
 }
