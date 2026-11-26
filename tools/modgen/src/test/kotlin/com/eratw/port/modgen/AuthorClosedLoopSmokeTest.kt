@@ -1,10 +1,12 @@
 package com.eratw.port.modgen
 
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Base64
+import java.util.zip.ZipInputStream
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -184,7 +186,16 @@ class AuthorClosedLoopSmokeTest {
             return
         }
         if (FIXTURE_BASE64.isNotEmpty()) {
-            assertContentEquals(fixtureZip(), bytes, FIXTURE_MISMATCH_HINT)
+            // 比**条目内容**（名 + 未压缩字节），不比 zip 的压缩字节流：压缩流随 JDK 自带的
+            // zlib 版本而变，同一份内容在不同 JDK 上压出来的字节可能不同（2026-11-27 在
+            // Linux CI 上实测：Windows 本机与 CI 的 zlib 不同 ⇒ 原始字节比对判红，而内容
+            // 逐字节相同）。冻结夹具要冻的是**包内容**这条合同，不是压缩实现的副产品。
+            val expected = zipEntries(fixtureZip())
+            val actual = zipEntries(bytes)
+            assertEquals(expected.keys.toList(), actual.keys.toList(), FIXTURE_MISMATCH_HINT)
+            for (name in expected.keys) {
+                assertContentEquals(expected.getValue(name), actual.getValue(name), "$FIXTURE_MISMATCH_HINT 条目=$name")
+            }
             return
         }
         val dump = repoRoot().resolve("build/author-loop-fresh.b64")
@@ -260,6 +271,18 @@ class AuthorClosedLoopSmokeTest {
     }
 
     private fun fixtureZip(): ByteArray = Base64.getDecoder().decode(FIXTURE_BASE64)
+
+    /** zip 条目内容（名 → 未压缩字节），按条目名排序；与压缩实现无关。 */
+    private fun zipEntries(zip: ByteArray): Map<String, ByteArray> {
+        val out = LinkedHashMap<String, ByteArray>()
+        ZipInputStream(ByteArrayInputStream(zip)).use { zis ->
+            while (true) {
+                val entry = zis.nextEntry ?: break
+                out[entry.name] = zis.readBytes()
+            }
+        }
+        return out.toSortedMap()
+    }
 
     private companion object {
         /** 作者写的、可编译的最小补丁源（app 侧导入段用配套的 mini base 夹具编译）。 */
