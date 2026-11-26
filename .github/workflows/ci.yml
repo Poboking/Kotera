@@ -16,11 +16,15 @@ jobs:
       # （app 侧 ModZipGuard / ModStore）比同源值 —— 那是 pack/app 对偶契约的一半，
       # 另一半（app 侧 ModImportPackModGuardDualityTest）在壳层仓自己的 CI 里。
       # 与壳层仓 CI 互检本仓是同一口径（各读对方 main，不触发对方 CI）。
+      #
+      # 检出目录放在 runner.temp（**本仓工作树之外**）：放进本仓目录下的话，本仓的
+      # 树遍历会把对方仓的源连同 "<对方仓>/" 前缀一起收进来 ⇒ 仓根相对键与冻结基线
+      # 对不上 ⇒ 跨仓守卫报假阳性。
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/eratw-pocket
           ref: main
-          path: eratw-pocket
+          path: ${{ runner.temp }}/eratw-pocket
 
       - uses: actions/setup-java@v4
         with:
@@ -30,7 +34,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: 把 eratw-pocket 链接到本仓同级
-        run: ln -s "$GITHUB_WORKSPACE/eratw-pocket" "$GITHUB_WORKSPACE/../eratw-pocket"
+        run: ln -s "${{ runner.temp }}/eratw-pocket" "$GITHUB_WORKSPACE/../eratw-pocket"
 
       - name: 编译 + 单测
         # 语料 / 真产物 / 真存档依赖用例由 ERATW_* 环境变量门控：CI 上无变量时按
