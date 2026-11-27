@@ -13,35 +13,39 @@ import java.util.zip.CRC32
  * 本文件只冻结**容器字节协议**（纯 ByteArray 进出，无文件 IO）；双文件 .part + fsync +
  * 定序 move + 崩溃补完、.bak 轮转、删除/复制/列表配对是 M4 SaveService 路次。
  *
- * 字节布局（大端）：
+ * 字节布局（大端；声明段为空时写 v2，非空时写 v3）：
  * ```
  * i32  魔数 "ERT2" = 0x45525432
- * u16  版本 = 1
+ * u16  版本 = 2 或 3；v1 直接拒载
  * i64  boundUniqueCode      ┐
  * i64  boundScriptVersion   ├ 绑定三元组（读取时三重校验）
  * i32  boundSaveTextHash    ┘
  * i32 + bytes  注册表快照（PackageShortIdRegistry.encode 原样字节）
  * i32 + bytes  虚拟 NO 注册表段（VirtualCharaNoRegistry.encode 原样字节；global.rt2 恒空）
- * i32 + bytes  实体图载荷（EntityKernel 序列化，M4 定内部格式）
+ * i32 + bytes  实体图载荷（EntityKernel 序列化）
  * i32          分片数（≤ 4096）
  *   每片：i32 + UTF-8 packageId，i32 + bytes 载荷（≤ 32 MiB）
- * i32  CRC32（以上全部字节的校验和，尾部）
+ * i32 + bytes  entity-ref 声明段（仅 v3；EntityRefDeclarationCodec.encode 原样字节）
+ * i32 + bytes  决策态段（可选，两态段同进退）
+ * i32 + bytes  任务态段（可选，两态段同进退）
+ * i32  CRC32（以上全部实际写入字节的校验和，尾部）
  * ```
  *
  * **v2（D-1，2026-11-08）**：新增「虚拟 NO 注册表段」。虚拟 NO ↔ EntityId 是每槽身份，
- * 读档必须先于实体图恢复（§16 第 6 点）。ABI-6 未冻结、无已发布存档 ⇒ **v1 直接拒载**，
- * 不做双版本读取面（同 [com.eratw.port.core.entity.EntityPayloadCodec] v1 的口径）。
+ * 恢复时虚拟 NO 先于实体图提交。ABI-6 未冻结、无已发布存档 ⇒ v1 直接拒载，不做双版本读取。
  *
  * **v2 增补尾段（W1-DSTATE，2026-11-14）**：分片之后新增**决策态段**与**任务态段**
  * （各为 `i32 + bytes` 定长 blob；载荷 = `DecisionStateCodec` / `JobSchedulerStateCodec`
  * 的 VERSION 2 输出，容器层不解释内容）。写入纪律：两段**要么都写、要么都不写**——
- * 任一载荷非空才追加（决策段在前、任务段在后），两段全空 = 与增补前逐字节同形
- * （global.rt2 与既有回归的字节不变性由这条保证）。读取纪律：分片读完后**有剩余字节
- * 才读尾段**，剩余字节不足两段 / 容量越界 / 读完后仍有剩余 = 容器损坏当场拒
- * （[SidecarFormatException]，既有 fail-closed 口径）。**旧档（增补前写入）无尾段 ⇒
- * 两段取空缺省回落，不拒载**——决策态回落「未初始化 seed（宿主熵派生）+ 无动态实例」、
- * 任务态回落「无实例」（CONTRACT-RT2-DSTATE 判据 1）；FORMAT_VERSION 维持 2 不 bump，
- * v1 直接拒载的既有纪律不变。CRC32 覆盖含尾段在内的全部字节（尾部校验和照旧）。
+ * 任一载荷非空才追加（决策段在前、任务态段在后），两段全空 = 与增补前逐字节同形。
+ * 读取纪律：分片读完后**有剩余字节才读尾段**；v2 无尾段时两段取空缺省回落，
+ * 剩余字节不足两段 / 容量越界 / 读完后仍有剩余 = 容器损坏当场拒载。
+ *
+ * **v3（ABI-2，2026-11-27）**：声明段固定在分片之后、可选状态尾段之前，使实体图之后新增
+ * 字段无需改变已有状态段的位置。声明段非空才 bump 到 v3，空声明保持 v2 字节形状；
+ * v2 仍可读取，声明按空集处理。v3 声明段截断、畸形、越界、重复或尾部多余字节均拒载，
+ * CRC32 覆盖声明段及全部实际写入字段。无声明段却需要跨设备重映射时由 SaveService
+ * fail-closed 拒绝，不在容器层猜测声明。
  *
  * **孤儿分片透传**：未激活 Mod 的分片在解码后原样保留、存盘时原样回写——
  * 容器层不解释分片内容，激活与否由 SaveService 判定。
@@ -110,12 +114,23 @@ class SidecarSaveBundle(
      * 缺省 [SidecarStateSegments.EMPTY] = 增补前的旧档形状，既有构造点零改动。
      */
     val stateSegments: SidecarStateSegments = SidecarStateSegments.EMPTY,
+    /** v3 固定声明段；空 = v2 旧档（无声明，禁止推断可安全重映射）。 */
+    val entityRefDeclarationPayload: ByteArray = ByteArray(0),
 ) {
     /** 决策态段原样字节（观察面；空 = 旧档无段，读取侧回落「未初始化 seed + 无动态实例」）。 */
     val decisionStatePayload: ByteArray get() = stateSegments.decisionState
 
     /** 任务态段原样字节（观察面；空 = 旧档无段，读取侧回落「无实例」）。 */
     val jobStatePayload: ByteArray get() = stateSegments.jobState
+
+    /** v3 声明清单（每次查询均严格解码；v2 恒空）。 */
+    val entityRefDeclarations: List<com.eratw.port.core.patch.DeclaredEntityRef>
+        get() = if (entityRefDeclarationPayload.isEmpty()) {
+            emptyList()
+        } else {
+            EntityRefDeclarationCodec.decode(entityRefDeclarationPayload)
+        }
+
     /** 读取侧绑定校验：三元组全等才允许应用本 sidecar。 */
     fun matchesBinding(other: SidecarBinding): Boolean = binding == other
 
@@ -142,12 +157,17 @@ class SidecarSaveBundle(
         require(stateSegments.jobState.size <= MAX_JOB_STATE_BYTES) {
             "任务态段超容量: ${stateSegments.jobState.size}"
         }
+        require(entityRefDeclarationPayload.size <= EntityRefDeclarationCodec.MAX_BYTES) {
+            "entity-ref 声明段超容量: ${entityRefDeclarationPayload.size}"
+        }
+        if (entityRefDeclarationPayload.isNotEmpty()) EntityRefDeclarationCodec.decode(entityRefDeclarationPayload)
+        val version = if (entityRefDeclarationPayload.isEmpty()) FORMAT_VERSION else FORMAT_VERSION_V3
         val writeStateSegments =
             stateSegments.decisionState.isNotEmpty() || stateSegments.jobState.isNotEmpty()
         val buf = ByteArrayOutputStream()
         val out = DataOutputStream(buf)
         out.writeInt(MAGIC)
-        out.writeShort(FORMAT_VERSION)
+        out.writeShort(version)
         out.writeLong(binding.uniqueCode)
         out.writeLong(binding.scriptVersion)
         out.writeInt(binding.saveTextHash)
@@ -159,6 +179,11 @@ class SidecarSaveBundle(
         out.write(entityGraphPayload)
         out.writeInt(chunks.size)
         writeChunks(out)
+        // v3：声明段固定在 chunks 之后、可选 decision/job 之前。
+        if (version == FORMAT_VERSION_V3) {
+            out.writeInt(entityRefDeclarationPayload.size)
+            out.write(entityRefDeclarationPayload)
+        }
         // v2 增补尾段：要么都写（决策段在前、任务段在后），要么都不写（旧档同形）。
         if (writeStateSegments) {
             writeStateSegments(out)
@@ -197,6 +222,9 @@ class SidecarSaveBundle(
         const val MAGIC: Int = 0x45525432
 
         const val FORMAT_VERSION: Int = 2
+
+        /** v3：chunks 后固定携带 entity-ref 声明段；v2 保持旧严格尾规则。 */
+        const val FORMAT_VERSION_V3: Int = 3
 
         /** 实体图载荷上界 64 MiB。 */
         const val MAX_GRAPH_BYTES: Int = 64 * 1024 * 1024
@@ -239,7 +267,9 @@ class SidecarSaveBundle(
             val input = DataInputStream(ByteArrayInputStream(bytes, 0, bodyLen))
             if (input.readInt() != MAGIC) fail("魔数不符")
             val version = input.readUnsignedShort()
-            if (version != FORMAT_VERSION) fail("版本 $version 不支持（本引擎 v$FORMAT_VERSION）")
+            if (version != FORMAT_VERSION && version != FORMAT_VERSION_V3) {
+                fail("版本 $version 不支持（本引擎 v$FORMAT_VERSION/v$FORMAT_VERSION_V3）")
+            }
             val binding = SidecarBinding(input.readLong(), input.readLong(), input.readInt())
 
             fun readBlob(cap: Int, what: String): ByteArray {
@@ -266,6 +296,14 @@ class SidecarSaveBundle(
                 if (name.isEmpty()) fail("空分片名")
                 chunks.add(PackageChunk(name, readBlob(MAX_CHUNK_BYTES, "分片 [$name]")))
             }
+            // v3 的声明段固定存在；v2 没有这一段，继续执行原严格 decision/job 尾规则。
+            val declarationPayload = if (version == FORMAT_VERSION_V3) {
+                readBlob(EntityRefDeclarationCodec.MAX_BYTES, "entity-ref 声明段").also {
+                    EntityRefDeclarationCodec.decode(it)
+                }
+            } else {
+                ByteArray(0)
+            }
             // v2 增补尾段：分片后有剩余字节才读（旧档无段 = 空缺省回落，不拒载）；
             // 有剩余但读不满两段 / 读完后仍有剩余 = 容器损坏，既有 fail-closed 口径。
             var segments = SidecarStateSegments.EMPTY
@@ -275,7 +313,7 @@ class SidecarSaveBundle(
                 if (input.available() != 0) fail("尾部多余字节")
                 segments = SidecarStateSegments(decision, jobState)
             }
-            return SidecarSaveBundle(binding, registry, graph, chunks, virtualNo, segments)
+            return SidecarSaveBundle(binding, registry, graph, chunks, virtualNo, segments, declarationPayload)
         }
     }
 }

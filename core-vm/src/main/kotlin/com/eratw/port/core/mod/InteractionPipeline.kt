@@ -23,7 +23,7 @@ import com.eratw.port.modapi.InteractionPhase as ModInteractionPhase
  * PRECONDITION → PRE → MAIN → POST → SETTLEMENT
  * ```
  *
- * 阶段钩子按「包链接序 + 包内注册序」确定性执行；MAIN 阶段的钩子先于主流程运行
+ * 阶段钩子按「priority 升序 → 包链接序 → 包内注册序」确定性执行；MAIN 阶段的钩子先于主流程运行
  * （返回 REPLACE 可跳过主流程），[main] 是默认主流程。BEFORE_MAIN 阶段已被 REPLACE
  * 时 MAIN 阶段（钩子与主流程）整体跳过，POST/SETTLEMENT 照常运行。
  *
@@ -56,6 +56,9 @@ class InteractionPipeline private constructor(
 
     private val packageRank: Map<String, Int> = buildMap {
         declarations.map { it.packageId }.distinct().forEachIndexed { index, pkg -> put(pkg, index) }
+    }
+    private val declaredPriority = declarations.associate {
+        BindingKey(it.declaration.phase, it.packageId) to it.declaration.priority
     }
 
     private val handlers = LinkedHashMap<BindingKey, MutableList<InteractionHandler>>()
@@ -264,6 +267,7 @@ class InteractionPipeline private constructor(
         val keys = handlers.keys.sortedWith(
             compareBy(
                 { it.phase.ordinal },
+                { declaredPriority[it] ?: 0 },
                 { packageRank[it.packageId] ?: Int.MAX_VALUE },
                 { it.packageId },
             ),

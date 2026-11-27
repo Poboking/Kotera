@@ -15,3 +15,28 @@ path = "src/lib.rs"
 [[bin]]
 name = "erbcc"
 path = "src/main.rs"
+
+# 语义对拍器（CONTRACT-RUSTFULL §6.2/§6.7）。路径放 src/cmd 而不是 src/bin：
+# 仓根 `.gitignore:35` 的 `bin/` 把 src/bin 整目录忽略（那条是给 Java/Gradle 产物用的），
+# 放在 src/bin 会入库失败且只报一句 "ignored by one of your .gitignore files"。
+[[bin]]
+name = "semdiff"
+path = "src/cmd/semdiff.rs"
+
+[[bin]]
+name = "firstdiff"
+path = "src/cmd/firstdiff.rs"
+
+# 容器重写闸（CONTRACT-RUSTFULL §6.4 P1.5）：读 .erbc → 模型 → 重写，要求逐字节相同。
+[[bin]]
+name = "rewrite"
+path = "src/cmd/rewrite.rs"
+
+# 词法对拍（P2-1）：与 Kotlin `erbcc dump-tokens` 同格式，两份 TSV 直接比 sha。
+[[bin]]
+name = "token-dump"
+path = "src/cmd/tokendump.rs"
+# 语句分派对拍（P2-2a）：与 Kotlin `erbcc dump-stmt` 同格式。
+[[bin]]
+name = "stmt-dump"
+path = "src/cmd/stmtdump.rs"

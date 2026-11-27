@@ -245,6 +245,37 @@ com.eratw.port.modapi.DimType | static fun values(): com.eratw.port.modapi.DimTy
 com.eratw.port.modapi.DimType | static val entries: kotlin.enums.EnumEntries<com.eratw.port.modapi.DimType>
 com.eratw.port.modapi.DimType | static field INT: com.eratw.port.modapi.DimType
 com.eratw.port.modapi.DimType | static field STR: com.eratw.port.modapi.DimType
+com.eratw.port.modapi.DurableStory | class
+com.eratw.port.modapi.DurableStory | val nodes: java.util.List<com.eratw.port.modapi.DurableStoryNode>
+com.eratw.port.modapi.DurableStoryBuilder | class
+com.eratw.port.modapi.DurableStoryBuilder | fun choose(java.lang.String, java.util.List<java.lang.String>, kotlin.jvm.functions.Function2<? super com.eratw.port.modapi.DurableStoryBuilder, ? super java.lang.Integer, kotlin.Unit>): void
+com.eratw.port.modapi.DurableStoryBuilder | fun say(java.lang.String): void
+com.eratw.port.modapi.DurableStoryKt | class
+com.eratw.port.modapi.DurableStoryKt | static fun durableStory(kotlin.jvm.functions.Function1<? super com.eratw.port.modapi.DurableStoryBuilder, kotlin.Unit>): com.eratw.port.modapi.DurableStory
+com.eratw.port.modapi.DurableStoryNode | interface
+com.eratw.port.modapi.DurableStoryNode | val id: int
+com.eratw.port.modapi.DurableStoryNode.Choice | class
+com.eratw.port.modapi.DurableStoryNode.Choice | fun component1(): int
+com.eratw.port.modapi.DurableStoryNode.Choice | fun component2(): java.lang.String
+com.eratw.port.modapi.DurableStoryNode.Choice | fun component3(): java.util.List<java.lang.String>
+com.eratw.port.modapi.DurableStoryNode.Choice | fun component4(): java.util.List<java.util.List<com.eratw.port.modapi.DurableStoryNode>>
+com.eratw.port.modapi.DurableStoryNode.Choice | fun copy(int, java.lang.String, java.util.List<java.lang.String>, java.util.List<? extends java.util.List<? extends com.eratw.port.modapi.DurableStoryNode>>): com.eratw.port.modapi.DurableStoryNode$Choice
+com.eratw.port.modapi.DurableStoryNode.Choice | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.DurableStoryNode.Choice | fun hashCode(): int
+com.eratw.port.modapi.DurableStoryNode.Choice | fun toString(): java.lang.String
+com.eratw.port.modapi.DurableStoryNode.Choice | val branches: java.util.List<java.util.List<com.eratw.port.modapi.DurableStoryNode>>
+com.eratw.port.modapi.DurableStoryNode.Choice | val id: int
+com.eratw.port.modapi.DurableStoryNode.Choice | val optionKeys: java.util.List<java.lang.String>
+com.eratw.port.modapi.DurableStoryNode.Choice | val promptKey: java.lang.String
+com.eratw.port.modapi.DurableStoryNode.Say | class
+com.eratw.port.modapi.DurableStoryNode.Say | fun component1(): int
+com.eratw.port.modapi.DurableStoryNode.Say | fun component2(): java.lang.String
+com.eratw.port.modapi.DurableStoryNode.Say | fun copy(int, java.lang.String): com.eratw.port.modapi.DurableStoryNode$Say
+com.eratw.port.modapi.DurableStoryNode.Say | fun equals(java.lang.Object): boolean
+com.eratw.port.modapi.DurableStoryNode.Say | fun hashCode(): int
+com.eratw.port.modapi.DurableStoryNode.Say | fun toString(): java.lang.String
+com.eratw.port.modapi.DurableStoryNode.Say | val id: int
+com.eratw.port.modapi.DurableStoryNode.Say | val textKey: java.lang.String
 com.eratw.port.modapi.EntityApi | interface
 com.eratw.port.modapi.EntityApi | fun create-wN9MBu4(java.lang.String): long
 com.eratw.port.modapi.EntityApi | fun destroy-RlEdmUU(long): boolean
@@ -551,6 +582,7 @@ com.eratw.port.modapi.IntSettingDecl | val title: java.lang.String
 com.eratw.port.modapi.InteractionApi | interface
 com.eratw.port.modapi.InteractionApi | fun registerHook(com.eratw.port.modapi.InteractionPhase, com.eratw.port.modapi.InteractionHandler): com.eratw.port.modapi.Registration
 com.eratw.port.modapi.InteractionApi | fun run(com.eratw.port.modapi.InteractionContext, kotlin.jvm.functions.Function0<? extends com.eratw.port.modapi.ModValue>): com.eratw.port.modapi.InteractionRunResult
+com.eratw.port.modapi.InteractionApi | fun runDurable(com.eratw.port.modapi.InteractionContext, com.eratw.port.modapi.DurableStory): com.eratw.port.modapi.InteractionRunResult
 com.eratw.port.modapi.InteractionContext | class
 com.eratw.port.modapi.InteractionContext | fun component1(): java.lang.String
 com.eratw.port.modapi.InteractionContext | fun component2-vmlZJTY(): long

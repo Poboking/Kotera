@@ -666,4 +666,47 @@ class QueueInputSinkTest {
         assertFalse(sink.awaitingAnyKey, "返回后标志必须清空")
         assertFalse(sink.isAwaiting)
     }
+
+    // ------------------------------------------------------------------
+    // 跳过开关的等待点读数（2026-11-26 右上角双箭头；供 UI 自动补 skip 去重）
+    // ------------------------------------------------------------------
+
+    /** 每条等待都发一个新序号：UI 靠它区分「同一条还没被消费」与「已经换页」。 */
+    @Test
+    fun `waitGeneration 每次进入等待点自增`() {
+        val sink = QueueInputSink()
+        val before = sink.waitGeneration
+        sink.submit("")
+        sink.readAnyKey(anyKey = false, stopMesSkip = false)
+        assertEquals(before + 1, sink.waitGeneration, "readAnyKey 进入等待点应自增")
+        sink.submitInt(1)
+        sink.waitInput(intRequest())
+        assertEquals(before + 2, sink.waitGeneration, "waitInput 进入等待点应自增")
+    }
+
+    /** `FORCEWAIT` 的 stopMesSkip 只在等待期间可见：壳层据此放行刹车页（原版 `:1453`）。 */
+    @Test
+    fun `stopMesSkip 只在等待期间可见 结束即复位`() {
+        val sink = QueueInputSink()
+        val started = CountDownLatch(1)
+        val t = thread(name = "stop-messkip-waiter") {
+            started.countDown()
+            sink.readAnyKey(anyKey = false, stopMesSkip = true)
+        }
+        assertTrue(started.await(2, TimeUnit.SECONDS), "等待线程应已启动")
+        val deadline = System.nanoTime() + 2_000_000_000L
+        while (!sink.awaitingAnyKey && System.nanoTime() < deadline) {
+            Thread.sleep(5)
+        }
+        assertTrue(sink.awaitingAnyKeyStopSkip, "FORCEWAIT 的任意键等待必须暴露跳过禁令")
+        sink.submit("")
+        t.join(2_000)
+        assertFalse(t.isAlive)
+        assertFalse(sink.awaitingAnyKeyStopSkip, "等待结束必须复位")
+
+        // 反空转自证：普通 WAIT（stopMesSkip=false）不得误报禁令。
+        sink.submit("")
+        sink.readAnyKey(anyKey = false, stopMesSkip = false)
+        assertFalse(sink.awaitingAnyKeyStopSkip)
+    }
 }

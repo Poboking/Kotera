@@ -226,7 +226,9 @@ class JobScheduler private constructor(
         handlers[key] = handler
         return object : Registration {
             override fun unregister() {
-                handlers.remove(key)
+                // 身份判据：只有当前映射仍是自己绑的处理器才移除。旧代 Registration 晚到
+                // （重装后又触发一次 unregister）不得删掉新一代处理器。
+                if (handlers[key] === handler) handlers.remove(key)
             }
         }
     }
@@ -245,7 +247,7 @@ class JobScheduler private constructor(
         templateHandlers[scope] = handler
         return object : Registration {
             override fun unregister() {
-                templateHandlers.remove(scope)
+                if (templateHandlers[scope] === handler) templateHandlers.remove(scope)
             }
         }
     }
@@ -304,12 +306,13 @@ class JobScheduler private constructor(
     fun instances(): List<JobInstance> =
         instanceById.values.sortedWith(compareBy({ it.atDay }, { it.instanceKey }))
 
-    /** 当前应触发的静态任务槽（确定性序；不推进任务态）。 */
-    fun dueJobs(now: GameTime): List<JobSlot> {
+    /** 当前应触发的静态任务槽（确定性序；不推进任务态）。[activePackages] 非 null 时只取活包。 */
+    fun dueJobs(now: GameTime, activePackages: Set<String>? = null): List<JobSlot> {
         if (slots.isEmpty()) return emptyList()
         val phaseKey = canonical(now.phase)
         val due = ArrayList<JobSlot>()
         for (slot in slots) {
+            if (activePackages != null && slot.packageId !in activePackages) continue
             val next = nextFire[slot.key] ?: continue
             if (next == DONE || next > now.day) continue
             if (phaseKey.isNotEmpty() && slot.phase != phaseKey) continue
@@ -320,13 +323,15 @@ class JobScheduler private constructor(
     }
 
     /**
-     * 触发全部到期任务（静态槽在前、动态实例在后，同一报告）：先推进任务态，再调用已绑定
-     * 处理器（失败隔离）。未绑定处理器的到期任务照常推进（不积压），但不计入 fired。
+     * 本拍到期的静态槽与动态实例统一推进（ABI-10：[activePackages] 非 null 时只推进活跃包）。
+     *
+     * 拆成 [runSlotHandler] / [runInstanceCatchUp] / [dueInstances] 三个私有步骤只为把本函数留在
+     * detekt 阈值内，行为逐位不变：槽先按 priority 序推进，实例再按模板 priority 序补跑。
      */
-    fun runDue(now: GameTime): JobRunReport {
-        val due = dueJobs(now)
-        val dueInstances = dueInstances(now)
-        if (due.isEmpty() && dueInstances.isEmpty()) {
+    fun runDue(now: GameTime, activePackages: Set<String>? = null): JobRunReport {
+        val due = dueJobs(now, activePackages)
+        val instances = dueInstances(now, activePackages)
+        if (due.isEmpty() && instances.isEmpty()) {
             return JobRunReport(fired = emptyList(), failures = emptyList())
         }
         val failures = ArrayList<JobRunFailure>()
@@ -336,82 +341,119 @@ class JobScheduler private constructor(
             nextFire[slot.key] = advance(slot, nextFire.getValue(slot.key), now.day)
             val handler = handlerSnapshot[slot.key] ?: continue
             fired += slot
-            try {
-                handler.run(JobContext(slot.packageId, slot.jobId, now))
-                recordJob(now, slot.packageId, slot.key, DiagnosticOutcome.OK, "OK", null)
-            } catch (t: Throwable) {
-                failures += JobRunFailure(slot.packageId, slot.jobId, t)
-                recordJob(now, slot.packageId, slot.key, DiagnosticOutcome.FAILED, "HANDLER_THREW", t)
-            }
+            runSlotHandler(handler, slot, now, failures)
         }
-
-        val firedInstances = ArrayList<JobInstance>()
-        val skipped = ArrayList<String>()
-        val truncations = ArrayList<CatchUpTruncation>()
+        val tally = InstanceCatchUpTally()
         val templateHandlerSnapshot = templateHandlers.toMap()
-        for (instance in dueInstances) {
+        for (instance in instances) {
             val template = templateByScope[scopeOf(instance.packageId, instance.templateKey)] ?: continue
-            val handler = templateHandlerSnapshot[template.scopeKey]
-            when (template.catchUp) {
-                JobCatchUp.MISS_ONCE -> {
-                    if (handler != null) {
-                        firedInstances += instance
-                        runInstance(handler, instance, GameTime(now.day, now.phase), failures)
-                    }
-                    instanceById[instance.instanceKey] = instance.copy(state = JobState.DONE)
-                }
-                JobCatchUp.MISS_SKIP -> {
-                    if (instance.atDay < now.day) {
-                        skipped += instance.instanceKey
-                    } else if (handler != null) {
-                        firedInstances += instance
-                        runInstance(handler, instance, GameTime(now.day, now.phase), failures)
-                    }
-                    instanceById[instance.instanceKey] = instance.copy(state = JobState.DONE)
-                }
-                JobCatchUp.REPLAY -> {
-                    val diff = now.day - instance.atDay
-                    val requested = if (diff == Long.MAX_VALUE) Long.MAX_VALUE else diff + 1L
-                    val limit = template.maxCatchUp ?: 0L
-                    val applied = if (requested > limit) limit else requested
-                    if (requested > limit) {
-                        truncations += CatchUpTruncation(instance.instanceKey, requested, applied)
-                    }
-                    if (handler != null) {
-                        firedInstances += instance
-                        var i = 0L
-                        while (i < applied) {
-                            runInstance(handler, instance, GameTime(instance.atDay + i, now.phase), failures)
-                            i++
-                        }
-                    }
-                    instanceById[instance.instanceKey] = instance.copy(state = JobState.DONE)
-                }
-            }
+            runInstanceCatchUp(template, instance, templateHandlerSnapshot[template.scopeKey], now, tally)
         }
-        return JobRunReport(fired, failures, firedInstances, skipped, truncations)
+        return JobRunReport(
+            fired,
+            failures + tally.failures,
+            tally.firedInstances,
+            tally.skipped,
+            tally.truncations,
+        )
     }
 
-    private fun dueInstances(now: GameTime): List<JobInstance> {
+    /** 单静态槽执行：成功与失败都记 JOB 诊断，异常只进 [failures]，不中断同拍其余槽。 */
+    private fun runSlotHandler(
+        handler: JobHandler,
+        slot: JobSlot,
+        now: GameTime,
+        failures: MutableList<JobRunFailure>,
+    ) {
+        try {
+            handler.run(JobContext(slot.packageId, slot.jobId, now))
+            recordJob(now, slot.packageId, slot.key, DiagnosticOutcome.OK, "OK", null)
+        } catch (t: Throwable) {
+            failures += JobRunFailure(slot.packageId, slot.jobId, t)
+            recordJob(now, slot.packageId, slot.key, DiagnosticOutcome.FAILED, "HANDLER_THREW", t)
+        }
+    }
+
+    /** 动态实例补跑的累计槽（把 4 个累计容器收成一个参数，避开 detekt LongParameterList）。 */
+    private class InstanceCatchUpTally {
+        val firedInstances: MutableList<JobInstance> = ArrayList()
+        val skipped: MutableList<String> = ArrayList()
+        val truncations: MutableList<CatchUpTruncation> = ArrayList()
+        val failures: MutableList<JobRunFailure> = ArrayList()
+    }
+
+    /** 单动态实例按 catchUp 策略补跑（MISS_ONCE / MISS_SKIP / REPLAY），末态统一置 DONE。 */
+    private fun runInstanceCatchUp(
+        template: JobTemplateSlot,
+        instance: JobInstance,
+        handler: JobHandler?,
+        now: GameTime,
+        tally: InstanceCatchUpTally,
+    ) {
+        when (template.catchUp) {
+            JobCatchUp.MISS_ONCE -> {
+                if (handler != null) {
+                    tally.firedInstances += instance
+                    runInstance(handler, instance, GameTime(now.day, now.phase), tally.failures)
+                }
+            }
+            JobCatchUp.MISS_SKIP -> {
+                if (instance.atDay < now.day) {
+                    tally.skipped += instance.instanceKey
+                } else if (handler != null) {
+                    tally.firedInstances += instance
+                    runInstance(handler, instance, GameTime(now.day, now.phase), tally.failures)
+                }
+            }
+            JobCatchUp.REPLAY -> {
+                val diff = now.day - instance.atDay
+                val requested = if (diff == Long.MAX_VALUE) Long.MAX_VALUE else diff + 1L
+                val limit = template.maxCatchUp ?: 0L
+                val applied = if (requested > limit) limit else requested
+                if (requested > limit) {
+                    tally.truncations += CatchUpTruncation(instance.instanceKey, requested, applied)
+                }
+                if (handler != null) {
+                    tally.firedInstances += instance
+                    var i = 0L
+                    while (i < applied) {
+                        runInstance(handler, instance, GameTime(instance.atDay + i, now.phase), tally.failures)
+                        i++
+                    }
+                }
+            }
+        }
+        instanceById[instance.instanceKey] = instance.copy(state = JobState.DONE)
+    }
+
+    private fun dueInstances(now: GameTime, activePackages: Set<String>?): List<JobInstance> {
         if (instanceById.isEmpty()) return emptyList()
         val phaseKey = canonical(now.phase)
-        val due = ArrayList<JobInstance>()
-        for (instance in instanceById.values) {
-            if (instance.state != JobState.PENDING) continue
-            if (instance.atDay > now.day) continue
-            val template = templateByScope[scopeOf(instance.packageId, instance.templateKey)] ?: continue
-            if (phaseKey.isNotEmpty() && template.phase != phaseKey) continue
-            due += instance
-        }
-        due.sortWith(
-            compareBy(
-                { templateOrder[scopeOf(it.packageId, it.templateKey)] ?: Int.MAX_VALUE },
-                { it.atDay },
-                { it.instanceKey },
-            ),
-        )
-        return due
+        return instanceById.values
+            .filter { isInstanceDue(it, now.day, phaseKey, activePackages) }
+            .sortedWith(instanceOrder)
     }
+
+    /** 单实例到期判据：[activePackages] 为 null 表示不筛包（golden 口径）。 */
+    private fun isInstanceDue(
+        instance: JobInstance,
+        day: Long,
+        phaseKey: String,
+        activePackages: Set<String>?,
+    ): Boolean =
+        (activePackages == null || instance.packageId in activePackages) &&
+            instance.state == JobState.PENDING &&
+            instance.atDay <= day &&
+            templateByScope[scopeOf(instance.packageId, instance.templateKey)]
+                ?.let { phaseKey.isEmpty() || it.phase == phaseKey } == true
+
+    /** 实例排序：模板 priority 前置键 - 模板声明序 - 到期日 - 实例键。 */
+    private val instanceOrder: Comparator<JobInstance> = compareBy(
+        { templateByScope[scopeOf(it.packageId, it.templateKey)]?.priority ?: Int.MAX_VALUE },
+        { templateOrder[scopeOf(it.packageId, it.templateKey)] ?: Int.MAX_VALUE },
+        { it.atDay },
+        { it.instanceKey },
+    )
 
     private fun runInstance(
         handler: JobHandler,
@@ -510,7 +552,36 @@ class JobScheduler private constructor(
      *
      * @throws IllegalArgumentException 快照内容对本调度器的声明面非法（fail-closed，不返回半恢复态）
      */
+    /** SaveService prepare 专用：完整校验任务态但不写调度器。 */
+    fun validateRestore(snapshot: JobSchedulerSnapshot) {
+        prepareRestore(snapshot)
+    }
+
     fun restore(snapshot: JobSchedulerSnapshot) {
+        val prepared = prepareRestore(snapshot)
+        nextFire.clear()
+        nextFire.putAll(prepared.nextFire)
+        instanceById.clear()
+        instanceById.putAll(prepared.instances)
+        nextSeq.clear()
+        nextSeq.putAll(prepared.nextSeq)
+    }
+
+    /** 装载失败回滚：只恢复本包动态任务态，静态槽与其它包不受影响。 */
+    internal fun restorePackageState(packageId: String, snapshot: JobSchedulerSnapshot) {
+        instanceById.keys.removeAll { it.startsWith("$packageId::") }
+        snapshot.instances.forEach { instanceById[it.instanceKey] = it }
+        nextSeq.keys.removeAll { it.startsWith("$packageId::") }
+        nextSeq.putAll(snapshot.nextSeqByTemplate)
+    }
+
+    private data class PreparedJobRestore(
+        val nextFire: Map<String, Long>,
+        val instances: Map<String, JobInstance>,
+        val nextSeq: Map<String, Long>,
+    )
+
+    private fun prepareRestore(snapshot: JobSchedulerSnapshot): PreparedJobRestore {
         val restoredNextFire = HashMap<String, Long>(slots.size * 2)
         for (slot in slots) {
             val next = snapshot.nextFireDays[slot.key]
@@ -540,12 +611,7 @@ class JobScheduler private constructor(
             val floor = instance.seq + 1L
             if ((restoredSeq[scope] ?: 0L) < floor) restoredSeq[scope] = floor
         }
-        nextFire.clear()
-        nextFire.putAll(restoredNextFire)
-        instanceById.clear()
-        instanceById.putAll(restoredInstances)
-        nextSeq.clear()
-        nextSeq.putAll(restoredSeq)
+        return PreparedJobRestore(restoredNextFire, restoredInstances, restoredSeq)
     }
 
     /** 一次调度运行报告（静态槽 fired/failures 语义与波 E 逐字一致）。 */

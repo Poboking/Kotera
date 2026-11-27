@@ -205,6 +205,39 @@ class ModApiContractTest {
         assertEquals(1, manifest.charaRoutes.size)
     }
 
+    @Test
+    fun `可挂起剧情构建器线性展开且节点 id 全剧情唯一`() {
+        val visited = mutableListOf<Int>()
+        val story = durableStory {
+            say("opening")
+            choose("pick", listOf("left", "right")) { option ->
+                visited += option
+                say("branch.$option")
+                choose("nested", listOf("a", "b")) { nested -> say("nested.$nested") }
+            }
+        }
+        assertEquals(listOf(0, 1), visited)
+        val ids = mutableListOf<Int>()
+        fun collect(nodes: List<DurableStoryNode>) {
+            nodes.forEach { node ->
+                ids += node.id
+                if (node is DurableStoryNode.Choice) node.branches.forEach(::collect)
+            }
+        }
+        collect(story.nodes)
+        assertEquals((0 until ids.size).toList(), ids)
+        assertEquals(ids.size, ids.distinct().size)
+    }
+
+    @Test
+    fun `可挂起剧情构建器拒绝非法文案键与选择形状`() {
+        assertThrows<IllegalArgumentException> { durableStory { say("UPPER") } }
+        assertThrows<IllegalArgumentException> { durableStory { say("") } }
+        assertThrows<IllegalArgumentException> { durableStory { choose("pick", listOf("only")) {} } }
+        assertThrows<IllegalArgumentException> { durableStory { choose("pick", listOf("same", "same")) {} } }
+        assertThrows<IllegalArgumentException> { durableStory { choose("pick", listOf("a", "B")) {} } }
+    }
+
     // ------------------------------------------------------------------
     // RT2 车次表 E 车 / P1-6 公开面形状闸（§22.5 / §23.4 E 行）
     // ------------------------------------------------------------------

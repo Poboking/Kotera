@@ -46,6 +46,21 @@ interface InteractionApi {
      * 当前 Mod 是本次互动的发起方；嵌套调用由引擎的上下文栈管理（§19.4.2）。
      */
     fun run(context: InteractionContext, main: () -> ModValue?): InteractionRunResult
+
+    /**
+     * 运行一段可挂起剧情。等待点复用引擎 INPUT/WAIT：构建后的剧情节点、已回答选择与恢复
+     * 游标写入本包 `.rt2` 保留分片；读档后由宿主从该记录继续，只重印当前选择提示与选项，
+     * 不重放已经输出的剧情前缀。
+     *
+     * 等待边界真源 = `core-vm` 的 `StatementExecutor.waitInput`（`StatementExecutor.kt:4166`）：
+     * 与 INPUT 一样依次发布帧、冻结选项、阻塞于 [com.eratw.port.core.host.InputSink.waitInput]，
+     * 交付后重新冻结帧；不另建轮询循环。
+     *
+     * 这是对 Kotlin 协程续体的显式可序列化替代：调用在玩家选择处阻塞，完成后才返回。
+     * 作者不维护状态机，也不持有协程 scope；剧情文案统一经 [StringsApi] 声明。
+     */
+    fun runDurable(context: InteractionContext, story: DurableStory): InteractionRunResult =
+        throw UnsupportedOperationException("当前交互宿主未装配可挂起剧情运行时")
 }
 
 /** 交互五阶段（映射引擎侧 `InteractionPhase`）。 */

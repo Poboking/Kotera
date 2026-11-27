@@ -16,6 +16,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -30,8 +31,8 @@ import kotlin.test.assertTrue
  * - **绑定校验先于任何写入**：三元组任一字段失配 ⇒ 零写入 + 结构化失配结果；
  * - 孤儿片逐字节透传（含 0x00/0xFF/0x0D 等会被文本层改写的字节）与分片分类冲突拒绝；
  * - global.rt2 实体载荷恒空、不触发脱水、且不可喂进槽恢复入口；
- * - 虚拟 NO 注册表随槽 .rt2 往返、global.rt2 恒空、宿主未装配时非空段 fail-closed；
- * - 恢复不预先清空内核（「先复位后解析」是宿主装载路的原版语义，ADR-005 不动）。
+ * - 同会话读档先预检再复位投影并替换实体，不保留上一槽实体；
+ * - 虚拟 NO 随槽 .rt2 权威往返（含空段清身份）、global.rt2 恒空、宿主未装配时非空段 fail-closed。
  */
 class SaveServiceTest {
 
@@ -258,15 +259,25 @@ class SaveServiceTest {
     }
 
     @Test
-    fun `恢复不预先清空内核`() {
+    fun `同会话读档替换旧实体并复位投射`() {
         val src = fixture()
-        src.k.create(2, "PERSON")
+        val saved = src.k.create(2, "PERSON")
+        src.k.setInt(saved, "level", 42L)
         val bundle = src.svc.captureBundle(binding)
+
         val dst = fixture()
-        dst.k.create(2, "PERSON") // 宿主尚未复位
-        val ex = assertFailsWith<IllegalArgumentException> { dst.svc.restoreBundle(bundle, binding) }
-        assertTrue("空内核" in ex.message!!, ex.message)
-        assertEquals(1, dst.k.liveCount, "复位是宿主装载路的原版语义（ADR-005），SaveService 不代劳")
+        dst.k.create(2, "PERSON")
+        val stale = dst.k.create(2, "PERSON")
+        dst.k.setStr(stale, "name", "stale")
+        dst.k.create(3, "PERSON")
+        dst.p.project(stale)
+
+        assertEquals(SaveService.RestoreOutcome.Applied, dst.svc.restoreBundle(bundle, binding))
+        assertTrue(dst.k.exists(saved))
+        assertEquals(42L, dst.k.getInt(saved, "level"))
+        assertFalse(dst.k.exists(stale), "上一槽实体不得残留")
+        assertEquals(1, dst.k.liveCount)
+        assertTrue(dst.p.projectedEntities().isEmpty(), "提交实体图前先复位投射身份")
     }
 
     // ------------------------------------------------------------------
@@ -307,17 +318,34 @@ class SaveServiceTest {
     }
 
     @Test
-    fun `虚拟NO分裂冲突时内核不灌且不半并`() {
+    fun `虚拟NO按槽替换且不保留上一槽身份`() {
         val src = fixture()
-        val no = src.vreg.allocate(src.k.create(2, "PERSON"))
+        val entity = src.k.create(2, "PERSON")
+        val no = src.vreg.allocate(entity)
         val bundle = src.svc.captureBundle(binding)
 
         val dst = fixture()
-        assertEquals(no, dst.vreg.allocate(777L), "构造同号不同实体")
-        val ex = assertFailsWith<IllegalArgumentException> { dst.svc.restoreBundle(bundle, binding) }
-        assertTrue("分裂" in ex.message!!, ex.message)
-        assertEquals(0, dst.k.liveCount, "冲突在并集期抛出：内核仍是空态")
-        assertEquals(777L, dst.vreg.entityOf(no), "两遍校验先于写入：本地映射未被半并覆盖")
+        dst.vreg.allocate(777L)
+        assertEquals(SaveService.RestoreOutcome.Applied, dst.svc.restoreBundle(bundle, binding))
+        assertEquals(entity, dst.vreg.entityOf(no))
+        assertNull(dst.vreg.virtualNoOf(777L), "槽档身份是权威集合，不是并集")
+        assertNull(dst.vreg.entityOf(no + 1))
+    }
+
+    @Test
+    fun `空虚拟NO段清身份但续发游标不回退`() {
+        val src = fixture(injectVirtualRegistry = false)
+        src.k.create(2, "PERSON")
+        val bundle = src.svc.captureBundle(binding)
+        assertTrue(bundle.virtualNoSnapshot.isEmpty())
+
+        val dst = fixture()
+        val stale = 777L
+        val used = dst.vreg.allocate(stale)
+        assertEquals(SaveService.RestoreOutcome.Applied, dst.svc.restoreBundle(bundle, binding))
+        assertNull(dst.vreg.entityOf(used))
+        assertEquals(0, dst.vreg.size)
+        assertEquals(used + 1, dst.vreg.allocate(stale), "清身份不等于把已发号退回分配池")
     }
 
     // ------------------------------------------------------------------

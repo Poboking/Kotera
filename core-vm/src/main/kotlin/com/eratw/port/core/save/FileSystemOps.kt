@@ -520,7 +520,7 @@ class FileSystemOps(
      * 判据（CONTRACT-RT2-C §5.2）：.sav 在而 .rt2 缺/坏 ⇒ 上警告不静默丢；绑定失配 ⇒
      * [SaveService.RestoreOutcome.BindingMismatch] 不抛、宿主上警告（端口实现负责留痕）。
      */
-    private fun restoreSidecarIfWired(no: Int, path: String, savBytes: ByteArray) {
+    private fun restoreSidecarIfWired(no: Int, path: String, savBytes: ByteArray, crossDevice: Boolean) {
         val sidecar = SidecarSaveWiring.of(store) ?: return
         val txIo = NioSaveTransactionIo(sidecar.transactionRoot)
         when (
@@ -549,8 +549,14 @@ class FileSystemOps(
             savBytesHash(savBytes),
         )
         try {
-            val restored = sidecar.port.restoreRt2(rt2, binding)
-            if (restored.applied) applyModCsvValues(sidecar, restored.csv)
+            val restored = if (crossDevice) {
+                val port = sidecar.port as? CrossDeviceSidecarStoragePort
+                    ?: throw IllegalArgumentException("当前侧车端口不支持显式跨设备恢复")
+                port.restoreRt2(rt2, binding, crossDevice = true)
+            } else {
+                sidecar.port.restoreRt2(rt2, binding)
+            }
+            if (restored.applied && !restored.csvApplied) applyModCsvValues(sidecar, restored.csv)
         } catch (t: Throwable) {
             sidecar.port.warn(
                 "读档 .rt2 恢复失败：slot=$no path=$rt2Path ${t.javaClass.simpleName}: ${t.message}",
@@ -691,7 +697,17 @@ class FileSystemOps(
      *
      * @throws CodeEE 文件不存在 / 头探测非 OK（`LoadCorruptedData`），或装载中途异常
      */
-    override fun loadData(no: Int) {
+    override fun loadData(no: Int) = loadData(no, crossDevice = false)
+
+    /** 导入他机存档的显式入口；不把注册表冲突悄悄降级成同设备恢复。 */
+    fun loadDataCrossDevice(no: Int) {
+        require(SidecarSaveWiring.of(store)?.port is CrossDeviceSidecarStoragePort) {
+            "当前侧车端口不支持显式跨设备恢复"
+        }
+        loadData(no, crossDevice = true)
+    }
+
+    private fun loadData(no: Int, crossDevice: Boolean) {
         val path = config.normalPath(no)
         val bytes = (if (io.exists(path)) io.read(path) else null)
             ?: throw CodeEE(MES_LOAD_CORRUPTED)
@@ -757,7 +773,7 @@ class FileSystemOps(
         // Process.cs:1860-1861 —— 先清函数栈、后置 LoadData_DataLoaded（顺序照原版）
         SaveLoadHandoff.requestDataLoaded(store)
         // RT2 C 车：.sav 原版语义已完整落地之后，才做 .rt2 侧车恢复（只警告不改变异常形状）。
-        restoreSidecarIfWired(no, path, bytes)
+        restoreSidecarIfWired(no, path, bytes, crossDevice)
     }
 
     /** [SystemOps.delData]。spec: VariableEvaluator.cs:2710-2721 */

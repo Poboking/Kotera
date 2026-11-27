@@ -69,6 +69,12 @@ private val USAGE_TEXT: String = """erbcc - EraBasic 编译器 (eratw-android)
   erbcc check --corpus <ERB目录> [--out <产物目录>]
   erbcc audit --corpus <ERB目录> [--game-root <游戏根>] [--out <TSV文件>] [--limit <N>] [--strict] [--allow <白名单>]
   erbcc audit --corpus <ERB目录> [--game-root <游戏根>] --roundtrip [--artifact-dir <产物目录>] [--limit <N>]
+  erbcc dump-builtins [--out <tsv>]     # 内建函数语义表（Rust 腿读表，替代手抄）
+  erbcc dump-opcodes [--out <tsv>]      # 指令/语句表：opcode 编号 + 别名 + kind 段
+  erbcc dump-fold [--out <tsv>]         # 常量折叠探针（输入 → 折叠结果，非「可折名单」）
+  erbcc dump-tokens <语料根> [--limit N] [--out <tsv>]  # 词法面夹具：逻辑行 + 逐行 token（P2-1 对拍面）
+  erbcc dump-funcodes [--out <tsv>]      # FunctionCode 全枚举 + BY_NAME（语句名→语句码真源）
+  erbcc dump-stmt <语料根> [--limit N] [--out <tsv>]  # 语句分派夹具：类名/语句码/参数形态（P2-2a 对拍面）
   erbcc --help
   erbcc --version
 
@@ -150,24 +156,40 @@ scan 选项:
 
 internal fun usageText(): String = USAGE_TEXT
 
+/** 子命令 → 处理器。返回值即进程退出码（`scan`/`symbols` 的处理器不返回码，这里补 0）。 */
+private val COMMANDS: Map<String, (List<String>) -> Int> = mapOf(
+    "scan" to { a -> cmdScan(a); 0 },
+    "symbols" to { a -> cmdSymbols(a); 0 },
+    "compile" to ::cmdCompile,
+    "compile-module" to ::cmdCompileModule,
+    "check" to ::cmdCheck,
+    "audit" to ::cmdAudit,
+    "dump-builtins" to ::cmdDumpBuiltins,
+    "dump-opcodes" to ::cmdDumpOpcodes,
+    "dump-fold" to ::cmdDumpFold,
+    "dump-tokens" to DumpTokens::run,
+    "dump-funcodes" to DumpFuncodes::run,
+    "dump-stmt" to DumpStmt::run,
+)
+
 fun main(args: Array<String>) {
-    val code = when {
-        args.isEmpty() -> { println(usageText()); 0 }
-        args[0] == "--help" -> { println(usageText()); 0 }
-        args[0] == "--version" -> { println("erbcc ${com.eratw.port.core.Version.VERSION}"); 0 }
-        args[0] == "scan" -> { cmdScan(args.drop(1)); 0 }
-        args[0] == "symbols" -> { cmdSymbols(args.drop(1)); 0 }
-        args[0] == "compile" -> cmdCompile(args.drop(1))
-        args[0] == "compile-module" -> cmdCompileModule(args.drop(1))
-        args[0] == "check" -> cmdCheck(args.drop(1))
-        args[0] == "audit" -> cmdAudit(args.drop(1))
-        else -> {
-            System.err.println("错误: 无法识别的参数: ${args.joinToString(" ")}")
-            System.err.println("使用 --help 查看用法。")
-            2
-        }
+    exitProcess(dispatch(args))
+}
+
+private fun dispatch(args: Array<String>): Int = when {
+    args.isEmpty() || args[0] == "--help" -> {
+        println(usageText())
+        0
     }
-    exitProcess(code)
+    args[0] == "--version" -> {
+        println("erbcc ${com.eratw.port.core.Version.VERSION}")
+        0
+    }
+    else -> COMMANDS[args[0]]?.invoke(args.drop(1)) ?: run {
+        System.err.println("错误: 无法识别的参数: ${args.joinToString(" ")}")
+        System.err.println("使用 --help 查看用法。")
+        2
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1546,3 +1568,4 @@ private fun jstr(s: String): String {
     sb.append("\"")
     return sb.toString()
 }
+

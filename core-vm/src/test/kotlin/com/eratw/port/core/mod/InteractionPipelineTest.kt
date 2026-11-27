@@ -59,6 +59,57 @@ class InteractionPipelineTest {
     }
 
     @Test
+    fun `多目标上下文原样送达五阶段`() {
+        val expected = context()
+        val pipeline = InteractionPipeline.of(
+            ModInteractionPhase.entries.map { hookDecl("pkgA", toEnginePhase(it)) },
+        )
+        val observed = mutableListOf<InteractionContext>()
+        for (phase in ModInteractionPhase.entries) {
+            pipeline.registerHook(phase, "pkgA") {
+                observed += it.interaction
+                InteractionResult.CONTINUE
+            }
+        }
+
+        pipeline.run(expected) { ModValue.of(1L) }
+
+        assertEquals(List(ModInteractionPhase.entries.size) { expected }, observed)
+        assertEquals(listOf(EntityId(2L), EntityId(3L)), observed.first().targets)
+        assertEquals(EntityId(2L), observed.first().primaryTarget)
+    }
+
+    @Test
+    fun `同阶段按priority再按包链接序且包内保持注册序`() {
+        val pipeline = InteractionPipeline.of(
+            listOf(
+                hookDecl("pkgA", InteractionPhase.PRE, priority = 9),
+                hookDecl("pkgB", InteractionPhase.PRE, priority = 0),
+                hookDecl("pkgC", InteractionPhase.PRE, priority = 9),
+            ),
+        )
+        val order = mutableListOf<String>()
+        pipeline.registerHook(ModInteractionPhase.PRE, "pkgA") {
+            order += "A1"
+            InteractionResult.CONTINUE
+        }
+        pipeline.registerHook(ModInteractionPhase.PRE, "pkgC") {
+            order += "C1"
+            InteractionResult.CONTINUE
+        }
+        pipeline.registerHook(ModInteractionPhase.PRE, "pkgA") {
+            order += "A2"
+            InteractionResult.CONTINUE
+        }
+        pipeline.registerHook(ModInteractionPhase.PRE, "pkgB") {
+            order += "B1"
+            InteractionResult.CONTINUE
+        }
+        pipeline.run(context()) { ModValue.of(1L) }
+        assertEquals(listOf("B1", "A1", "A2", "C1"), order)
+    }
+
+    @Test
     fun `precondition_interrupt_中止主流程与后续阶段`() {
         val pipeline = InteractionPipeline.of(
             listOf(
@@ -200,6 +251,35 @@ class InteractionPipelineTest {
         val result = pipeline.run(outer) { ModValue.of(1L) }
         assertEquals(listOf("OUTER", "OUTER", "2"), observed)
         assertEquals(ModValue.of(1L), result.returnValue)
+        assertEquals(0, pipeline.depth())
+        assertNull(pipeline.current())
+    }
+
+    @Test
+    fun `内层main抛异常被外层捕获后外层上下文与主流程继续`() {
+        val pipeline = InteractionPipeline.of(listOf(hookDecl("pkgA", InteractionPhase.PRE)))
+        val outer = context("OUTER")
+        val observed = mutableListOf<String>()
+        pipeline.registerHook(ModInteractionPhase.PRE, "pkgA") {
+            val current = pipeline.current()
+            if (current?.interactionId == "OUTER") {
+                val failure = assertThrows<IllegalStateException> {
+                    pipeline.run(context("INNER")) { error("inner-main-boom") }
+                }
+                observed += failure.message.orEmpty()
+                observed += pipeline.current()?.interactionId.orEmpty()
+            }
+            InteractionResult.CONTINUE
+        }
+        var mainRan = false
+        val result = pipeline.run(outer) {
+            mainRan = true
+            ModValue.of(1L)
+        }
+        assertEquals(listOf("inner-main-boom", "OUTER"), observed)
+        assertTrue(mainRan)
+        assertEquals(ModValue.of(1L), result.returnValue)
+        assertTrue(result.failures.isEmpty())
         assertEquals(0, pipeline.depth())
         assertNull(pipeline.current())
     }

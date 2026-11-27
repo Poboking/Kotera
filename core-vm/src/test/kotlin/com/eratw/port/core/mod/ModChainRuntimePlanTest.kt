@@ -218,6 +218,44 @@ class ModChainRuntimePlanTest {
     }
 
     @Test
+    fun `KI-GLOBAL-DIM—of(chain)聚合descriptor的globalDims且不弃catalog`() {
+        val linked = linked(listOf(overrideModule(overrideProgram(222L))))
+        // 第三方口上补丁的 global #DIM 随 descriptor 到装配链：of(chain) 必须把它们
+        // 聚合进 plan.globalDims（GameSession 运行期 declare 的消费者），且重建路不弃 catalog。
+        val gd = DimSpec(
+            "K53_CHILD_PERSONALITY",
+            isStr = true, dims = intArrayOf(4), isGlobal = true, isSavedata = true,
+        )
+        val gconst = DimSpec("K53C_TEST", isStr = false, dims = intArrayOf(), isConst = true)
+        val chain = AssembledChain(
+            program = linked.program,
+            descriptors = listOf(
+                ModuleDescriptor(
+                    packageId = "mod.kojo",
+                    globalDims = listOf(gd, gconst),
+                ),
+            ),
+            snapshot = null,
+            linked = linked,
+            eventRegistry = EventRegistry.of(linked.catalog),
+            hasOverrides = false,
+            byPassed = false,
+        )
+        val plan = requireNotNull(ModChainRuntimePlan.of(chain))
+        assertEquals(2, plan.globalDims.size, "补丁全局 #DIM 必须聚合进 plan 供运行期 declare")
+        assertTrue(plan.globalDims.any { it.name == "K53_CHILD_PERSONALITY" && it.isSavedata })
+        assertTrue(plan.globalDims.any { it.name == "K53C_TEST" && it.isConst })
+        assertTrue(plan.catalog === linked.catalog, "重建路必须载带 catalog 同一实例")
+    }
+
+    @Test
+    fun `KI-GLOBAL-DIM—旁路fromLinked的globalDims恒空`() {
+        val linked = linked(listOf(overrideModule(overrideProgram(222L))))
+        val plan = ModChainRuntimePlan.of(linked)
+        assertTrue(plan.globalDims.isEmpty(), "无 descriptor 的直派生路径不应带出全局 #DIM")
+    }
+
+    @Test
     fun `withPrivateDims重建路径也载带catalog`() {
         val linked = linked(listOf(overrideModule(overrideProgram(222L))))
         // descriptor 带 privateDims ⇒ of(chain) 走 withPrivateDims 重建路：判据 1 的

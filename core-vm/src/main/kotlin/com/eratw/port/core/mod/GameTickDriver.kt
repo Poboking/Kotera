@@ -39,17 +39,19 @@ class GameTickDriver(
      * 所以这里接一个相位计划，逐相位派发后才合并报告。**任务口径不变**：本边界仍以空相位
      * （不限相位）跑到期任务恰好一次 —— `App` 侧「空相位是裁定」旧用例的任务断言因此保持原样。
      *
+     * 生产多 Mod 接线传 [runJobs] = false：先让每个包派发完全部相位，再由宿主对全链共享任务
+     * 调度器调用一次 [JobScheduler.runDue]，避免首个包在后续包相位之前消费全链任务。
      * 诊断口径（fired 与 skipped 在读数上可分）：
      * - 到点且 fired > 0 ⇒ `OK` / `OK`，`phase` 为真实相位名（`DAY_START` 等）；
      * - 到点但没有处理器 ⇒ `SKIPPED` / `NO_HANDLERS`；
      * - 处理器绑了但本边界没轮到该相位 ⇒ `SKIPPED` / `PHASE_NOT_DUE`。
      */
-    fun tickTurn(day: Long, phasePlan: List<String>): GameTickReport {
-        val body = { tickTurnOnce(day, phasePlan) }
+    fun tickTurn(day: Long, phasePlan: List<String>, runJobs: Boolean = true): GameTickReport {
+        val body = { tickTurnOnce(day, phasePlan, runJobs) }
         return if (timing == null) body() else timing.measureValue(packageId, "tick") { body() }
     }
 
-    private fun tickTurnOnce(day: Long, phasePlan: List<String>): GameTickReport {
+    private fun tickTurnOnce(day: Long, phasePlan: List<String>, runJobs: Boolean): GameTickReport {
         val planned = phasePlan.map { it.trim().uppercase(Locale.ROOT) }.filter { it.isNotEmpty() }.distinct()
         val perPhase = planned.map { phase -> phase to phases.dispatch(GameTime(day = day, phase = phase)) }
         val phaseReport = PhaseRegistry.PhaseDispatchReport(
@@ -58,7 +60,7 @@ class GameTickDriver(
         )
         val notDue = (phases.boundPhases() - planned.toSet()).sorted()
         val jobTime = GameTime(day = day, phase = "")
-        val jobReport = jobs.runDue(jobTime)
+        val jobReport = if (runJobs) jobs.runDue(jobTime) else JobScheduler.JobRunReport(emptyList(), emptyList())
         val diagnostics = diagnostics
         if (diagnostics != null) {
             for ((phase, report) in perPhase) {

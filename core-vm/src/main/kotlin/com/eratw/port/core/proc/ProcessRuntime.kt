@@ -11,6 +11,7 @@ import com.eratw.port.core.code.RuntimeCallResolution
 import com.eratw.port.core.code.Opcode
 import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.SlotAddr
+import com.eratw.port.core.code.SymbolCatalog
 import com.eratw.port.core.code.VmConfig
 import com.eratw.port.core.code.VmHost
 import com.eratw.port.modapi.ModValue
@@ -238,8 +239,9 @@ class ProcessRuntime(
      * （[com.eratw.port.core.patch.LinkedProgram.catalog] 的 dispatch 数组）在会话
      * 装配点喂入，透传给 [VirtualMachine]。缺省 null = 无 Mod 产物快路径（行为与
      * 不带 Mod 的既有装配逐位一致）。装配点接线（LinkedProgram → 本参数 → VM）在
-     * M2-2 容器读取落地后由 mod 链完成；宿主名字通道（resolveFunctionIndex）的
-     * 胜者表接 catalog.bindings 归同一批接线。
+     * M2-2 容器读取落地后由 mod 链完成；宿主名字通道（resolveFunctionIndex）已统一消费
+     * catalog.bindings 的逻辑胜者，再映射到
+     * catalog.dispatch 的最终执行入口；无 catalog 时才消费本参数直通表。
      */
     val functionDispatch: IntArray? = null,
     /**
@@ -355,9 +357,23 @@ class ProcessRuntime(
      * 折不出值的位（[CallDefaultsCollector.unsupported]）保持 null，仍落隐式 0/""。
      */
     private val callDefaults: CallDefaults = emptyMap(),
+    /** 链接期符号真源；null 仅用于未接线的既有装置，名字通道保持 FunctionTable 回退。 */
+    val symbolCatalog: SymbolCatalog? = null,
 ) : VmHost {
 
     private val table: FunctionTable = functionTable
+
+    private fun nonEventMeta(name: String): FuncMeta? {
+        val catalog = symbolCatalog ?: return table.nonEvent(name)
+        val winner = catalog.winnerIndexOf(name)
+        return if (winner >= 0) table.byFunctionIndex(winner) else null
+    }
+
+    private fun executionEntry(meta: FuncMeta): Int =
+        symbolCatalog?.dispatch?.getOrNull(meta.index) ?: functionDispatch?.getOrNull(meta.index) ?: meta.index
+
+    private fun isEventName(name: String): Boolean = symbolCatalog?.eventMembersOf(name)?.isNotEmpty() == true ||
+        (symbolCatalog == null && table.eventCallOrder(name) != null)
 
     /**
      * 屏蔽表的下标位图（[Program.functions] 下标 → 是否屏蔽）+ 实际命中的函数名。
@@ -918,11 +934,12 @@ class ProcessRuntime(
      */
     private val userFunctionKinds: Map<String, UserFunctionKind> by lazy {
         buildMap {
-            for (m in table.all()) {
+            val nonEvents = symbolCatalog?.orderedBindings()?.mapNotNull { table.byFunctionIndex(it.physicalIndex) }
+                ?: table.all().filter { !it.isEvent }
+            for (m in nonEvents) {
                 if (m.isEvent) continue
                 if (m.position == "synthetic-event-entry" || m.position == "·event-entry·") continue
                 if ('#' in m.key) continue
-                if (table.eventCallOrder(m.key) != null) continue
                 put(
                     m.key.uppercase(),
                     when {
@@ -933,17 +950,31 @@ class ProcessRuntime(
                 )
             }
             if (compatiCallEvent()) {
-                for (m in table.all()) {
-                    if (!m.isEvent) continue
-                    val first = firstEventMember(m.key) ?: continue
-                    put(
-                        m.key.uppercase(),
-                        when {
-                            first.isMethod && first.returnsStr -> UserFunctionKind.STRING_METHOD
-                            first.isMethod -> UserFunctionKind.INT_METHOD
-                            else -> UserFunctionKind.PLAIN
-                        },
-                    )
+                if (symbolCatalog != null) {
+                    for (members in symbolCatalog.events.values) {
+                        val meta = table.byFunctionIndex(members.first().physicalIndex) ?: continue
+                        put(
+                            meta.key.uppercase(),
+                            when {
+                                meta.isMethod && meta.returnsStr -> UserFunctionKind.STRING_METHOD
+                                meta.isMethod -> UserFunctionKind.INT_METHOD
+                                else -> UserFunctionKind.PLAIN
+                            },
+                        )
+                    }
+                } else {
+                    for (m in table.all()) {
+                        if (!m.isEvent) continue
+                        val first = firstEventMember(m.key) ?: continue
+                        put(
+                            first.key.uppercase(),
+                            when {
+                                first.isMethod && first.returnsStr -> UserFunctionKind.STRING_METHOD
+                                first.isMethod -> UserFunctionKind.INT_METHOD
+                                else -> UserFunctionKind.PLAIN
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -1091,7 +1122,7 @@ class ProcessRuntime(
         private fun isUnloweredUserMethod(name: String): Boolean =
             exprSentinelSlot(name, EXPR_TEMP_PREFIX) == null &&
                 exprSentinelSlot(name, EXPR_STR_TEMP_PREFIX) == null &&
-                (table.nonEvent(name)?.isMethod == true ||
+                (nonEventMeta(name)?.isMethod == true ||
                     (firstEventMember(name)?.isMethod == true && compatiCallEvent()))
 
         /**
@@ -1213,7 +1244,7 @@ class ProcessRuntime(
             store.resolveVarInfo(name, store.currentFunction)
 
         override fun resolveFunction(name: String): OperandType? {
-            table.nonEvent(name)?.let {
+            nonEventMeta(name)?.let {
                 // 方法返回类型按声明面三分（#FUNCTIONF → FLOAT，路次 g7）。
                 return when {
                     it.returnsFloat -> OperandType.FLOAT
@@ -1230,7 +1261,7 @@ class ProcessRuntime(
          * 不参与晋升（fork 只给内建方法设 `CanReturnFloat`，spec: FunctionMethodCreator.cs:5418-5436）。
          */
         override fun canReturnFloat(name: String): Boolean =
-            table.nonEvent(name) == null && BuiltinSymbols.canReturnFloat(name)
+            nonEventMeta(name) == null && BuiltinSymbols.canReturnFloat(name)
     }
 
     /**
@@ -1412,8 +1443,7 @@ class ProcessRuntime(
      * 事件表兜底（事件标签也可以带 `#FUNCTION`）。两处都没有 ⇒ 不是方法。
      */
     private fun isMethodFrame(): Boolean {
-        val key = store.currentFunction ?: return false
-        return table.nonEvent(key)?.isMethod == true || firstEventMember(key)?.isMethod == true
+        return table.byFunctionIndex(activeVm.currentFunctionIndex)?.isMethod == true
     }
 
     /**
@@ -1858,16 +1888,11 @@ class ProcessRuntime(
      * `classify` 会把事件名误判成 NON_EVENT，见 [firstEventMember] 的 KDoc）。
      */
     override fun resolveFunctionIndex(name: String): Int? {
-        eventAsNonEvent(name)?.let { return it.index }
-        return when (table.classify(name)) {
-            FunctionTable.TargetKind.NON_EVENT -> {
-                val meta = table.nonEvent(name)!!
-                if (meta.isMethod) throw methodCallError(meta)
-                meta.index
-            }
-            FunctionTable.TargetKind.EVENT -> throw eventCallError(name)
-            FunctionTable.TargetKind.NOT_FOUND -> null
-        }
+        eventAsNonEvent(name)?.let { return executionEntry(it) }
+        if (isEventName(name)) throw eventCallError(name)
+        val meta = nonEventMeta(name) ?: return null
+        if (meta.isMethod) throw methodCallError(meta)
+        return executionEntry(meta)
     }
 
     /**
@@ -1883,17 +1908,13 @@ class ProcessRuntime(
     override fun resolveMethodIndex(name: String): Int? {
         firstEventMember(name)?.let { member ->
             if (!compatiCallEvent()) return null
-            if (member.isMethod) return member.index
+            if (member.isMethod) return executionEntry(member)
             throw callfNonMethodError(name)
         }
-        return when (table.classify(name)) {
-            FunctionTable.TargetKind.NON_EVENT -> {
-                val meta = table.nonEvent(name)!!
-                if (!meta.isMethod) throw callfNonMethodError(name)
-                meta.index
-            }
-            FunctionTable.TargetKind.EVENT, FunctionTable.TargetKind.NOT_FOUND -> null
-        }
+        if (isEventName(name)) return null
+        val meta = nonEventMeta(name) ?: return null
+        if (!meta.isMethod) throw callfNonMethodError(name)
+        return executionEntry(meta)
     }
 
     /**
@@ -3269,8 +3290,9 @@ class ProcessRuntime(
      * 重复定义事件名 ⇒ YES 态下原版在装载期即崩。移植侧没有逐文件增量登记的对应面
      * （FunctionTable 一次性合并），不复刻该崩溃；NO 态不可达。
      */
-    private fun firstEventMember(key: String): FuncMeta? =
-        table.eventCallOrder(key)?.minByOrNull { it.defIndex }
+    private fun firstEventMember(key: String): FuncMeta? = symbolCatalog?.eventMembersOf(key)?.firstOrNull()
+        ?.let { table.byFunctionIndex(it.physicalIndex) }
+        ?: if (symbolCatalog == null) table.eventCallOrder(key)?.minByOrNull { it.defIndex } else null
 
     /**
      * `CompatiCallEvent` 分叉的**唯一判定点**（`CALL` / `CALLFORM` / `TRYCALL` /
@@ -3753,15 +3775,10 @@ class ProcessRuntime(
         strArgs: Array<String> = emptyArray(),
     ): Long? {
         eventAsNonEvent(key)?.let { return doCall(it, intArgs, strArgs) }
-        return when (table.classify(key)) {
-            FunctionTable.TargetKind.NOT_FOUND -> null
-            FunctionTable.TargetKind.EVENT -> throw eventCallError(key)
-            FunctionTable.TargetKind.NON_EVENT -> {
-                val meta = table.nonEvent(key)!!
-                if (meta.isMethod) throw methodCallError(meta)
-                doCall(meta, intArgs, strArgs)
-            }
-        }
+        if (isEventName(key)) throw eventCallError(key)
+        val meta = nonEventMeta(key) ?: return null
+        if (meta.isMethod) throw methodCallError(meta)
+        return doCall(meta, intArgs, strArgs)
     }
 
     /**
@@ -3788,7 +3805,7 @@ class ProcessRuntime(
         val value = FunctionHookWiring.dispatchCall(
             store, meta.key, intArgs, strArgs, strRet = false,
         ) { ints, strs ->
-            ModValue.IntValue(runEntry(meta.index, rootBindSlot.bindBuckets(ints, strs)))
+            ModValue.IntValue(runEntry(executionEntry(meta), rootBindSlot.bindBuckets(ints, strs)))
         }
         return (value as? ModValue.IntValue)?.value ?: 0L
     }
@@ -3803,11 +3820,8 @@ class ProcessRuntime(
      */
     private fun resolveForCall(key: String): FuncMeta {
         eventAsNonEvent(key)?.let { return it }
-        return when (table.classify(key)) {
-            FunctionTable.TargetKind.NON_EVENT -> table.nonEvent(key)!!
-            FunctionTable.TargetKind.EVENT -> throw eventCallError(key)
-            FunctionTable.TargetKind.NOT_FOUND -> throw CodeEE(notDefinedFuncMes(key))
-        }.also { meta ->
+        if (isEventName(key)) throw eventCallError(key)
+        return (nonEventMeta(key) ?: throw CodeEE(notDefinedFuncMes(key))).also { meta ->
             if (meta.isMethod) throw methodCallError(meta)
         }
     }
@@ -3988,7 +4002,7 @@ class ProcessRuntime(
             executeMethod(member, args)
             return true
         }
-        val meta = table.nonEvent(name)
+        val meta = nonEventMeta(name)
         if (meta == null || !meta.isMethod) return false
         executeMethod(meta, args)
         return true
@@ -4019,7 +4033,7 @@ class ProcessRuntime(
             if (!member.isMethod) throw callfNonMethodError(name)
             return member
         }
-        val meta = table.nonEvent(name) ?: throw CodeEE(notDefinedUserFuncMes(name))
+        val meta = nonEventMeta(name) ?: throw CodeEE(notDefinedUserFuncMes(name))
         if (!meta.isMethod) throw callfNonMethodError(name)
         return meta
     }
@@ -4043,7 +4057,8 @@ class ProcessRuntime(
             // `CALLF F("s", 7)` 打到 `@F(ARG, ARGS)` 时整段错位且静默 —— 原版
             // `ConvertArg` 只有「形参位 i ↔ srcArgs[i]」一种对位方式
             // （CalledFunction.cs:136-200），没有按类型分桶这一步。
-            val ret = runEntry(meta.index, rootBindOf(args, args))
+            val entry = executionEntry(meta)
+            val ret = runEntry(entry, rootBindOf(args, args))
             return when {
                 // 判序与编译期同一条：浮点位**先于**字符串位（`ErbProgramCompiler.kt:350`
                 // 的掉尾兜底、`:1066` 的 `RETURNF` 发射都先 `sig.returnsFloat`；本文件
@@ -4058,7 +4073,7 @@ class ProcessRuntime(
                     // 被屏蔽方法（stubTable）不进 VM，寄存器可能是上一次执行的残留 ⇒ 按原版
                     // 消费侧默认项给 0.0（`UserDefinedMethodTerm.cs:39-49`）；同理寄存器为
                     // null（声明与旧产物不一致）也按 0.0，仍是原版 `GetFloatValue` 的容错口径。
-                    Value.FloatV(if (stubTable.hit(meta.index)) 0.0 else activeVm.floatResult ?: 0.0)
+                    Value.FloatV(if (stubTable.hit(entry)) 0.0 else activeVm.floatResult ?: 0.0)
                 }
                 meta.returnsStr -> {
                     // `#FUNCTIONS` 的返回通道是 `_RETS`（合同 M3-A §3 A7）：depth 0 处写进
@@ -4128,10 +4143,11 @@ class ProcessRuntime(
         val t0 = if (probe != null) System.nanoTime() else 0L
         if (methodDepth == 0) lastTotalNestedSteps = 0L
         val meta = methodMetaOf(name) ?: return null
+        val entry = executionEntry(meta)
         // 引擎级函数屏蔽（[EngineFunctionPolicy]）：本通道用派生 VM 的 `run(index)` 直接起跑，
         // 同样绕开 `callInto` —— 被屏蔽方法按空体 `RETURN 0`/`RETURN ""` 就地短路，
         // 不借嵌套 VM、不动方法栈深度（与 [runEntry] 的根级短路同口径）。
-        if (stubTable.hit(meta.index)) {
+        if (stubTable.hit(entry)) {
             return when {
                 // 判序同 [executeMethod]：浮点位先于字符串位。
                 // 浮点方法被屏蔽 = 空体 `RETURN 0` 的浮点默认项（原版消费侧 0.0）。
@@ -4171,7 +4187,7 @@ class ProcessRuntime(
                 nested.runResetProbe = true
             }
             try {
-                val ret = nested.run(meta.index)
+                val ret = nested.run(entry)
                 lastNestedSteps = nested.executedSteps
                 lastTotalNestedSteps += nested.executedSteps
                 if (stepAttributionEnabled) {
@@ -4277,7 +4293,7 @@ class ProcessRuntime(
      * 与表达式位 [isUnloweredUserMethod] 的判定同源（spec: IdentifierDictionary.cs:561-564）。
      */
     private fun methodMetaOf(name: String): FuncMeta? =
-        table.nonEvent(name)?.takeIf { it.isMethod }
+        nonEventMeta(name)?.takeIf { it.isMethod }
             ?: firstEventMember(name)?.takeIf { it.isMethod && compatiCallEvent() }
 
     /**
@@ -4382,7 +4398,7 @@ class ProcessRuntime(
         val order = resolveEventMembers(name) ?: run {
             // spec: CalledFunction.cs:69-76 —— GetEventLabels 为空但 GetNonEventLabel 命中
             // ⇒ CalleventToNonEventFunc（官方 zhs 文案，含被命中非事件 label 的文件:行号）。
-            table.nonEvent(name)?.let { throw nonEventAsEventError(name, it) }
+            nonEventMeta(name)?.let { throw nonEventAsEventError(name, it) }
             // A1（2026-11-26）：mod 自定义事件域（EventDispatchRegistry.declare）的键在构建期
             // EventRegistry 里没有成员链，但已声明且运行期有处理器时必须照常派发——否则
             // declare → register → trigger 全链在引擎侧静默无效果（旧形态：成员链 null 直接
@@ -5266,13 +5282,13 @@ class ProcessRuntime(
      */
     private fun callScriptFunction(name: String, force: Boolean, isEvent: Boolean): Boolean {
         if (isEvent) {
-            if (table.eventCallOrder(name) == null) {
+            if (!isEventName(name)) {
                 // CalleventToNonEventFunc（spec: CalledFunction.cs:69-77）：事件派发路命中
                 // **非事件同名函数**时无条件当场抛（官方在 `return null` 之前就 throw）——
                 // `force`（Process.cs:2090-2099）只在 calledFunction==null（两表皆无）后才生效。
                 // 旧次序把 nonEvent 查找整个漏掉：静默 false 等于把「错标 @EVENT 调用普通函数」
                 // 伪装成「没有这个事件」。文案走 executeEvent 同一条 zhs key（:2906- 深审波已接）。
-                table.nonEvent(name)?.let { throw nonEventAsEventError(name, it) }
+                nonEventMeta(name)?.let { throw nonEventAsEventError(name, it) }
                 if (force) throw CodeEE(funcIsNotFoundMes(name))
                 return false
             }
@@ -5284,19 +5300,15 @@ class ProcessRuntime(
             doCall(member, LongArray(0), emptyArray())
             return true
         }
-        return when (table.classify(name)) {
-            FunctionTable.TargetKind.NOT_FOUND -> {
-                if (force) throw CodeEE(funcIsNotFoundMes(name))
-                false
-            }
-            FunctionTable.TargetKind.EVENT -> throw eventCallError(name)
-            FunctionTable.TargetKind.NON_EVENT -> {
-                val meta = table.nonEvent(name)!!
-                if (meta.isMethod) throw methodCallError(meta)
-                doCall(meta, LongArray(0), emptyArray())
-                true
-            }
+        if (isEventName(name)) throw eventCallError(name)
+        val meta = nonEventMeta(name)
+        if (meta == null) {
+            if (force) throw CodeEE(funcIsNotFoundMes(name))
+            return false
         }
+        if (meta.isMethod) throw methodCallError(meta)
+        doCall(meta, LongArray(0), emptyArray())
+        return true
     }
 
     // ------------------------------------------------------------------

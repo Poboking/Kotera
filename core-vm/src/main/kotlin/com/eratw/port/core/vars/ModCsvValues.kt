@@ -1,7 +1,9 @@
 package com.eratw.port.core.vars
 
+import com.eratw.port.core.entity.EntityIdRemapTable
 import com.eratw.port.core.patch.CsvKeywordBinding
 import com.eratw.port.core.patch.DeclarationSnapshot
+import com.eratw.port.core.patch.EntityRefScope
 import java.util.Collections
 
 /**
@@ -337,27 +339,81 @@ object ModCsvValueRestorer {
         bag: ModCsvValueBag,
         warn: (String) -> Unit,
     ) {
-        if (bag.isEmpty) return
-        val session = RestoreSession(store, plan, keywordIndex, csvPositions(store), warn)
-        for ((slot, value) in bag.entries) session.restore(slot, value)
+        prepare(store, plan, keywordIndex, bag, warn).commit()
     }
 
-    /** 一条键的落位会话（`store`/`plan`/`warn` 收进实例，主循环只剩一次调用）。 */
+    /**
+     * 纯预检 CSV 落位；警告与全部容量/类型判定在本阶段完成，返回前变量池零写入。
+     * 声明为 CHARA entity-ref 的注入整数槽使用同一张跨设备重映射表；未声明整数不猜值。
+     */
+    fun prepare(
+        store: VariableStore,
+        plan: ModCsvInjectionPlan,
+        keywordIndex: (table: String, keyword: String) -> Int?,
+        bag: ModCsvValueBag,
+        warn: (String) -> Unit,
+        entityRefs: Map<String, Map<String, EntityRefScope>> = emptyMap(),
+        remapTable: EntityIdRemapTable = EntityIdRemapTable.IDENTITY,
+    ): Prepared {
+        if (bag.isEmpty) return Prepared(store, emptyList())
+        val session = RestoreSession(store, plan, keywordIndex, csvPositions(store), warn, entityRefs, remapTable)
+        val writes = ArrayList<PreparedWrite>(bag.size)
+        for ((slot, value) in bag.entries) {
+            session.restore(slot, value)?.let(writes::add)
+        }
+        return Prepared(store, writes)
+    }
+
+    /** 全部落位已预检；commit 不再调用 warn/查询注册表，也不接受第二次提交。 */
+    class Prepared internal constructor(
+        private val store: VariableStore,
+        private val writes: List<PreparedWrite>,
+    ) {
+        private var committed = false
+
+        fun commit() {
+            check(!committed) { "同一 CSV restore prepare 不允许重复提交" }
+            val c = store.characters
+            for (write in writes) {
+                when (write.def.storage) {
+                    Storage.C_INT1 -> c.int1[write.def.index].set(write.pos, write.index, (write.value as CsvValue.IntValue).v)
+                    Storage.C_INT2 -> c.int2[write.def.index].set(write.pos, write.index, (write.value as CsvValue.IntValue).v)
+                    Storage.C_STR1 -> c.str1[write.def.index].set(
+                        write.pos,
+                        write.index,
+                        store.pool.intern((write.value as CsvValue.StrValue).v),
+                    )
+                    else -> error("CSV prepare 已排除不支持存储：${write.def.storage}")
+                }
+            }
+            committed = true
+        }
+    }
+
+    internal data class PreparedWrite(val def: VarDef, val pos: Int, val index: Int, val value: CsvValue)
+
+    /** 一条键的落位会话；prepare 阶段只解析目标，不写列。 */
     private class RestoreSession(
         private val store: VariableStore,
         private val plan: ModCsvInjectionPlan,
         private val keywordIndex: (table: String, keyword: String) -> Int?,
         private val positions: Map<Int, Int>,
         private val warn: (String) -> Unit,
+        private val entityRefs: Map<String, Map<String, EntityRefScope>>,
+        private val remapTable: EntityIdRemapTable,
     ) {
-        private val writer = CellWriter(store, warn)
-
-        fun restore(slot: CsvValueSlot, value: CsvValue) {
+        fun restore(slot: CsvValueSlot, value: CsvValue): PreparedWrite? {
             val label = "${slot.packageId}/${slot.tableId}[${slot.keyword}]"
             val csvNo = (slot.identity as? CharIdentity.CsvNo)?.no
             val pos = csvNo?.let { positions[it] }
             val def = plan.varOf(slot.tableId)?.let { store.registry.def(it) }
             val index = keywordIndex(slot.tableId, slot.keyword)
+            val cell = def?.name?.let { name -> index?.let { plan.cellAt(name, it) } }
+            val ownsCell = def != null && cell != null && index != null && cell.index == index &&
+                cell.packageId == slot.packageId &&
+                cell.tableId.equals(slot.tableId, ignoreCase = true) &&
+                cell.keyword == slot.keyword &&
+                plan.isInjected(def.name, index)
             when {
                 csvNo == null ->
                     warn("Mod CSV 注入值 $label：身份是 EntityId，v1 只支持 CSV 番号，丢弃")
@@ -367,43 +423,65 @@ object ModCsvValueRestorer {
                     warn("Mod CSV 注入值 $label：当前注册表没有表 ${slot.tableId} 对应的变量，丢弃")
                 index == null ->
                     warn("Mod CSV 注入值 $label：关键字已从当前注册表消失，丢弃")
-                else -> writer.write(def, pos, index, value)
+                !ownsCell ->
+                    warn("Mod CSV 注入值 $label：当前索引 $index 不再由该包/表/关键字拥有或是 Base/alias 格，丢弃")
+                else -> return prepareWrite(def, pos, index, slot, value, label)
             }
+            return null
         }
-    }
 
-    /** 落格器（`store` / `warn` 收进实例，避免每个写口都拖一串公共参数）。 */
-    private class CellWriter(
-        private val store: VariableStore,
-        private val warn: (String) -> Unit,
-    ) {
-        fun write(def: VarDef, pos: Int, index: Int, value: CsvValue) {
+        private fun prepareWrite(
+            def: VarDef,
+            pos: Int,
+            index: Int,
+            slot: CsvValueSlot,
+            value: CsvValue,
+            label: String,
+        ): PreparedWrite? {
+            val effectiveValue = if (
+                value is CsvValue.IntValue &&
+                entityRefs[slot.packageId]?.get(def.name.uppercase(java.util.Locale.ROOT)) == EntityRefScope.CHARA
+            ) {
+                CsvValue.IntValue(remapTable.remap(value.v))
+            } else {
+                value
+            }
             val c = store.characters
-            when (def.storage) {
-                Storage.C_INT1 -> writeInt(c.int1[def.index], def.name, pos, index, value)
-                Storage.C_INT2 -> writeInt(c.int2[def.index], def.name, pos, index, value)
-                Storage.C_STR1 -> writeStr(c.str1[def.index], def.name, pos, index, value)
-                else -> warn("Mod CSV 注入值：变量 ${def.name} 的存储 ${def.storage} 不支持，丢弃")
-            }
-        }
-
-        private fun writeInt(col: CharacterTable.LongCol, varName: String, pos: Int, index: Int, value: CsvValue) {
-            val v = value as? CsvValue.IntValue
-            when {
-                v == null -> warn("Mod CSV 注入值：$varName[$index] 期望整数，存档里是字符串，丢弃")
-                index !in 0 until col.blockSize ->
-                    warn("Mod CSV 注入值：$varName[$index] 超出当前容量 ${col.blockSize}，丢弃")
-                else -> col.set(pos, index, v.v)
-            }
-        }
-
-        private fun writeStr(col: CharacterTable.StrCol, varName: String, pos: Int, index: Int, value: CsvValue) {
-            val v = value as? CsvValue.StrValue
-            when {
-                v == null -> warn("Mod CSV 注入值：$varName[$index] 期望字符串，存档里是整数，丢弃")
-                index !in 0 until col.blockSize ->
-                    warn("Mod CSV 注入值：$varName[$index] 超出当前容量 ${col.blockSize}，丢弃")
-                else -> col.set(pos, index, store.pool.intern(v.v))
+            return when (def.storage) {
+                Storage.C_INT1, Storage.C_INT2 -> {
+                    val v = effectiveValue as? CsvValue.IntValue
+                    val col = if (def.storage == Storage.C_INT1) c.int1[def.index] else c.int2[def.index]
+                    when {
+                        v == null -> {
+                            warn("Mod CSV 注入值：${def.name}[$index] 期望整数，存档里是字符串，丢弃")
+                            null
+                        }
+                        index !in 0 until col.blockSize -> {
+                            warn("Mod CSV 注入值：${def.name}[$index] 超出当前容量 ${col.blockSize}，丢弃")
+                            null
+                        }
+                        else -> PreparedWrite(def, pos, index, v)
+                    }
+                }
+                Storage.C_STR1 -> {
+                    val v = effectiveValue as? CsvValue.StrValue
+                    val col = c.str1[def.index]
+                    when {
+                        v == null -> {
+                            warn("Mod CSV 注入值：${def.name}[$index] 期望字符串，存档里是整数，丢弃")
+                            null
+                        }
+                        index !in 0 until col.blockSize -> {
+                            warn("Mod CSV 注入值：${def.name}[$index] 超出当前容量 ${col.blockSize}，丢弃")
+                            null
+                        }
+                        else -> PreparedWrite(def, pos, index, v)
+                    }
+                }
+                else -> {
+                    warn("Mod CSV 注入值：变量 ${def.name} 的存储 ${def.storage} 不支持，丢弃")
+                    null
+                }
             }
         }
     }

@@ -134,6 +134,15 @@ class SymbolCatalog private constructor(
     fun winnerIndexOf(key: String): Int =
         bindings[key.uppercase(Locale.ROOT)]?.physicalIndex ?: -1
 
+    /** 名字通道的最终执行入口；事件与未知名返回 -1。 */
+    fun entryIndexOf(key: String): Int {
+        val winner = winnerIndexOf(key)
+        return if (winner >= 0) dispatch[winner] else -1
+    }
+
+    /** 非事件逻辑绑定按链接序投影，供 ENUMFUNC 保持稳定顺序。 */
+    fun orderedBindings(): List<FunctionBinding> = candidates.map { it.meta.key }.distinct().mapNotNull { bindings[it] }
+
     /**
      * `HAS_OVERRIDES` 旗标判据（v6.4-c，GPT 三审 P1-2）：最终 dispatch 存在非恒等项。
      *

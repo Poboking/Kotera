@@ -25,6 +25,7 @@ import com.eratw.port.core.fn.EngineSurface
 import com.eratw.port.core.fn.IdleInputState
 import com.eratw.port.core.fn.InputState
 import com.eratw.port.core.fn.TextMeasureRequest
+import com.eratw.port.core.fn.skipStateSlot
 import com.eratw.port.core.host.FontDisplayWidth
 import com.eratw.port.core.host.GlyphMaskHost
 import com.eratw.port.core.host.InputSink
@@ -732,6 +733,16 @@ class GameSession(
     val privateDimDeclared: Int
 
     /**
+     * Mod 链侧全局 `#DIM` 注册失败清单（`变量名` → 消息，KI-GLOBAL-DIM 波）；
+     * 成功条数见 [modGlobalDimDeclared]。基线与 [privateDimFailures] 同：「失败进清单
+     * 不打断」，运行到使用点才暴露（明确的重复定义错误，非静默错值）。
+     */
+    val modGlobalDimFailures: List<String>
+
+    /** Mod 链侧全局 `#DIM` 注册成功条数（第三方口上变量表）。 */
+    val modGlobalDimDeclared: Int
+
+    /**
      * R7-C4：mods 补丁装载的原始结果（装配期一次；公开读数经 [loadedPatches] 等投影）。
      * null = [modsDirectory] 未启用（与今天一致）。
      */
@@ -1294,6 +1305,27 @@ class GameSession(
         )
         stageMark?.invoke("session.dims")
 
+        // 4c) Mod 链侧全局 #DIM（KI-GLOBAL-DIM，2026-11-26）：第三方口上包把角色口上变量表
+        //     声明在 ERB/ERH 函数外（如因幡帝 `#DIMS SAVEDATA K53_CHILD_PERSONALITY,MAXCHILD`），
+        //     编译期已解析成 DimSpec（尺寸常量折叠实值、CONST 已进 ParamConsts），随 manifest
+        //     → ModChainRuntimePlan.globalDims 到达这里。逐条 declare 进 VariableStore：
+        //     GLOBAL/SAVEDATA/CHARADATA 位由 declareUserVar 自己消费（globalUserVars /
+        //     savedUserVars / CharacterTable 列），存档按变量名 key 写出天然兼容，不改存档格式。
+        //     CONST 项在编译期折叠成字面量、运行期无需变量列，跳过；与 base 已有同名变量
+        //     （modChain.globalDims 来自补丁，base 侧车全局声明已于步骤 4 注册）冲突的，
+        //     按「失败进清单不打断」降级（明确的重复定义错误，非静默错值）。
+        val patchGlobalDims = modChain?.globalDims ?: emptyList()
+        var modGdDeclared = 0
+        val modGdFailures = ArrayList<String>()
+        for (spec in patchGlobalDims) {
+            if (spec.isConst || spec.isPrivate) continue
+            runCatching { store.declareUserVar(spec) }
+                .onSuccess { modGdDeclared++ }
+                .onFailure { modGdFailures.add("${spec.name}: ${it.message}") }
+        }
+        modGlobalDimDeclared = modGdDeclared
+        modGlobalDimFailures = modGdFailures
+
         // 5) 私有 #DIM：逐条注册，失败不打断（与装置同口径：失败进清单，运行到使用点才暴露）
         //    R7-C4：补丁侧声明追加在同一条注册链（ModPatchLoader 结果的 privateDims；
         //    补丁头 v1 无 #DIM 载体 ⇒ 补丁段恒空表，追加零行为差 —— 载体扩展后由装载器
@@ -1526,6 +1558,7 @@ class GameSession(
             // M2-6：四桶表随三视图同源进运行期，是 executeEvent 在 Mod 链在场时的唯一派发源。
             // 旁路态（modChain == null）传 null ⇒ 走原 FunctionTable.eventCallOrder，逐位不变。
             eventRegistry = modChain?.eventRegistry,
+            symbolCatalog = modChain?.catalog,
             // 语句层缺省吃生效配置的 `PRINTCを並べる数`（spec: `Config.cs:326` 静态字段、
             // `ConfigData.cs:63` 注册缺省 3）；显式传入的 semConfig 优先（装置对拍固定传语料值）。
             // `saveDataNos` 无论哪条路都取生效值（Config.cs:338 + :441-450）。
@@ -1591,6 +1624,11 @@ class GameSession(
         // 暂停开关的就绪发布（见 [setBackgroundPaused]）：先发布 runtime，再在**同一把锁**
         // 下消费装配期间收到的意图 —— 两个方向都走 [backgroundPauseLock]，意图不会丢。
         runtimeRef = runtime
+        // 系统输入边界的跳过态接线（2026-11-26 玩家反馈「双击快进后一直跳过」）：
+        // BEGIN 的四类系统等待与指令收尾 ReadAnyKey 都不经过 sem 层，跳过态必须由
+        // ConsoleBeginHost 在入口按原版 NeedValue 边界清零/放行（见 skipStateSlot 的 KDoc）。
+        // 与 sem 层共用同一口 aux 槽（`skipStateSlot(store.aux)`），不新造第二份跳过态。
+        beginHost.skipStateSlot = skipStateSlot(runtime.execContext.variables.aux)
         synchronized(backgroundPauseLock) {
             pendingBackgroundPause?.let { runtime.setBackgroundPaused(it) }
             pendingBackgroundPause = null

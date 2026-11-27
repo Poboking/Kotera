@@ -399,12 +399,7 @@ class DecisionPipeline private constructor(
      * @throws IllegalArgumentException 已采纳过 / 状态已消费
      */
     fun supplySeed(seed: Long) {
-        require(!seedSupplied) {
-            "决策种子已随档采纳过（一次性），拒绝再供给：现=$decisionSeed 请求=$seed（fail-closed）"
-        }
-        require(decisionStateUnconsumed()) {
-            "决策态已消费（抽取序号/计数/冷却/预留非空），拒绝改种子：现=$decisionSeed 请求=$seed（fail-closed）"
-        }
+        validateSeedSupply(seed)
         decisionSeed = seed
         seedSupplied = true
     }
@@ -450,10 +445,50 @@ class DecisionPipeline private constructor(
      *
      * @throws IllegalArgumentException 种子不符、nextOrdinal 为负、计数为负、键为空或重复
      */
+    /** SaveService prepare 专用：校验决策态但不改管线。 */
+    fun validateRestoreState(state: DecisionState) {
+        prepareRestoreState(state) { true }
+    }
+
+    /** 换种子的纯预检；通过后 [supplySeed] 与 [restoreState] 仍会各守一次闸。 */
+    fun validateSeedSupply(seed: Long) {
+        require(!seedSupplied) {
+            "决策种子已随档采纳过（一次性），拒绝再供给：现=$decisionSeed 请求=$seed（fail-closed）"
+        }
+        require(decisionStateUnconsumed()) {
+            "决策态已消费（抽取序号/计数/冷却/预留非空），拒绝改种子：现=$decisionSeed 请求=$seed"
+        }
+    }
+
     fun restoreState(
         state: DecisionState,
         reservationAlive: (ReservationKey) -> Boolean = { true },
     ): DecisionRestoreReport {
+        val prepared = prepareRestoreState(state, reservationAlive)
+        dayCounts.clear()
+        dayCounts.putAll(prepared.dayCounts)
+        actorCounts.clear()
+        actorCounts.putAll(prepared.actorCounts)
+        cooldownUntil.clear()
+        cooldownUntil.putAll(prepared.cooldown)
+        held.clear()
+        held.addAll(prepared.held)
+        nextOrdinal = state.nextOrdinal
+        return DecisionRestoreReport(prepared.dropped)
+    }
+
+    private data class PreparedDecisionRestore(
+        val dayCounts: Map<DayCountKey, Int>,
+        val actorCounts: Map<ActorCountKey, Int>,
+        val cooldown: Map<String, Long>,
+        val held: Set<ReservationKey>,
+        val dropped: List<ReservationKey>,
+    )
+
+    private fun prepareRestoreState(
+        state: DecisionState,
+        reservationAlive: (ReservationKey) -> Boolean = { true },
+    ): PreparedDecisionRestore {
         require(state.decisionSeed == decisionSeed) {
             "决策态种子不符：实例=$decisionSeed 快照=${state.decisionSeed}（fail-closed）"
         }
@@ -495,16 +530,13 @@ class DecisionPipeline private constructor(
                 dropped += key
             }
         }
-        dayCounts.clear()
-        dayCounts.putAll(restoredDayCounts)
-        actorCounts.clear()
-        actorCounts.putAll(restoredActorCounts)
-        cooldownUntil.clear()
-        cooldownUntil.putAll(restoredCooldown)
-        held.clear()
-        held.addAll(restoredHeld)
-        nextOrdinal = state.nextOrdinal
-        return DecisionRestoreReport(dropped.toList())
+        return PreparedDecisionRestore(
+            restoredDayCounts,
+            restoredActorCounts,
+            restoredCooldown,
+            restoredHeld,
+            dropped.toList(),
+        )
     }
 
     /**

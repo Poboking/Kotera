@@ -1,8 +1,10 @@
 package com.eratw.port.core.mod
 
 import com.eratw.port.core.patch.DeclaredJob
+import com.eratw.port.core.patch.DeclaredJobTemplate
 import com.eratw.port.core.patch.DeclaredPhase
 import com.eratw.port.core.patch.JobDeclaration
+import com.eratw.port.core.patch.JobTemplateDeclaration
 import com.eratw.port.core.patch.PhaseDeclaration
 import com.eratw.port.modapi.GameTime
 import org.junit.jupiter.api.Test
@@ -29,6 +31,9 @@ class GameSchedulerTest {
         everyDays: Long? = null,
         priority: Int = 0,
     ): DeclaredJob = DeclaredJob(pkg, JobDeclaration(jobId, phase, firstDay, everyDays, priority))
+
+    private fun template(pkg: String, key: String, priority: Int = 0): DeclaredJobTemplate =
+        DeclaredJobTemplate(pkg, JobTemplateDeclaration(key, phase = "DAY_END", priority = priority))
 
     @Test
     fun `自定义相位按包链接序与注册序派发`() {
@@ -119,6 +124,63 @@ class GameSchedulerTest {
     }
 
     @Test
+    fun `活跃包过滤不推进非活跃静态槽与动态实例`() {
+        val scheduler = JobScheduler.of(
+            listOf(job("pkgA", "a", firstDay = 10L), job("pkgB", "b", firstDay = 10L)),
+            templates = listOf(template("pkgA", "ta"), template("pkgB", "tb")),
+        )
+        scheduler.scheduleOnce("pkgA", "ta", 10L)
+        val inactiveInstance = scheduler.scheduleOnce("pkgB", "tb", 10L)
+        var aRuns = 0
+        var bRuns = 0
+        var bSlotRuns = 0
+        scheduler.bind("pkgA", "a") { aRuns++ }
+        scheduler.bind("pkgB", "b") { bSlotRuns++ }
+        scheduler.bindTemplate("pkgB", "tb") { bRuns++ }
+
+        val filtered = scheduler.runDue(GameTime(10, "DAY_END"), setOf("pkgA"))
+
+        assertEquals(listOf("a"), filtered.fired.map { it.jobId })
+        assertEquals(1, aRuns)
+        assertEquals(0, bRuns)
+        assertEquals(0, bSlotRuns)
+        assertEquals(10L, scheduler.nextFireDay("pkgB", "b"))
+        assertEquals(JobState.PENDING, scheduler.instances().single { it.instanceKey == inactiveInstance }.state)
+        assertTrue(scheduler.runDue(GameTime(10, "DAY_END"), emptySet()).fired.isEmpty())
+
+        val unfiltered = scheduler.runDue(GameTime(10, "DAY_END"))
+        assertEquals(listOf("b"), unfiltered.fired.map { it.jobId })
+        assertEquals(JobScheduler.DONE, scheduler.nextFireDay("pkgB", "b"))
+        assertEquals(1, bRuns)
+        assertEquals(1, bSlotRuns)
+        assertEquals(JobState.DONE, scheduler.instances().single { it.instanceKey == inactiveInstance }.state)
+    }
+
+    @Test
+    fun `跨包动态实例按模板priority再按声明序执行`() {
+        val scheduler = JobScheduler.of(
+            emptyList(),
+            templates = listOf(
+                template("pkgA", "late", priority = 10),
+                template("pkgB", "first", priority = 0),
+                template("pkgC", "second", priority = 0),
+            ),
+        )
+        val order = mutableListOf<String>()
+        scheduler.scheduleOnce("pkgA", "late", 5L)
+        scheduler.scheduleOnce("pkgB", "first", 10L)
+        scheduler.scheduleOnce("pkgC", "second", 1L)
+        scheduler.bindTemplate("pkgA", "late") { order += "late" }
+        scheduler.bindTemplate("pkgB", "first") { order += "first" }
+        scheduler.bindTemplate("pkgC", "second") { order += "second" }
+
+        val report = scheduler.runDue(GameTime(10, "DAY_END"))
+
+        assertEquals(listOf("first", "second", "late"), order)
+        assertEquals(3, report.firedInstances.size)
+    }
+
+    @Test
     fun `一个任务抛异常_其余任务继续且报告失败`() {
         val scheduler = JobScheduler.of(
             listOf(job("pkgA", "bad"), job("pkgB", "good")),
@@ -165,5 +227,30 @@ class GameSchedulerTest {
         assertEquals(1, report.failures.size)
         assertEquals("pkgA", report.failures.single().packageId)
         assertEquals(1, b)
+    }
+
+    @Test
+    fun `旧代注册回滚不删新一代处理器`() {
+        val scheduler = JobScheduler.of(
+            listOf(job("pkgA", "j1")),
+            templates = listOf(template("pkgA", "t1")),
+        )
+        val staleJob = scheduler.bind("pkgA", "j1") { error("旧代") }
+        staleJob.unregister()
+        var freshRuns = 0
+        scheduler.bind("pkgA", "j1") { freshRuns++ }
+        // 重装之后旧代 Registration 才晚到：必须按身份判据跳过，不得删掉新处理器。
+        staleJob.unregister()
+        scheduler.runDue(GameTime(0, "DAY_END"))
+        assertEquals(1, freshRuns)
+
+        val staleTemplate = scheduler.bindTemplate("pkgA", "t1") { error("旧代模板") }
+        staleTemplate.unregister()
+        var freshInstanceRuns = 0
+        scheduler.bindTemplate("pkgA", "t1") { freshInstanceRuns++ }
+        staleTemplate.unregister()
+        scheduler.scheduleOnce("pkgA", "t1", 0L)
+        scheduler.runDue(GameTime(0, "DAY_END"))
+        assertEquals(1, freshInstanceRuns)
     }
 }

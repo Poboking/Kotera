@@ -9,6 +9,7 @@ import com.eratw.port.modapi.ActionApi
 import com.eratw.port.modapi.ActionConstraint
 import com.eratw.port.modapi.ActionHandler
 import com.eratw.port.modapi.ActionProvider
+import com.eratw.port.modapi.DurableStory
 import com.eratw.port.modapi.AudioApi
 import com.eratw.port.modapi.EntityApi
 import com.eratw.port.modapi.EntityId
@@ -125,11 +126,12 @@ class ModContextImpl(
     var hookPipeline: HookPipeline = HookPipeline.of(snapshot.hookDeclarations)
         private set
     val phaseRegistry = PhaseRegistry.of(snapshot.phaseDeclarations)
-    val jobScheduler = JobScheduler.of(
+    var jobScheduler = JobScheduler.of(
         snapshot.jobDeclarations,
         snapshot = null,
         templates = snapshot.jobTemplateDeclarations,
     )
+        internal set
     // interactionPipeline 是 var：宿主装配时经 [adoptInteractionPipeline] 换成**全链共享**的那一份
     // （§21.4 交互阶段执行序是「阶段 → packageRank（声明链接序）→ packageId」，各自一份会把序
     // 按 mod 分组拆散）。页边界生产触发点在宿主侧，`run(...)` 只走这条共享管线。
@@ -139,8 +141,11 @@ class ModContextImpl(
     private var hookAdapter =
         HookApiAdapter(hookPipeline, packageId, knownKeysProvider = { knownFunctionKeys })
     private val phaseAdapter = PhaseApiAdapter(phaseRegistry, packageId)
-    private val jobAdapter = JobApiAdapter(jobScheduler, packageId)
+    internal var jobAdapter = JobApiAdapter(jobScheduler, packageId)
     private var interactionAdapter = InteractionApiAdapter(interactionPipeline, packageId)
+    internal var durableInteractionHost: DurableInteractionHost? = null
+    internal var durableRuntime: DurableInteractionRuntime? = null
+    internal var activeStorageStore = storageStore
     private val kernelApi = KernelEntityApi(entityKernel, pkgShortId)
 
     // internal 而非 private：宿主只读查询（ModUiHostQuery.kt 的文件级 extension）要读本 context 的
@@ -283,6 +288,9 @@ class ModContextImpl(
 
         override fun run(context: InteractionContext, main: () -> ModValue?): InteractionRunResult =
             interactionAdapter.run(context, main)
+
+        override fun runDurable(context: InteractionContext, story: DurableStory): InteractionRunResult =
+            runDurableInteraction(context, story)
     }
 
     // 决策/仲裁面（§21.3）：注入 DecisionPipeline 时委托其包作用域 facade，三个注册入口返回的
@@ -389,6 +397,7 @@ class ModContextImpl(
      * 本包不在 [newStore] 里（新装 mod 无旧档）时 apiFor 登记并激活空段，与首装同形态。
      */
     internal fun rebindStorage(newStore: ModStorageStore) {
+        activeStorageStore = newStore
         storageView.target = newStore.apiFor(packageId)
     }
 

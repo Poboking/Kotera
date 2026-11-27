@@ -48,6 +48,16 @@ tasks.register<JavaExec>("compileCorpus") {
     classpath = sourceSets["main"].runtimeClasspath
     maxHeapSize = "6g"
 
+    // P0 诊断（CONTRACT-RUSTFULL §6.4）：`-Peratw.erbcc.jfr=1` 时给这个编译 JVM 挂一份 JFR，
+    // 退出时落盘到 build/reports/jfr/compile.jfr。默认关 ⇒ 不加任何 jvmArgs，生产行为零改动。
+    // 目的：不写业务打点就把「全量 ~360 s」拆成方法级热点（ExecutionSample 聚合），
+    // 先判断谁是大头（解析 / 逐函数编译 / 序列化落盘），再决定要不要上八步打点。
+    if (providers.gradleProperty("eratw.erbcc.jfr").orNull == "1") {
+        val jfrDir = layout.buildDirectory.dir("reports/jfr").get().asFile
+        jfrDir.mkdirs()
+        jvmArgs("-XX:StartFlightRecording=filename=${jfrDir.resolve("compile.jfr")},settings=profile,dumponexit=true")
+    }
+
     // 第 3 层并行预取的调参/逃逸开关。JavaExec 会 fork 一个新 JVM，GRADLE_OPTS 里的
     // -D 只进 Gradle daemon、到不了这个子 JVM，所以必须显式走 jvmArgs。
     // 三个值都登记为任务输入的一部分，改了就会重跑（不会复用另一档的绿缓存）。

@@ -35,6 +35,7 @@ enum class DeclarationDomain(val label: String) {
     INTERACTION("interaction-hooks"),
     PHASE_JOB("phase-jobs"),
     CHARA_ROUTE("chara-field-routes"),
+    ENTITY_REF("entity-refs"),
 }
 
 /**
@@ -275,7 +276,24 @@ class DeclarationSnapshot internal constructor(
     jobDeclarations: List<DeclaredJob>,
     jobTemplateDeclarations: List<DeclaredJobTemplate>,
     charaFieldRoutes: CharaFieldRouteDomain = CharaFieldRouteDomain.EMPTY,
+    entityRefDeclarations: Map<String, Map<String, EntityRefScope>> = emptyMap(),
 ) {
+    /** packageId → canonical entityRef key；只读副本，freeze 后不再变化。 */
+    val entityRefKeys: Map<String, Set<String>> = entityRefDeclarations.mapValues { (_, scopes) ->
+        scopes.keys.toSet()
+    }
+
+    /** packageId → canonical key → 实际持久化作用域。 */
+    val entityRefDeclarations: Map<String, Map<String, EntityRefScope>> =
+        entityRefDeclarations.mapValues { (_, scopes) -> scopes.toMap() }
+
+    /** 稳定排序后的持久槽声明清单，供 sidecar v3 编码使用。 */
+    fun declaredEntityRefs(): List<DeclaredEntityRef> = entityRefDeclarations.entries
+        .sortedBy { it.key }
+        .flatMap { (packageId, scopes) ->
+            scopes.entries.sortedBy { it.key }.map { DeclaredEntityRef(packageId, it.key, it.value) }
+        }
+
     /** 归一全局变量名 → 声明。 */
     val globalDims: Map<String, DeclaredGlobalDim> = globalDims.toMap()
 
@@ -1199,6 +1217,36 @@ class DeclarationRegistry(
             }
         }
 
+        // ---- 域 9：Manifest entity-refs（freeze 末冻结；键归一只走 ModuleDescriptor）----
+        val entityRefDeclarations = LinkedHashMap<String, Map<String, EntityRefScope>>()
+        for (st in staged) {
+            val pkg = st.descriptor.packageId
+            val candidates = st.descriptor.globalDims.associateBy { NamePolicy.canonical(it.name) }
+            val refs = LinkedHashMap<String, EntityRefScope>()
+            for (key in st.descriptor.normalizedEntityRefKeys()) {
+                val here = site(pkg, "entity-ref $key")
+                val spec = candidates[key]
+                val reason = when {
+                    spec == null -> "entityRef [$key] 不属于本包已声明的 INT dim"
+                    spec.isStr || spec.isFloat -> "entityRef [$key] 指向非 INT dim"
+                    spec.isRef -> "entityRef [$key] 指向 REF 形参槽，不是可持久化的 INT 值槽"
+                    spec.isPrivate -> "entityRef [$key] 指向私有 dim，无法证明跨设备持久化作用域"
+                    else -> null
+                }
+                if (reason != null) {
+                    conflict(DeclarationDomain.ENTITY_REF, key, here, here, reason)
+                    continue
+                }
+                val intSpec = requireNotNull(spec)
+                refs[key] = when {
+                    intSpec.isCharaData -> EntityRefScope.CHARA
+                    intSpec.isGlobal -> EntityRefScope.GLOBAL
+                    else -> EntityRefScope.NORMAL
+                }
+            }
+            entityRefDeclarations[pkg] = refs
+        }
+
         if (conflicts.isNotEmpty()) throw DeclarationConflictException(conflicts)
 
         val snapshot = DeclarationSnapshot(
@@ -1221,6 +1269,7 @@ class DeclarationRegistry(
             } else {
                 CharaFieldRouteDomain(routeMirror, routeRows.toList())
             },
+            entityRefDeclarations = entityRefDeclarations,
         )
         frozen = snapshot
         onCommit(snapshot)

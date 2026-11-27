@@ -1,5 +1,6 @@
 package com.eratw.port.core.proc
 
+import com.eratw.port.core.fn.SkipStateSlot
 import com.eratw.port.core.host.Alignment
 import com.eratw.port.core.host.InputRequest
 import com.eratw.port.core.host.LineBufferConsoleSink
@@ -147,6 +148,20 @@ class ConsoleBeginHost(
 
     /** 读档末尾通知的后端，口径同 [onNewGameStartedHook]。 */
     var onSaveLoadedHook: (() -> Unit)? = null
+
+    /**
+     * 消息跳过态槽（原版 `Console.MesSkip`；本移植 = 每 VM aux 的 `skipState` 槽，
+     * 见 `core/fn/InputMethods.kt` 的 [SkipStateSlot]）。装配期由 [GameSession] 在
+     * [com.eratw.port.core.proc.ProcessRuntime.execContext] 建好后回填；缺省 null = 未接线
+     * （单测假体照旧，行为不变）。
+     *
+     * 为什么系统入口必须自己读写这一位：BEGIN 的四类系统等待（标题/指令/ABLUP/商店）与
+     * 指令收尾的 `ReadAnyKey` 都**不经过 sem 层**的 `ExecContext.mesSkip` 消费点
+     * （`StatementExecutor.waitInput` / `readAnyKey`），不在这里补，跳过态会跨系统等待
+     * 一直活着 —— 玩家侧表现就是「双击快进后，下一指令的口上继续被跳过、原版的
+     *『指令后等一次按键』形同失效」（2026-11-26 玩家反馈）。
+     */
+    var skipStateSlot: SkipStateSlot? = null
 
     /** 转发新局通知；后端抛错一律吞在本层（BEGIN 状态机在 `pumpUntilTerminal` 里只 catch `CodeEE`）。 */
     override fun onNewGameStarted() {
@@ -364,11 +379,18 @@ class ConsoleBeginHost(
      * 这两个调用点都是「先打几行、再等按键」——不发帧的话 `REDRAW 0` 关闸时那几行根本不上屏，
      * 等待就变成了「屏上什么都没有、还要点一下」，比不等待更难懂。
      *
-     * 消息跳过不参与：原版这两处等待都由 `Process` 无条件发起，是否被跳过属控制台侧的
-     * `MesSkip` 循环（`EmueraConsole.cs:1451-1456`）；本移植的跳过意图由语句层 `WAIT` 系经
-     * `ExecContext.mesSkip` 消费，从本入口另取一份会把那一侧的意图偷走。
+     * 消息跳过按原版参与：这是一次 `NeedValue == false` 的等待（`ReadAnyKey` 只看
+     * `InputType.EnterKey`，`InputRequest.cs:31-41`），`MesSkip` 为真时 `PressEnterKey`
+     * 的跳过循环会直接喂空提交把它跑过（`EmueraConsole.cs:1451-1455`），清零在循环结束
+     * 后的 `:1456`。本入口因此只读**同一口** `skipStateSlot`（不另造第二份跳过态），
+     * 跳过中直接放行；等待返回后才把本次提交的 `keySkip` 落到该槽。
      */
     override fun readAnyKey() {
+        // 原版这是一次 NeedValue=false 的等待：`MesSkip` 为真时，PressEnterKey 的跳过循环
+        // 直接喂空提交把它跑过（`EmueraConsole.cs:1451-1455`）。系统入口没有 sem 的 WAIT
+        // 分支可承接这条语义，等价落点 = 跳过态下不阻塞。跳过态本身**不清**：原版清零在
+        // 循环结束、撞到 NeedValue 等待之后（`:1456`），本移植落点是 [waitSystemInteger]。
+        if (skipStateSlot?.mesSkip == true) return
         console.publishFrame()
         try {
             console.noteInputWait(
@@ -379,6 +401,9 @@ class ConsoleBeginHost(
                 ),
             )
             input.readAnyKey(anyKey = false, stopMesSkip = false)
+            // 本次提交的 keySkip 照 sem 口径续上（`StatementExecutor.readAnyKey` 的同一表达式）：
+            // 双击/长按/宏串 `\e` 在收尾等待上提交的跳过态要能快进下一段事件脚本。
+            skipStateSlot?.let { it.mesSkip = input.consumeMesSkip() }
         } finally {
             console.holdFrame()
         }
@@ -399,6 +424,14 @@ class ConsoleBeginHost(
      * 开局/读档等待永远不冲刷，UI 停在旧帧。
      */
     private fun waitSystemInteger(): Long {
+        // 原版这条等待是 `InputType.IntValue` ⇒ `NeedValue == true`（`InputRequest.cs:31-41`），
+        // PressEnterKey 的跳过循环在此结束并在循环后清零 `MesSkip`（`EmueraConsole.cs:1451-1456`）。
+        // 系统等待不经过 sem 层，清零与「消费遗留提交标记」都必须落在本入口 —— 否则一次双击
+        // 快进的跳过态会跨商店/指令菜单活到下一回合，表现为持续跳过（2026-11-26 玩家反馈）。
+        skipStateSlot?.let {
+            it.mesSkip = false
+            input.consumeMesSkip()
+        }
         console.publishFrame()
         // 解冻与重新冻结必须成对：等待抛错（输入队列关闭/线程中断，见 [InputSinkClosedException]）
         // 时旧写法跳过 holdFrame，控制台停在"半发布"态 —— 之后任何一行可见变更都逐条 bump
@@ -412,7 +445,12 @@ class ConsoleBeginHost(
             // 系统整数等待同样是一次“当前页”的取值等待：走与 sem 层相同的选项冻结入口，
             // 避免 BEGIN/读档这类等待期间右侧栏还挂着上一页的按钮快照。
             console.noteInputWait(request)
-            return input.waitInput(request).intValue
+            val outcome = input.waitInput(request)
+            // 本次提交的 keySkip 照 sem 口径续上（`StatementExecutor.waitInput` 的同一表达式）：
+            // 宏串 `\e` 靠它快进下一段口上；清零发生在下一次 NeedValue 等待入口
+            // （原版 `EmueraConsole.cs:1451-1456` 的循环边界）。
+            skipStateSlot?.let { it.mesSkip = input.consumeMesSkip() }
+            return outcome.intValue
         } finally {
             console.holdFrame()
         }

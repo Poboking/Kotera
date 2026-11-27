@@ -71,6 +71,19 @@ class ModChainRuntimePlan private constructor(
      * 序列化面零变化）。旁路没有 plan，关态语义不经本字段承担。
      */
     val catalog: SymbolCatalog?,
+    /**
+     * Mod 链侧**全局** `#DIM` 声明（KI-GLOBAL-DIM，2026-11-26）：各 descriptor
+     * `@global-dims` 的聚合（保序按链接输入枚举序）。第三方口上包（因幡帝海外版 V8）把
+     * 角色口上变量表声明在 ERB/ERH 函数外，补丁编译期收集进 `descriptor.globalDims`
+     * （[com.eratw.port.core.mod.PatchImportTranscoder]），由 [GameSession] 在运行期
+     * declare 进 VariableStore。`DeclarationRegistry.globalDim` 此前 0 生产消费者
+     * （FileSystemOps.kt:823-829 在册），本字段即那条缺失的消费者接线。
+     *
+     * CONST 项在补丁编译期已折叠进 ParamConsts，运行期无需再 declare 成变量；
+     * `GameSession` 按 [com.eratw.port.core.vars.DimSpec.isConst] 过滤。
+     * `of(LinkedProgram)` 直派生路径（无 descriptor）恒空表。
+     */
+    val globalDims: List<com.eratw.port.core.vars.DimSpec> = emptyList(),
 ) {
 
     companion object {
@@ -92,18 +105,24 @@ class ModChainRuntimePlan private constructor(
             }
             val plan = fromLinked(linked.program, linked.catalog, registry)
             val dims = ArrayList<BootMetadata.PrivateDim>()
+            val globalDims = ArrayList<com.eratw.port.core.vars.DimSpec>()
             for (d in chain.descriptors) {
                 for ((functionKey, specs) in d.privateDims) {
                     for (spec in specs) dims += BootMetadata.PrivateDim(functionKey, spec)
                 }
+                // KI-GLOBAL-DIM：聚合各 descriptor 的全局 #DIM 声明（保序按链接输入枚举序）。
+                globalDims.addAll(d.globalDims)
             }
-            return if (dims.isEmpty()) plan else plan.withPrivateDims(dims)
+            return if (dims.isEmpty() && globalDims.isEmpty()) plan
+                else plan.withDims(dims, globalDims)
         }
 
-        private fun ModChainRuntimePlan.withPrivateDims(
+        private fun ModChainRuntimePlan.withDims(
             dims: List<BootMetadata.PrivateDim>,
+            globalDims: List<com.eratw.port.core.vars.DimSpec>,
         ): ModChainRuntimePlan = ModChainRuntimePlan(
             program, functionTable, functionDispatch, hasOverrides, eventRegistry, dims, catalog,
+            globalDims,
         )
 
         /**

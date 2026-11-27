@@ -2,6 +2,9 @@ package com.eratw.port.core.proc
 
 import com.eratw.port.core.code.Assembler
 import com.eratw.port.core.code.Program
+import com.eratw.port.core.code.ResolverPolicy
+import com.eratw.port.core.code.SymbolCandidate
+import com.eratw.port.core.code.SymbolCatalog
 import com.eratw.port.core.code.VmConfig
 import com.eratw.port.core.expr.Expr
 import com.eratw.port.core.expr.IdentifierResolver
@@ -25,12 +28,14 @@ import com.eratw.port.core.vars.VariableStore
  * - `F(ARG:0)` 打印 `orig` 并返回 ARG:0 —— 返回值可观测、副作用可观测（前缀 Replace
  *   短路时 `orig` 不出现）；
  * - `EVT` 打印 `ev` —— 事件成员链是否真的跑了；
+ * - `F_OVERRIDE` 与 `F` 共用逻辑键 `F`，仅在 [overrideWinner] 为真时进 LSC，打印
+ *   `override` 并返回 `ARG:0 + 100` —— 用来证明 hook 包在最终 Override 胜者外层；
  * - `MAIN` 只 `_HALT`，仅占 `Program.functions[0]`。
  *
  * 夹具**不预装接线**：每个用例自己决定要不要 [attach]，这样「未装 = 完全旁路」可以被
  * 直接断言（golden 零变化的前提）。
  */
-internal class HookHarness {
+internal class HookHarness(overrideWinner: Boolean = false) {
 
     val store = VariableStore()
 
@@ -39,13 +44,45 @@ internal class HookHarness {
 
     private val program: Program = Assembler.assemble(SOURCE, listOf(argZeroExpr(store)))
 
-    private val metas: List<FuncMeta> = listOf(
-        meta(program, "main"),
-        meta(program, "f", argInt = 1),
-        meta(program, "evt", isEvent = true),
+    private val baseMeta = meta(program, "f", argInt = 1)
+    private val overrideMeta = meta(program, "f_override", logicalKey = FUNCTION_KEY, argInt = 1)
+    private val metas: List<FuncMeta> = if (overrideWinner) {
+        listOf(
+            meta(program, "main"),
+            baseMeta,
+            overrideMeta,
+            meta(program, "evt", isEvent = true),
+        )
+    } else {
+        listOf(
+            meta(program, "main"),
+            baseMeta,
+            meta(program, "evt", isEvent = true),
+        )
+    }
+
+    private val catalog: SymbolCatalog? = if (!overrideWinner) null else SymbolCatalog.build(
+        listOf(
+            SymbolCandidate(metas[0], ownerPackageId = "base"),
+            SymbolCandidate(baseMeta, ownerPackageId = "base", signatureHash = "F(int)->int"),
+            SymbolCandidate(
+                overrideMeta,
+                declaredOverride = true,
+                ownerPackageId = "mod.override",
+                signatureHash = "F(int)->int",
+            ),
+            SymbolCandidate(metas[3], ownerPackageId = "base"),
+        ),
+        ResolverPolicy.MODERN,
     )
 
-    val runtime: ProcessRuntime = ProcessRuntime(program, store, FunctionTable(metas), VmConfig())
+    val runtime: ProcessRuntime = ProcessRuntime(
+        program,
+        store,
+        FunctionTable(metas),
+        VmConfig(),
+        symbolCatalog = catalog,
+    )
 
     /** 剧本打印面（前缀短路 / SkipOriginal 的旁路证据）。 */
     val output: String get() = runtime.output.toString()
@@ -74,6 +111,13 @@ internal class HookHarness {
               _PRINT_LITERAL "orig", 1
               _RET R1
 
+            .func f_override arity=1 slots=3
+              _EVAL_INT ${'$'}0, R1
+              _SET_INT R2, 100
+              _ADD R1, R1, R2
+              _PRINT_LITERAL "override", 1
+              _RET R1
+
             .func evt slots=2
               _PRINT_LITERAL "ev", 1
               _RET
@@ -88,12 +132,13 @@ internal class HookHarness {
             name: String,
             isEvent: Boolean = false,
             argInt: Int = 0,
+            logicalKey: String? = null,
         ): FuncMeta {
             val index = program.functions.indexOfFirst { it.name.equals(name, ignoreCase = true) }
             require(index >= 0) { "函数 $name 不在程序中" }
             return FuncMeta(
                 index = index,
-                key = name.uppercase(),
+                key = (logicalKey ?: name).uppercase(),
                 name = name,
                 isEvent = isEvent,
                 argIntCount = argInt,

@@ -1,5 +1,9 @@
 package com.eratw.port.core.save
 
+import com.eratw.port.core.patch.DeclaredEntityRef
+import com.eratw.port.core.patch.EntityRefScope
+import java.io.ByteArrayInputStream
+import java.io.DataInputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -130,6 +134,42 @@ class SidecarSaveBundleTest {
         val v1 = retrailer(body)
         val ex = assertFailsWith<SidecarFormatException> { SidecarSaveBundle.decode(v1) }
         assertTrue("版本" in ex.message!!, "实际: ${ex.message}")
+    }
+
+    @Test
+    fun v3DeclarationSegmentPrecedesStateTailAndV2StaysReadable() {
+        val declaration = listOf(DeclaredEntityRef("story.mod", "NREF", EntityRefScope.NORMAL))
+        val v3 = SidecarSaveBundle(
+            binding = SidecarBinding(1, 2, 3),
+            registrySnapshot = byteArrayOf(1),
+            entityGraphPayload = byteArrayOf(2),
+            chunks = listOf(PackageChunk("story.mod", byteArrayOf(3))),
+            stateSegments = SidecarStateSegments(byteArrayOf(4), byteArrayOf(5)),
+            entityRefDeclarationPayload = EntityRefDeclarationCodec.encode(declaration),
+        )
+        val encoded = v3.encode()
+        val input = DataInputStream(ByteArrayInputStream(encoded))
+        assertEquals(SidecarSaveBundle.MAGIC, input.readInt())
+        assertEquals(
+            SidecarSaveBundle.FORMAT_VERSION_V3,
+            input.readUnsignedShort(),
+        )
+        val decoded = SidecarSaveBundle.decode(encoded)
+        assertEquals(declaration, decoded.entityRefDeclarations)
+        assertArrayEquals(byteArrayOf(4), decoded.decisionStatePayload)
+        assertArrayEquals(byteArrayOf(5), decoded.jobStatePayload)
+
+        val v2 = SidecarSaveBundle(
+            SidecarBinding(1, 2, 3), byteArrayOf(1), byteArrayOf(2),
+            listOf(PackageChunk("story.mod", byteArrayOf(3))),
+        ).encode()
+        val v2Input = DataInputStream(ByteArrayInputStream(v2))
+        assertEquals(SidecarSaveBundle.MAGIC, v2Input.readInt())
+        assertEquals(
+            SidecarSaveBundle.FORMAT_VERSION,
+            v2Input.readUnsignedShort(),
+        )
+        assertTrue(SidecarSaveBundle.decode(v2).entityRefDeclarations.isEmpty())
     }
 
     /** 改过 body 后重算 CRC，确保被拒的原因是内容而不是校验和。 */

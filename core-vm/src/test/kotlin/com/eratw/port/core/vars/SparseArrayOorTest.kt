@@ -282,4 +282,34 @@ class SparseArrayOorTest {
         assertFailsWith<CodeEE> { s.writeInt("ITEM", longArrayOf(1000), 1) }
         assertFailsWith<CodeEE> { s.readStr("STR", longArrayOf(-1)) }
     }
+
+    // ---------------- 覆盖层条数上限（QB-A1 遗留缺口：此前无测试） ----------------
+
+    /**
+     * `SPARSE_OVERFLOW_LIMIT`（`VariableStore.kt:70`，`1 shl 16`）的丢弃口径。
+     *
+     * 「满层丢弃新键、既有键原样保留」已由 `SparseArrayOorCoverageTest.稀疏覆盖层跑飞护栏…`
+     * 钉过；本用例只补那一条没覆盖到的边界：**满层时改写既有键仍须落层**。此前护栏
+     * 用 `size < LIMIT` 一刀切，满层后连已有键的更新都被静默冻结（跑飞后已落层的格子停在
+     * 旧值），与 KDoc「丢弃新写入」的意图不符，2026-11-27 改为 `containsKey(key) || size < LIMIT`。
+     */
+    @Test
+    fun `稀疏覆盖层满层后仍可改写既有键`() {
+        val s = store()
+        // ITEM 逻辑长度 10000（上一条用例的既有口径），>= 10000 全是越界键。
+        val base = 10000L
+        val limit = 1 shl 16
+        for (i in 0 until limit) s.writeSparseIntOor("ITEM", longArrayOf(base + i), 7L)
+        assertEquals(7L, s.readSparseIntOor("ITEM", longArrayOf(base)))
+
+        s.writeSparseIntOor("ITEM", longArrayOf(base + limit), 9L)
+        assertEquals(0L, s.readSparseIntOor("ITEM", longArrayOf(base + limit)), "满层新增键被丢弃")
+
+        s.writeSparseIntOor("ITEM", longArrayOf(base), 3L)
+        assertEquals(3L, s.readSparseIntOor("ITEM", longArrayOf(base)), "满层改写既有键照常落层")
+        s.writeSparseIntOor("ITEM", longArrayOf(base), 0L)
+        assertEquals(0L, s.readSparseIntOor("ITEM", longArrayOf(base)), "写默认值 = 删键，腾出名额")
+        s.writeSparseIntOor("ITEM", longArrayOf(base + limit), 9L)
+        assertEquals(9L, s.readSparseIntOor("ITEM", longArrayOf(base + limit)), "腾出名额后新键可再落层")
+    }
 }

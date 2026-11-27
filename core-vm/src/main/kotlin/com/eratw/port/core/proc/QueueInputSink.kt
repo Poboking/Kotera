@@ -812,6 +812,27 @@ class QueueInputSink(
     var awaitingAnyKey: Boolean = false
         private set
 
+    /**
+     * 本任意键等待是否**禁止跳过**（原版 `InputRequest.StopMesskip`）：`FORCEWAIT` 走
+     * [readAnyKey] 的 `stopMesSkip = true` 支（`EmueraConsole.cs:1451-1456` 的循环条件
+     * `!inputReq.StopMesskip`）。壳层的跳过开关据此判断「这一屏是不是游戏故意刹的车」——
+     * 刹车屏不许被自动跳过，否则原版 `qol_EVENTCOMEND` 的长文「任意指令停顿」会被吞掉。
+     */
+    @Volatile
+    var awaitingAnyKeyStopSkip: Boolean = false
+        private set
+
+    /**
+     * 等待点序号：每次进入 [readAnyKey] / [waitInput] 自增。
+     *
+     * 壳层的跳过开关（默认关）靠它给「同一等待只补一次 skip」去重：跳过提交被消费后，
+     * VM 会一口气跑过所有 NeedValue=false 的等待，直到取值等待才停；单看
+     * [awaitingAnyKey] 无从区分「同一等待还没被消费」与「新等待」。
+     */
+    @Volatile
+    var waitGeneration: Long = 0L
+        private set
+
     /** 是否有任一等待方在等（UI 据此点亮提交按钮）。 */
     val isAwaiting: Boolean
         get() = awaiting != null || awaitingAnyKey
@@ -1167,6 +1188,9 @@ class QueueInputSink(
     }
 
     override fun readAnyKey(anyKey: Boolean, stopMesSkip: Boolean) {
+        // 等待点序号（UI 自动跳过去重）与跳过禁令在本等待点期间可见。
+        waitGeneration += 1L
+        awaitingAnyKeyStopSkip = stopMesSkip
         // 执行期点击意图的寿命边界：走 sink 的等待不吃「轮询屏」的点击补写（见 onWaitEntered）。
         onWaitEntered?.invoke()
         // FEEL1-L3 探针（只观测）：本等待点每次 await 的时长 = VM 线程「等一次回车」的样本。
@@ -1230,12 +1254,15 @@ class QueueInputSink(
             }
         } finally {
             awaitingAnyKey = false
+            awaitingAnyKeyStopSkip = false
             lock.unlock()
         }
         deliverEcho(pendingEcho)
     }
 
     override fun waitInput(request: InputRequest): InputOutcome {
+        // 取值等待不是「跳过禁令」场景；序号照常前进（UI 自动跳过据此识别新的等待点）。
+        waitGeneration += 1L
         // 执行期点击意图的寿命边界（见 onWaitEntered）：取值等待绝不吃轮询屏的点击补写。
         onWaitEntered?.invoke()
         val form = request.form
