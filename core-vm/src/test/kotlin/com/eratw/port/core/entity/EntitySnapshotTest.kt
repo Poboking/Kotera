@@ -254,6 +254,36 @@ class EntitySnapshotTest {
     }
 
     @Test
+    fun `entityRef旗标与声明不符时替换预检零写`() {
+        val src = seeded()
+        val snap = src.k.exportSnapshot()
+        for ((fieldName, newFlag) in listOf("level" to true, "mother" to false)) {
+            val altered = snap.fields.map { field ->
+                if (field.name.equals(fieldName, ignoreCase = true)) {
+                    EntitySnapshot.FieldSnapshot(
+                        field.name,
+                        field.type,
+                        newFlag,
+                        field.intValues,
+                        field.strValues,
+                    )
+                } else {
+                    field
+                }
+            }
+            val dst = newKernel()
+            val existing = dst.create(1, "PERSON")
+            dst.setInt(existing, "level", 9L)
+            val ex = assertFailsWith<IllegalArgumentException>("字段 $fieldName 的旗标篡改必须拒绝") {
+                dst.replaceRestore(EntitySnapshot(snap.slots, snap.archetypes, altered, snap.relationKinds, snap.edges))
+            }
+            assertTrue("entity-ref 旗标" in ex.message!!, ex.message)
+            assertTrue(dst.exists(existing))
+            assertEquals(9L, dst.getInt(existing, "level"), "失败的替换不得清掉旧实体或改字段")
+        }
+    }
+
+    @Test
     fun `悬空边拒绝`() {
         val src = seeded()
         val snap = src.k.exportSnapshot()

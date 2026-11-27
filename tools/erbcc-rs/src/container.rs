@@ -50,8 +50,11 @@ pub const VERSION_2: i32 = 2;
 /// v1/v2 段表槽数（`ErbcFormat.kt:61-64`）。
 pub const SECTION_COUNT_V1: usize = 7;
 pub const SECTION_COUNT_V2: usize = 9;
+pub const SECTION_STRINGS: usize = 0;
+pub const SECTION_CONSTANTS: usize = 1;
 pub const SECTION_EXPRESSIONS: usize = 2;
 pub const SECTION_STATEMENTS: usize = 3;
+pub const SECTION_FUNCTIONS: usize = 4;
 pub const SECTION_CODE: usize = 5;
 pub const SECTION_LINES: usize = 6;
 pub const SECTION_CALL_ARGS: usize = 7;

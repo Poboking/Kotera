@@ -32,6 +32,7 @@ import com.eratw.port.core.stmt.Statement
 import com.eratw.port.core.stmt.SymbolTable
 import com.eratw.port.core.vars.DimParseConfig
 import com.eratw.port.core.vars.DimParser
+import com.eratw.port.core.vars.DimSpec
 
 /**
  * 设备端补丁编译器（R7-C1，CONTRACT-R7-C §2/C1）：把玩家导入的口上 `.ERB` 编译成
@@ -249,6 +250,19 @@ class PatchCompiler(
         val parseWarnings: List<String>,
         val entryFunction: String = "",
         /**
+         * 补丁源码函数外声明的全局 `#DIM`/`#DIMS`/`#DIMF`（含 `CONST` / `SAVEDATA` /
+         * `CHARADATA` 各形态）。KI-GLOBAL-DIM 波（2026-11-26）：第三方口上包的 ERH 头文件
+         * 把角色口上变量表声明在**函数外**，这是 PC 原版正道（spec: ErhLoader.cs:249-338），
+         * 旧实现按 R7 铁律 3 整包拒导致因幡帝包导不进。本字段把它们带进
+         * [com.eratw.port.core.mod.PatchImportTranscoder] 的 `descriptor.globalDims`，再由
+         * [com.eratw.port.core.proc.GameSession] 运行期 declare 进 VariableStore。
+         *
+         * 不改 `Program.globalSlots`（那是 VM 字节码 G0..Gn 槽，与具名变量池是两套系统），
+         * 存档按变量名 key 写出天然兼容（SaveCapture.kt）。CONST 项已折叠进 [sizeConsts]
+         * 并同步 declare 进符号表，这里保留完整 spec 供下游对账/审计。
+         */
+        val globalDims: List<DimSpec> = emptyList(),
+        /**
          * 补丁函数的真实签名指纹表（R7-① 融合方案；键大写归一，值 = 规范串 SHA-256 指纹，
          * 与 erbcc 编译线进 `.erbm` 容器前的摘要口径逐字同源——同一 [SignatureExport]
          * 渲染器 + [BaseSignatureCatalog.fingerprint]）。
@@ -382,6 +396,7 @@ class PatchCompiler(
                     parseWarnings = result.parseWarnings + dropped,
                     entryFunction = result.entryFunction,
                     signatures = result.signatures,
+                    globalDims = result.globalDims,
                 )
             } catch (e: Exception) {
                 // 只容**解析/词法**这一级（原版也是这一级按文件级 Warn 续装，spec:
@@ -447,7 +462,9 @@ class PatchCompiler(
 
         // ---- 步骤 1：尺寸常量表（侧车 macros + constants，两端同解）----
         val dimCfg = metadata.dimParseConfig
-        val consts = sizeConsts(dimCfg.macros, dimCfg.intConstants)
+        // KI-GLOBAL-DIM：补丁自带的 `#DIM CONST X = v` 在步骤 3.6 折叠进来 ⇒ 可变副本。
+        // base 侧车常量原样打底，补丁常量后写（同名以补丁为准，与「后装载者生效」同口径）。
+        val consts = LinkedHashMap(sizeConsts(dimCfg.macros, dimCfg.intConstants))
 
         // ---- 步骤 1.5：词法宏表（R7-D2 TODO①，与 erbcc 全量同源接法）----
         // 桌面全量把同一份 LexerConfig 喂 LineParser 与 LogicalLineReader（CorpusCompile.kt:313-320
@@ -486,9 +503,11 @@ class PatchCompiler(
         val heads = LinkedHashMap<String, FuncHead>()          // 大写键 → 胜者定义（后到者覆盖）
         val privateByDefinition = HashMap<Pair<String, Int>, List<VarInfo>>()
         val privateDimsOut = ArrayList<BootMetadata.PrivateDim>()
+        // KI-GLOBAL-DIM：函数外全局 `#DIM` 原文（文件, 0 基行号, 原文），步骤 3.6 解析。
+        val globalDimLines = ArrayList<Triple<String, Int, String>>()
         val warnings = ArrayList<String>()
         for (src in sources) {
-            prescan(src, heads, warnings, lexerCfg)
+            prescan(src, heads, warnings, lexerCfg, globalDimLines)
         }
         require(heads.isNotEmpty()) { "补丁源里没有任何 @函数定义" }
 
@@ -510,9 +529,14 @@ class PatchCompiler(
                 // parseDimSpec 同口径），补丁编译从严拒绝——它与「全局 #DIM」是同一条
                 // 「不许新增全局槽/存档列」铁律的函数体内形态。
                 if (spec.isGlobal || spec.isSavedata || spec.isCharaData) {
+                    // KI-GLOBAL-DIM 波（2026-11-26）：本拒保留，理由订正为原版装载错误锚
+                    // （UserDefinedVariableData.cs:171-175：GLOBAL/SAVEDATA/CHARADATA 只在
+                    // ERH 全局面识别，ERB 函数体内出现即装载错误）。函数外全局声明已改判放行
+                    // （步骤 3.6），但函数体内全局侧仍是原版真错误，不随本波放宽。
                     throw PatchCompileException(
-                        "补丁的函数内 #DIM 不允许 GLOBAL/SAVEDATA/CHARADATA（全局侧声明；" +
-                            "R7 铁律 3 / 不变量 I6）：${h.file}:$lineNo ${raw.take(80)}",
+                        "补丁的函数内 #DIM 不允许 GLOBAL/SAVEDATA/CHARADATA（原版仅在 ERH 全局面" +
+                            "识别这些关键字，ERB 函数体内属装载错误，" +
+                            "spec: UserDefinedVariableData.cs:171-175）：${h.file}:$lineNo ${raw.take(80)}",
                     )
                 }
                 privateDimsOut.add(BootMetadata.PrivateDim(key, spec))
@@ -536,6 +560,50 @@ class PatchCompiler(
             if (infos.isNotEmpty()) privateByDefinition[h.file to h.lineNo] = infos
         }
 
+        // ---- 步骤 3.6：函数外全局 `#DIM` 收集（KI-GLOBAL-DIM，2026-11-26）----
+        // 第三方口上包的 ERH 头文件把角色口上变量表声明在函数外（#DIM CONST /
+        // #DIMS SAVEDATA / #DIMS X 等），这是 PC 原版正道（spec: ErhLoader.cs:249-338）。
+        // 旧实现在 prescan 整包拒，本波按 base 侧同款口径解析并：
+        //   ① CONST → 折进 consts 表（补丁函数体里 `CASE K53C_xxx` 要能折叠），并 declare
+        //      进符号表（isConst=true）；完整 spec 一并进 globalDimsOut 供下游对账。
+        //   ② 非 CONST → declare 进符号表（函数体里 `K53_CHILD_PERSONALITY:i` 要能解析
+        //      成变量引用，否则 LineParser 报「未定义标识符」→ 文件级作废 → 空面拒），
+        //      完整 spec 进 globalDimsOut → manifest.globalDims → 运行期 declareUserVar。
+        // 解析口径**逐字复用** base 侧 buildPatchSymbolTable 的三态判序（isFloat 优先）
+        // 与 config（dimCfgFull，含折叠后的 consts + systemSaveInBinary），与 erbcc
+        // 全量预扫 CorpusScan 同源，避免两套真相。非严格条目（含函数调用等）跳过 +
+        // 逐条告警，方向安全（明确失败而非静默错值），与 base 侧侧车容忍模式一致。
+        val globalDimsOut = ArrayList<DimSpec>()
+        var skippedGlobalDims = 0
+        for ((file, zeroLine, raw) in globalDimLines) {
+            val keyword = raw.substringBefore(' ', raw).uppercase()
+            try {
+                val spec = DimParser.parse(keyword, raw.substringAfter(' ', "").trim(), false, dimCfgFull)
+                val opType = when {
+                    spec.isFloat -> OperandType.FLOAT
+                    spec.isStr -> OperandType.STR
+                    else -> OperandType.INT
+                }
+                if (spec.isConst && spec.defaultsInt != null) {
+                    // CONST 初值折叠：与 SystemVariableBootstrap 的 intConstants 同源
+                    // （spec.defaultsInt?.firstOrNull()，见 CorpusCompile.mergeGlobalUserDimSizes）。
+                    spec.defaultsInt!!.firstOrNull()?.let { consts.putIfAbsent(spec.name.uppercase(), it) }
+                }
+                symbolTable.declareVariable(
+                    spec.name, opType, spec.dimension,
+                    isCharacterData = spec.isCharaData, isConst = spec.isConst,
+                )
+                globalDimsOut.add(spec)
+            } catch (e: Exception) {
+                skippedGlobalDims++
+                warnings += "函数外全局 #DIM 跳过（$file:${zeroLine + 1}）${raw.take(80)} —— " +
+                    "${e.message ?: e::class.simpleName}"
+            }
+        }
+        if (skippedGlobalDims > 0) {
+            warnings += "函数外全局 #DIM 共跳过 $skippedGlobalDims 条非严格解析条目（原版运行期处理形态）"
+        }
+
         // ---- 步骤 5：I6-② base 已有同名函数（事件名放行——同名事件是叠加语义）----
         // 非事件同名（2026-11-23 KI 改判，BOARD KI-2）：**一律按覆盖装载 + 告警，不再整包
         // 硬拒**。原判 = `overrideDeclarable` 判 false（base 侧车拿不到该键签名指纹）⇒ 整包
@@ -553,24 +621,29 @@ class PatchCompiler(
         // 覆盖（Transcoder 现推覆盖集按同款归一键），产物落盘后在链接期走未声明覆盖告警路径。
         for ((key, h) in heads) {
             if (Symbols.isEventLabelName(h.name)) continue
-            val dup = baseKeys.firstOrNull { it == key } ?: continue
+            // 2026-11-27 导入性能波：旧写法 `baseKeys.firstOrNull { it == key }` 对每个补丁函数
+            // 线性扫一遍 base 全表（4.981 约 2.4 万键）⇒ 1000 个函数的包要做 2400 万次字符串
+            // 比较，实测**独占导入整链的一半**（JFR 采样命中 `Intrinsics.areEqual`，compile 7.0s）。
+            // 判据等价：`baseKeys` 是唯一键集合，`firstOrNull{…} != null` ≡ 成员判定；
+            // 取到的值本来就是「该键在 base 函数表的下标」，直接按 key 查表即可。
+            val dup = baseIndexByName[key] ?: continue
             // 告警门 = 原版 `!label.IsEvent && (Config.WarnNormalFunctionOverloading ||
             // Program.AnalysisMode)`（spec: ErbLoader.cs:466）：关掉配置时覆盖照常装载，
             // 只是不再逐条报；导入成功页的覆盖总数读数不受本门约束（禁静默的另一半）。
             if (warnNormalFunctionOverloading) {
                 warnings +=
                     "覆盖 base 同名函数 ${h.name}（补丁 ${h.file}:${h.displayLine}，base 函数表" +
-                        "下标 ${baseIndexByName[dup]}）——原版对同名非事件函数是后装载者胜出并" +
+                        "下标 $dup）——原版对同名非事件函数是后装载者胜出并" +
                         "只告警，本包按覆盖装载（spec: LabelDictionary.cs:107-113、" +
                         "ErbLoader.cs:466-475）"
             }
         }
 
         // ---- 步骤 6：补丁内函数头信息 ----
+        // 预扫全集（heads）：只用于步骤 5 的撞名告警与步骤 12 的「目标是不是补丁函数」判据。
+        // **编译面的函数全集必须等 poison 收敛后再取**（见步骤 8.5），否则被毒函数仍会被
+        // 当成可调目标，`build()` 以「未定义的函数」炸掉整包。
         val patchKeys = heads.keys
-        val knownFunctions = HashSet<String>(baseKeys.size + patchKeys.size)
-        knownFunctions.addAll(baseKeys)
-        knownFunctions.addAll(patchKeys)
 
         // ---- 步骤 7：表达式位调用分类表（base 方法三分 + base 非方法全集 + 补丁内方法）----
         // 补丁内 #FUNCTION/#FUNCTIONS 必须并进 intMethods/strMethods：表达式位对它们的
@@ -657,6 +730,19 @@ class PatchCompiler(
             )
         }
 
+        // ---- 步骤 8.5：编译面函数全集（poison 收敛之后）----
+        // **必须用切片后的实际函数集，不能用预扫全集 heads**：poison 环把解析失败的函数从
+        // slices 摘除，但 heads 仍是全集；把它当 knownFunctions 喂给编译器时，步骤 11 的
+        // 静态调用判据 `target in known` 仍认被毒函数 ⇒ 发出一条指向不存在函数的 `_CALL`
+        // ⇒ `build()` 回填时抛「未定义的函数」⇒ 整包 UNEXPECTED（因幡帝 V8 真包：
+        // @M_KOJO_EGG_MESSAGE_CUSTOM_SCOM_K53_12 的 `CALL K53_DOUBLE_HANDJOB`，目标在
+        // 同文件 8 行后被 poison）。原版对「label 在、装载失败」是行级：CALL 行标 IsError +
+        // CalledFailedFunc（spec: FunctionIdentifier.cs:3545-3551），调用方与整包照常装载
+        // ⇒ 这里把 poison 集一并交给编译器（`failedFunctions`），该行编 THROW 哨兵。
+        val compiledKeys = HashSet<String>(baseKeys.size + slices.size)
+        compiledKeys.addAll(baseKeys)
+        compiledKeys.addAll(slices.keys)
+
         // 补丁内函数头的形参默认值（`@F(A, B = 2)`）——与 base 的侧车表合并后喂编译器。
         val defaults = CallDefaultsCollector()
         for ((key, pair) in slices) {
@@ -707,9 +793,15 @@ class PatchCompiler(
             functionBase = baseCounts.functionCount,
         )
         val funcDims = HashMap<String, List<LocalDim>>(baseRefDims)
-        for ((key, pair) in slices) {
-            funcDims[key] = privateDimsOut.filter { it.functionKey == key }
-                .map { pd -> localDimOf(pd.spec) }
+        // 2026-11-27 导入性能波：旧写法对每个切片 `privateDimsOut.filter { … }` 全表扫一遍
+        // ⇒ O(切片数 × 私有声明数)。按 functionKey 分桶一次，语义逐字相同（桶内保持原序，
+        // 无私有声明的切片照旧落空表）。
+        val dimsByFunction = HashMap<String, MutableList<LocalDim>>()
+        for (pd in privateDimsOut) {
+            dimsByFunction.getOrPut(pd.functionKey) { ArrayList() }.add(localDimOf(pd.spec))
+        }
+        for ((key, _) in slices) {
+            funcDims[key] = dimsByFunction[key].orEmpty()
         }
         val layout = DimSpecLayout(GlobalNameLayout(), funcDims)
         // R7-D2：保持节点（短路位 / 返回类型未知）的用户方法调用上报面 —— I6-④ 的
@@ -729,7 +821,9 @@ class PatchCompiler(
         val memberIndexes = ArrayList<Int>(sigs.size)
         for ((head, sig) in sigs) {
             val stmts = slices.getValue(head.name.uppercase()).second
-            val fb = compiler.compileFunction(sig, stmts, knownFunctions, exprCalls)
+            val fb = compiler.compileFunction(
+                sig, stmts, compiledKeys, exprCalls, failedFunctions = poison,
+            )
             memberIndexes.add(fb.index)
         }
 
@@ -946,6 +1040,7 @@ class PatchCompiler(
             parseWarnings = warnings,
             entryFunction = effectiveEntry,
             signatures = patchSignatures,
+            globalDims = globalDimsOut,
         )
     }
 
@@ -970,6 +1065,13 @@ class PatchCompiler(
         heads: LinkedHashMap<String, FuncHead>,
         warnings: MutableList<String>,
         lexerCfg: LexerConfig,
+        /**
+         * KI-GLOBAL-DIM（2026-11-26）：函数外 `#DIM`/`#DIMS`/`#DIMF` 原文的三元组
+         * （文件相对路径, 0 基行号, 原文）。旧实现在此硬拒「补丁不能声明全局 #DIM」，
+         * 因幡帝包 ERH 头文件的合法全局声明被整包拒。本波改为收集，交由步骤 3.6
+         * 按 base 侧同款 `DimParser.parse(isPrivate=false)` 解析并灌符号表/常量表。
+         */
+        globalDimLines: MutableList<Triple<String, Int, String>>,
     ) {
         val rel = src.relPath
         var cur: FuncHead? = null
@@ -1033,13 +1135,17 @@ class PatchCompiler(
                         up.startsWith("#FUNCTION") -> h?.let { it.isMethod = true }
                         up.startsWith("#DIM") -> {
                             if (h == null) {
-                                throw PatchCompileException(
-                                    "补丁不能声明全局 #DIM（Program.globalSlots 构造期定死，扩全局槽" +
-                                        "牵动 VariableStore 与存档列；R7 铁律 3 / 不变量 I6）：$rel:${line.lineNo + 1} " +
-                                        content.take(80),
-                                )
+                                // KI-GLOBAL-DIM 波（2026-11-26）：函数外全局 `#DIM` 不再整包拒。
+                                // 第三方口上包的 ERH 头文件把角色口上变量表（含 #DIM CONST /
+                                // #DIMS SAVEDATA）声明在函数外，这是 PC 原版正道
+                                // （spec: ErhLoader.cs:249-338 / UserDefinedVariableData.cs:171-175）。
+                                // 旧「扩全局槽牵动存档列」判词经实查证伪：Program.globalSlots 是 VM
+                                // 字节码槽，与 VariableStore 具名变量池是两套系统；存档按变量名 key
+                                // 写出天然兼容。收集原文，步骤 3.6 按 base 同款口径解析。
+                                globalDimLines.add(Triple(rel, line.lineNo, content))
+                            } else {
+                                h.dimLines.add(line.lineNo + 1 to content)
                             }
-                            h.dimLines.add(line.lineNo + 1 to content)
                         }
                         else -> Unit     // #LOCALSIZE 等其余元数据行：第二遍由 LineParser 处理
                     }

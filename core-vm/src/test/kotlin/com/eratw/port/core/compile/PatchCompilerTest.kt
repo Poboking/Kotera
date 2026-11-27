@@ -28,6 +28,7 @@ import com.eratw.port.core.patch.PatchHeader
 import com.eratw.port.core.patch.PATCH_FORMAT_VERSION_2
 import com.eratw.port.core.proc.FuncMeta
 import com.eratw.port.core.stmt.AssignStmt
+import com.eratw.port.core.stmt.ExpressionArgument
 import com.eratw.port.core.stmt.FuncLabelStmt
 import com.eratw.port.core.stmt.IfStmt
 import com.eratw.port.core.stmt.LineParser
@@ -1036,6 +1037,72 @@ class PatchCompilerTest {
     }
 
     @Test
+    fun `CALL 语句命中被作废函数——行级错误，调用方与整包照常装载`() {
+        // KI-POISON-CASCADE（2026-11-27，因幡帝海外版 V8 真包撞出）：@M_KOJO_EGG_MESSAGE_
+        // CUSTOM_SCOM_K53_12 的 `CALL K53_DOUBLE_HANDJOB` 目标在同文件 8 行后被步骤 8 的
+        // poison 环摘除，但编译面仍拿**预扫全集**当 knownFunctions ⇒ 发出指向不存在函数的
+        // _CALL ⇒ `build()` 抛「未定义的函数」⇒ 整包 UNEXPECTED。
+        // 原版对「label 在、装载失败」的粒度是**行**：SetJumpTo 把该 CALL 行本身标 IsError +
+        // ErrMes（spec: FunctionIdentifier.cs:3545-3551），调用方照常装载，只有执行到那一行
+        // 才抛 CodeEE（spec: Process.cs:1017-1019）；文案 = CalledFailedFunc
+        //（lang.emuera-zhs.xml:567）。这里同粒度：CALL 行编 THROW 哨兵，函数与整包都留下。
+        val (_, meta, counts) = compileBase()
+        // 调用者在前、被调者在后 —— 真包形态（同文件前向引用，一轮切片内先解析后中毒）。
+        val src = "@B_CALLER\nCALL B_GONE\nPRINTL AFTER\nRETURN 0\n" +
+            "@B_GONE\nCULPRIT = Add_CULPRIT\nRETURN 0\n" +
+            "@B_SURVIVOR\nPRINTL OK\nRETURN 0\n"
+        val result = PatchCompiler(meta, counts, patchSymbols()).compile(
+            listOf(PatchCompiler.SourceFile("mods/same_file.ERB", src)),
+            "B_SURVIVOR",
+        )
+        val names = result.program.functions.map { it.upperKey }
+        assertTrue("B_SURVIVOR" in names, "无关函数不受影响，实际: $names")
+        assertTrue("B_CALLER" in names, "CALL 行是行级错误，调用方必须留下，实际: $names")
+        assertTrue("B_GONE" !in names, "被毒函数本身不装载，实际: $names")
+        assertTrue(
+            result.parseWarnings.any { it.contains("已跳过解析失败的函数 @B_GONE") },
+            "作废必须逐条告警（I7），实际: ${result.parseWarnings}",
+        )
+        assertEquals(
+            listOf("调用了一个加载时解析失败的函数\"@B_GONE\""),
+            throwMarkers(result.program),
+            "CALL 行应降级成行级 THROW 哨兵（原版 IsError 行），而不是指向不存在函数的 _CALL",
+        )
+    }
+
+    @Test
+    fun `函数内 #DIM 声明的形参——注释紧贴标识符也必须可见`() {
+        // 因幡帝海外版 V8 真包（2026-11-27）：`@M_KOJO_EGG_IRAI_1_K53(ROLE, SCENE, CLIENT_ID)`
+        // 的三个形参由紧随其后的 `#DIMS ROLE` / `#DIMS SCENE` / `#DIM  CLIENT_ID;伝聞者ID…`
+        // 在函数体内声明，第三个的注释紧贴标识符（无空格）⇒ 若注释未被剥净，
+        // 声明名会带尾巴、形参判定「未定义的标识符」⇒ 整文件作废（该文件 12 个函数一起没了）。
+        val (_, meta, counts) = compileBase()
+        val src = "@B_P(ROLE, SCENE, CLIENT_ID)\n" +
+            "#DIMS ROLE\n" +
+            "#DIMS SCENE\n" +
+            "#DIM  CLIENT_ID;伝聞者ID（コメント）\n" +
+            "RETURN 0\n"
+        val result = PatchCompiler(meta, counts, patchSymbols()).compile(
+            listOf(PatchCompiler.SourceFile("mods/req.ERB", src)),
+            "B_P",
+        )
+        assertTrue(
+            "B_P" in result.program.functions.map { it.upperKey },
+            "B_P 必须装载（形参由函数内 #DIM 声明），实际: ${result.program.functions.map { it.upperKey }}",
+        )
+        assertTrue(result.parseWarnings.isEmpty(), "不应有作废告警，实际: ${result.parseWarnings}")
+    }
+
+    /** 产物里全部 THROW marker 的文案（顺序 = 指令序；只扫本段窗口，base 区不可物化）。 */
+    private fun throwMarkers(p: Program): List<String> =
+        (p.instructionBase until p.instructionCount)
+            .map { p.instructionAt(it) }
+            .filter { it.op == Opcode.THROW }
+            .mapNotNull { ins ->
+                ((p.statement(ins.a).args as? ExpressionArgument)?.term as? StrLiteral)?.value
+            }
+
+    @Test
     fun `文件级容错——函数体外的坏行按整文件作废`() {
         // 归因不到函数（第一个 @ 行之前的正文）时退到文件粒度：整文件不进函数表。
         val (_, meta, counts) = compileBase()
@@ -1264,28 +1331,51 @@ class PatchCompilerTest {
     }
 
     @Test
-    fun `I6 二——补丁声明全局 DIM 编译期拒绝并点名`() {
+    fun `KI-GLOBAL-DIM——补丁函数外全局 DIM 收集进 globalDims 且编译成功（旧 I6 二反转）`() {
         val (_, meta, counts) = compileBase()
         // 函数外 `#DIM` = 任何 `@` 行之前的声明（`@` 行之后的 `#` 行原版归属该函数私有面）。
+        // 2026-11-26 改判：这是 PC 原版 ERH 头文件的合法形态（因幡帝包），不再整包拒。
         val src = "#DIM G_BIG, 10\n\n@B_TOP\nPRINTL T\nRETURN 0\n"
-        val ex = assertFailsWith<PatchCompiler.PatchCompileException>("函数外 #DIM 必须编译期拒绝（R7 铁律 3）") {
-            patchCompile(meta, counts, patchSymbols(), source = src, entry = "B_TOP")
-        }
-        val msg = ex.message ?: ""
-        assertTrue(msg.contains("#DIM"), "错误消息必须点名声明，实际: $msg")
-        assertTrue(msg.contains("mods/patch.ERB:1"), "错误消息必须带文件:行，实际: $msg")
+        val result = patchCompile(meta, counts, patchSymbols(), source = src, entry = "B_TOP")
+        assertTrue(result.funcMetas.any { it.key == "B_TOP" }, "补丁仍须编出函数")
+        assertTrue(
+            result.globalDims.any {
+                it.name.equals("G_BIG", ignoreCase = true) && it.dimension == 1 && it.dims[0] == 10
+            },
+            "函数外全局 #DIM 必须进 PatchResult.globalDims 供下游 declare，实际: ${result.globalDims}",
+        )
     }
 
     @Test
-    fun `I6 二之二——函数体内全局侧 DIM 声明编译期拒绝`() {
+    fun `KI-GLOBAL-DIM——补丁函数外 CONST 折叠进 sizeConsts 并进 globalDims`() {
+        val (_, meta, counts) = compileBase()
+        // 因幡帝包 M_KOJO_K53_DIM.ERH 的形态：#DIM CONST 后接尺寸引用。
+        val src = "#DIM CONST K53C_TEST = 42\n#DIM G_SIZED, K53C_TEST\n\n@B_TOP\nPRINTL T\nRETURN 0\n"
+        val result = patchCompile(meta, counts, patchSymbols(), source = src, entry = "B_TOP")
+        assertEquals(42L, result.sizeConsts["K53C_TEST"], "补丁 CONST 必须折叠进常量表")
+        assertTrue(
+            result.globalDims.any { it.name.equals("K53C_TEST", ignoreCase = true) && it.isConst },
+            "CONST 声明也应带进 globalDims 供对账",
+        )
+        val sized = result.globalDims.firstOrNull { it.name.equals("G_SIZED", ignoreCase = true) }
+        assertNotNull(sized, "尺寸引用补丁 CONST 的全局 #DIM 必须解析成功")
+        assertEquals(42, sized!!.dims[0])
+    }
+
+    @Test
+    fun `KI-GLOBAL-DIM——函数体内全局侧 DIM 仍拒绝（原版装载错误，不随本波放宽）`() {
         val (_, meta, counts) = compileBase()
         val src = "@B_TOP\n#DIM GLOBAL G_SIDE, 1\nPRINTL T\nRETURN 0\n"
-        val ex = assertFailsWith<PatchCompiler.PatchCompileException>("函数体内 GLOBAL 侧声明必须拒绝（同一条全局槽铁律）") {
+        val ex = assertFailsWith<PatchCompiler.PatchCompileException>("函数体内 GLOBAL 侧声明必须拒绝（原版装载错误）") {
             patchCompile(meta, counts, patchSymbols(), source = src, entry = "B_TOP")
         }
         val msg = ex.message ?: ""
         assertTrue(msg.contains("GLOBAL"), "错误消息必须点名全局侧关键字，实际: $msg")
         assertTrue(msg.contains("mods/patch.ERB:2"), "错误消息必须带文件:行，实际: $msg")
+        assertTrue(
+            msg.contains("函数内") || msg.contains("ERH"),
+            "错误消息须点名函数内非法（DimParser isPrivate 闸或 :512），实际: $msg",
+        )
     }
 
     // 「I6 三——补丁定义 base 同名函数编译期拒绝并点名」已随 2026-11-23 KI 改判（BOARD KI-2）

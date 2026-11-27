@@ -22,6 +22,7 @@ import com.eratw.port.modapi.InteractionHookDecl
 import com.eratw.port.modapi.InteractionPhase
 import com.eratw.port.modapi.InteractionResult
 import com.eratw.port.modapi.JobDecl
+import com.eratw.port.modapi.JobTemplateDecl
 import com.eratw.port.modapi.ModContext
 import com.eratw.port.modapi.ModManifest
 import com.eratw.port.modapi.ModValue
@@ -65,6 +66,7 @@ class ModRuntimeHostTest {
                         hooks = listOf(HookDecl("COM300", HookPhase.PREFIX)),
                         interactionHooks = listOf(InteractionHookDecl(InteractionPhase.PRE)),
                         jobs = listOf(JobDecl("j1", phase = "DAY_END", firstDay = 0, everyDays = 1)),
+                        jobTemplates = listOf(JobTemplateDecl("once")),
                     ),
                 ),
             )
@@ -196,17 +198,21 @@ class ModRuntimeHostTest {
         val trace = mutableListOf<String>()
         var aHits = 0
         var bHits = 0
+        var aJobHits = 0
+        var bJobHits = 0
         val a = TraceMod(trace, "modA", failOnEnable = true) { ctx ->
             ctx.hooks.register("COM300", HookPhase.PREFIX) {
                 aHits++
                 HookResult.Continue
             }
+            ctx.jobs.bind("j1") { aJobHits++ }
         }
         val b = TraceMod(trace, "modB") { ctx ->
             ctx.hooks.register("COM300", HookPhase.PREFIX) {
                 bHits++
                 HookResult.Continue
             }
+            ctx.jobs.bind("j1") { bJobHits++ }
         }
         val states = host.install(listOf("modA" to a, "modB" to b))
         assertEquals(2, states.size)
@@ -223,6 +229,12 @@ class ModRuntimeHostTest {
         assertEquals(0, aHits)
         assertEquals(1, bHits)
         assertTrue(ctxA.hookPipeline === ctxB.hookPipeline, "两个 context 必须指向同一份 pipeline")
+        assertTrue(ctxA.jobScheduler === ctxB.jobScheduler, "两个 context 必须指向同一份全链任务调度器")
+        assertTrue(ctxA.jobScheduler === host.jobScheduler, "作者绑定与宿主派发必须共用任务态")
+        val jobReport = host.jobScheduler.runDue(GameTime(0, "DAY_END"))
+        assertEquals(1, jobReport.fired.size)
+        assertEquals(0, aJobHits)
+        assertEquals(1, bJobHits)
         ctxB.hookPipeline.dispatch("COM300", emptyArray()) { ModValue.of(1L) }
         assertEquals(2, bHits)
 
@@ -311,6 +323,31 @@ class ModRuntimeHostTest {
         val second = host.shutdown()
         assertEquals(traceSizeAfterFirst, trace.size)
         assertEquals(first, second)
+    }
+
+    @Test
+    fun `失败装载回滚本包动态任务态且不吞其它包实例`() {
+        val host = newHost(mutableListOf(), "modA", "modB")
+        val trace = mutableListOf<String>()
+        var bJobHits = 0
+        val a = TraceMod(trace, "modA", failOnEnable = true) { ctx ->
+            ctx.jobs.scheduleOnce("once", 3L)
+        }
+        val b = TraceMod(trace, "modB") { ctx ->
+            ctx.jobs.scheduleOnce("once", 3L)
+            ctx.jobs.bindTemplate("once") { bJobHits++ }
+        }
+
+        val states = host.install(listOf("modA" to a, "modB" to b))
+
+        assertFalse(states[0].active)
+        assertTrue(states[1].active)
+        assertEquals(listOf("modB::once#0"), host.jobScheduler.instances().map { it.instanceKey })
+        assertFalse(host.jobScheduler.snapshot().nextSeqByTemplate.containsKey("modA::once"))
+        val report = host.jobScheduler.runDue(GameTime(3, "DAY_END"))
+        assertEquals(1, report.firedInstances.size)
+        assertEquals(1, bJobHits)
+        host.shutdown()
     }
 
     @Test

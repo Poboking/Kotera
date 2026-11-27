@@ -20,8 +20,9 @@
 #   分片   = 容器里按 packageId 一包一片的 PackageChunk；容器层不解释载荷
 #   孤儿片 = 未激活（禁用/未装）包的分片；解码后原样保留、存盘原样回写
 #
-# 回归锚：core-vm/src/test/kotlin/com/eratw/port/core/save/SidecarSaveBundleTest.kt（9 用例）
+# 回归锚：core-vm/src/test/kotlin/com/eratw/port/core/save/SidecarSaveBundleTest.kt（10 用例）
 #   与本文件「byte_layout / capacity / decode_discipline」三节逐条对应。
+#   entity-ref 声明与跨设备重映射 = EntityRefSaveProtocolTest.kt（10 用例）。
 
 schema: 1
 
@@ -65,7 +66,7 @@ byte_layout:
   encode_entry: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:123-174
   fields:
     - { order: 1,  name: magic,           type: i32,      value: '0x45525432（ASCII "ERT2"）', source: 'SidecarSaveBundle.kt:197（写 :149 / 读 :240）' }
-    - { order: 2,  name: version,         type: u16,      value: '2（只认 2；v1 直接拒载，无双版本读取面）', source: 'SidecarSaveBundle.kt:199、:242；v2 缘起 KDoc :31-33' }
+    - { order: 2,  name: version,         type: u16,      value: '2 或 3；声明段为空写 2，非空写 3；v1 直接拒载', source: 'SidecarSaveBundle.kt:160、:220-223、:265-268' }
     - { order: 3,  name: binding.uniqueCode,    type: i64, value: '绑定三元组第 1 位', source: 'SidecarSaveBundle.kt:151、:66-70（生产值见 binding 节）' }
     - { order: 4,  name: binding.scriptVersion, type: i64, value: '绑定三元组第 2 位', source: 'SidecarSaveBundle.kt:152' }
     - { order: 5,  name: binding.saveTextHash,  type: i32, value: '绑定三元组第 3 位（生产语义 = 本体容器全字节 CRC32，见 binding 节）', source: 'SidecarSaveBundle.kt:153' }
@@ -74,19 +75,31 @@ byte_layout:
     - { order: 8,  name: entity_graph_payload,  type: 'i32 长度 + bytes', value: 'EntityPayloadCodec 输出（容器层不解释）；global 侧车恒空', source: 'SidecarSaveBundle.kt:158-159；global 恒空 = SaveService.kt:112' }
     - { order: 9,  name: chunk_count,     type: i32,      value: '分片数（上限 4096）', source: 'SidecarSaveBundle.kt:160、:217' }
     - { order: 10, name: chunks,          type: '逐片：i32 名长 + UTF-8 packageId + i32 载荷长 + bytes', value: '按 Package 一包一片；载荷分层见 chunk_payload 节', source: 'SidecarSaveBundle.kt:177-185；空片名拒载 :266' }
-    - { order: 11, name: decision_state_segment, type: 'i32 长度 + bytes', value: 'v2 增补尾段 1（决策态）；与 12 同进退', source: 'SidecarSaveBundle.kt:162-165、:188-193' }
-    - { order: 12, name: job_state_segment,      type: 'i32 长度 + bytes', value: 'v2 增补尾段 2（任务态）；与 11 同进退', source: 'SidecarSaveBundle.kt:162-165、:188-193' }
-    - { order: 13, name: crc32,           type: i32,      value: '对 order 1..12 全部字节的 CRC32，尾部；不含自身', source: 'SidecarSaveBundle.kt:166-173（校验 :233-237）' }
+    - { order: 11, name: entity_ref_declaration_segment, type: 'i32 长度 + bytes', value: '仅 v3 固定存在；EntityRefDeclarationCodec VERSION 1 原样字节', source: 'SidecarSaveBundle.kt:113-114、:156-160、:178-182、:295-302；EntityRefDeclarationCodec.kt:15-39' }
+    - { order: 12, name: decision_state_segment, type: 'i32 长度 + bytes', value: 'v2 增补尾段 1（决策态）；与 13 同进退', source: 'SidecarSaveBundle.kt:161-162、:183-186、:208-214' }
+    - { order: 13, name: job_state_segment,      type: 'i32 长度 + bytes', value: 'v2 增补尾段 2（任务态）；与 12 同进退', source: 'SidecarSaveBundle.kt:161-162、:183-186、:208-214' }
+    - { order: 14, name: crc32,           type: i32,      value: '对 order 1..13 实际写出的全部字节的 CRC32，尾部；不含自身', source: 'SidecarSaveBundle.kt:187-194、:257-261' }
+  declaration_segment:
+    codec_magic: 'i32 0x45524633（ASCII "ERF3"）'
+    codec_layout: 'i32 magic + u16 version=1 + i32 count + 有序条目（i32 packageId UTF-8 长度 + bytes + i32 canonical key UTF-8 长度 + bytes + u8 scope）'
+    ordering: 'packageId、canonical key、scope.ordinal 字典序严格升序；重复或乱序拒载'
+    scope_values: 'NORMAL=0、GLOBAL=1、CHARA=2；scope 由 EntityRefScope.entries 解码'
+    limits: '容器段 8 MiB；条目 2^20；packageId 非空且 UTF-8 ≤1024 字节；canonical key 非空、全大写、无首尾空白且 UTF-8 ≤512 字节'
+    empty_rule: '空声明不写该段并保持 v2；v3 解码固定要求该段存在且严格自校验'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/EntityRefDeclarationCodec.kt:15-85
   state_segments_gate:
-    rule: '尾段 11/12 要么都写、要么都不写：两段全空 = 增补前逐字节同形（不写任何尾段字节）'
-    source: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:145-146、:162-165
+    rule: '尾段 12/13 要么都写、要么都不写：两段全空 = 增补前逐字节同形（不写任何尾段字节）'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:161-162、:183-186
     empty_carrier: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:80-91
     payload_codecs: '决策态 = DecisionStateCodec VERSION 2 输出、任务态 = JobSchedulerStateCodec VERSION 2 输出；容器层不解释内容'
     codec_evidence: 'core-vm/src/main/kotlin/com/eratw/port/core/mod/DecisionStateCodec.kt:22、core-vm/src/main/kotlin/com/eratw/port/core/mod/JobSchedulerStateCodec.kt:17-21、:50'
   min_size:
-    value: 46
-    formula: '头 26（magic 4 + version 2 + 三元组 8+8+4）+ 四段长度字 16（注册表/虚拟 NO/实体图/分片数）+ CRC 4'
-    source: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:222-223
+    value_by_version:
+      v2: 46
+      v3: 60
+    formula_v3: 'v2 的 46 字节 + 声明段长度字 4 + 空声明 codec 头 10；v3 非空条目另增'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/SidecarSaveBundle.kt:246-247、:295-302
+    note: 'decode 先执行 46 字节总长闸，再由 v3 固定 readBlob 与 declaration codec 拒绝截断；不存在合法的 56 字节 v3 最小容器'
 
 # ---------------------------------------------------------------------------
 # 三、绑定三元组（.rt2 与 .sav 的同一性凭据）
@@ -124,8 +137,9 @@ capacity:
     - { field: registry_snapshot,       max: '8 MiB',   const: MAX_REGISTRY_BYTES,       line: 205 }
     - { field: virtual_no_snapshot,     max: '16 MiB',  const: MAX_VIRTUAL_NO_BYTES,     line: 208 }
     - { field: decision_state_segment,  max: '16 MiB',  const: MAX_DECISION_STATE_BYTES, line: 211 }
-    - { field: job_state_segment,       max: '16 MiB',  const: MAX_JOB_STATE_BYTES,      line: 214 }
-    - { field: chunk_count,             max: 4096,      const: MAX_CHUNKS,               line: 217 }
+    - { field: job_state_segment,       max: '16 MiB',  const: MAX_JOB_STATE_BYTES,      line: 238 }
+    - { field: entity_ref_declaration_segment, max: '8 MiB', const: 'EntityRefDeclarationCodec.MAX_BYTES', line: 19 }
+    - { field: chunk_count,             max: 4096,      const: MAX_CHUNKS,               line: 241 }
     - { field: '每片载荷 payload',       max: '32 MiB',  const: MAX_CHUNK_BYTES,          line: 220 }
   note: '决策/任务态段在 codec 内另有各自条目数闸（2 的 20 次幂条），不在容器层（SidecarSaveBundle.kt:210/:213 KDoc）'
 
@@ -143,11 +157,12 @@ decode_discipline:
     - { id: D1, rule: '总长度 < 46 拒',                       source: 'SidecarSaveBundle.kt:232' }
     - { id: D2, rule: 'CRC32 先于任何字段解析（对除尾 4 字节外全部字节）', source: 'SidecarSaveBundle.kt:233-237' }
     - { id: D3, rule: 'magic 不符拒',                          source: 'SidecarSaveBundle.kt:240' }
-    - { id: D4, rule: 'version != 2 拒（v1 旧容器直接拒载，不做双版本读取面）', source: 'SidecarSaveBundle.kt:241-242；KDoc :31-33' }
+    - { id: D4, rule: 'version 只认 2/3；v1 与其他版本直接拒载；v3 必须含固定声明段', source: 'SidecarSaveBundle.kt:265-268、:295-302' }
     - { id: D5, rule: '各 blob 段：长度 <0 / 超容量闸 / 超剩余字节 = 拒', source: 'SidecarSaveBundle.kt:245-252' }
     - { id: D6, rule: '分片数 <0 或 >4096 拒；片名长 <=0 或超剩余拒；空片名拒', source: 'SidecarSaveBundle.kt:257-266' }
-    - { id: D7, rule: '分片读完后有剩余字节才读尾段；剩余不足两段（readBlob 抛）或读完后仍有剩余 = 拒', source: 'SidecarSaveBundle.kt:269-277' }
-    - { id: D8, rule: '旧档（增补前写入）无尾段 = 两段取空缺省回落，不拒载：决策态回落「未初始化 seed（宿主熵派生）+ 无动态实例」、任务态回落「无实例」', source: 'SidecarSaveBundle.kt:35-44、:87-91' }
+    - { id: D7, rule: 'v3 分片后固定读声明段并严格解码；v2 分片后有剩余字节才读 12/13 尾段；有剩余但读不满两段或读完后仍有剩余 = 拒', source: 'SidecarSaveBundle.kt:295-311' }
+    - { id: D8, rule: '旧档无 12/13 尾段 = 两段取空缺省回落，不拒载：决策态回落「未初始化 seed（宿主熵派生）+ 无动态实例」、任务态回落「无实例」', source: 'SidecarSaveBundle.kt:35-44、:87-91' }
+    - { id: D9, rule: 'v3 声明段 CRC 失败、截断、重复/乱序、非法 UTF-8、scope/容量越界或尾随字节均拒载', source: 'EntityRefDeclarationCodec.kt:47-85、:101-132；SidecarSaveBundle.kt:257-261' }
 
 # ---------------------------------------------------------------------------
 # 六、分片载荷分层（容器层不解释；真实分层自外向内）
@@ -172,6 +187,10 @@ chunk_payload:
     source: core-vm/src/main/kotlin/com/eratw/port/core/mod/ModStorageSection.kt:52-167（序律 :191-196）
   csv_values:
     rule: 'Mod CSV 注入值只进激活包自己的分片；孤儿片载荷绝不被本会话值污染（原样透传）'
+    restore_ownership: >-
+      恢复前必须以当前 ModCsvInjectionPlan.cellAt 核对 packageId、表、关键字与索引完全归属该存档键，
+      且 isInjected 为真；失主、Base、alias 或当前关键字已消失的格子只告警丢弃，不得写变量池。
+    ownership_source: core-vm/src/main/kotlin/com/eratw/port/core/vars/ModCsvValues.kt:405-431
     source: 'app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:2016-2023；并集面 ModCsvValueCodec.kt:63-76'
     spec_crossref: '持久化键 (PackageId, TableId, CanonicalKeyword, CharIdentity, Value) 与「Base 位进 .sav、Mod 位进 .rt2」语义 = era-arch-v61u.md §8:246-252'
 
@@ -192,11 +211,74 @@ lifecycle:
     rule: '显式卸载（release）= 整包遗忘：段 + dataVersion 记录 + 激活标记一起摘；抓取侧对已释放包整段跳过（段与字节减在下次存档，历史档不改写）'
     source: 'core-vm/src/main/kotlin/com/eratw/port/core/mod/ModStorageStore.kt:272-278；app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:1991-2027'
   restore_order:
-    rule: '恢复读序：虚拟 NO 注册表 → 包注册表 → 实体图（虚拟 NO 是 .sav 角色块里被 vanilla 变量存下的每槽身份，不先恢复会被当悬空下标）；注册表并集独立成立，不与实体灌入同事务'
-    source: 'core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:22-27、:139-145'
+    rule: '先完成绑定、声明、导入计划、重映射实体快照、虚拟 NO 与变量槽的全量预检；commit 才按变量槽 → 宿主复位回调 → 投影身份复位 → 实体图替换 → 虚拟 NO → 注册表提交'
+    source: 'core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:166-232'
+  same_session_replace:
+    rule: '同会话 LOADDATA 允许现内核非空：prepare 仍零写，commit 在投影复位后以 replaceRestore 替换实体、列、边与槽代际；旧槽实体不得残留'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/entity/EntityKernel.kt:516-539
   restore_rebuild:
     rule: '宿主侧重建容器：解码各片 → R2PK 拆包 → MST1 decode(bytes, 已知包=本会话激活集) → 合并重编 → ModStorageStore.load → adoptStorage'
     source: app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:2061-2075
+
+# ---------------------------------------------------------------------------
+# 七·五、entity-ref 三遍历面与显式跨设备重映射（ABI-2）
+# ---------------------------------------------------------------------------
+entity_ref_remapping:
+  status: '本引擎扩展 ABI；PC Emuera 无直接对应物，权威 = 本规约 + 下列实现锚'
+  csharp_anchor: 'TODO(verify)：不存在可锚定的 PC C# 跨设备重映射语义；不得用同形 EntityId 行为冒充移植依据'
+  persistent_surfaces:
+    - id: 1
+      form: '实体组件中标为 EntityRef 的整数字段'
+      implementation: 'EntityIdImportPlan.remapped 对完整实体快照统一重映射；restore 同时核对字段类型与 entity-ref 旗标，旗标漂移零写拒绝'
+      source: 'core-vm/src/main/kotlin/com/eratw/port/core/entity/EntityIdImportPlan.kt:19-31；EntityKernel.kt:573-590'
+    - id: 2
+      form: '关系两端 EntityId'
+      implementation: '与组件同一 EntitySnapshot.remapped；重映射前后验证活 EntityId 单射'
+      source: core-vm/src/main/kotlin/com/eratw/port/core/entity/EntityIdImportPlan.kt:19-47
+    - id: 3
+      form: 'Manifest 显式声明的 INT SAVEDATA 变量槽与 Mod CSV 注入整数槽；槽档只处理 NORMAL/CHARA，GLOBAL 仅走 LOADGLOBAL'
+      implementation: '只遍历冻结声明 ∩ 已注册 ∩ INT ∩ SAVEDATA ∩ 实际发射；私有域永不进入；严格模式无法解析即拒'
+      source: 'core-vm/src/main/kotlin/com/eratw/port/core/vars/EntityRefVariablePlanner.kt:70-143；SaveService.kt:199-217；core-vm/src/main/kotlin/com/eratw/port/core/vars/ModCsvValues.kt:405-431'
+  slot_global_split:
+    rule: '槽档跨设备重映射只改 NORMAL/CHARA 与 CHARA CSV；GLOBAL 不由 saveNN.sav.rt2 恢复，也不得被槽档 remap 污染'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:203-217
+  virtual_no_authority:
+    rule: '槽档虚拟 NO 段是该槽权威身份集，替换而非并集；非空段连同快照游标恢复，空段清身份但保留本会话续发游标，已发号不退回池'
+    source: 'core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:190-198；VirtualCharaNoRegistry.kt:196-206'
+  declaration_lifetime:
+    rule: '激活包使用当前冻结声明；未激活包沿用存档携带声明；后续存档继承孤儿声明；重激活声明与旧声明不一致 = 写入前拒绝'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:231、:367-402
+  same_device:
+    rule: '默认严格并集：同包异 ID 或同 ID 异包当场拒绝；不静默择一、不自动重分配'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/entity/EntityIdImportPlan.kt:51-80
+  cross_device:
+    entry: 'FileSystemOps.loadDataCrossDevice；SidecarStoragePort 未实现 CrossDeviceSidecarStoragePort 时拒绝进入'
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt:700-708、:551-559
+    allocation: >-
+      读取源注册表快照后，保留 __core__=1；其余源包按 packageId 字典序，从目标 nextId
+      水位依次单调分配。相同目标视图与相同源字节产生相同计划；容量耗尽拒绝。恒等分配不写入
+      remapTable，不能伪装成实际重映射。
+    allocation_source: core-vm/src/main/kotlin/com/eratw/port/core/entity/EntityIdImportPlan.kt:83-101
+    commit_order: >-
+      .sav 先按原版语义完整落地且字节不改；随后侧车解码、分片/决策/任务/CSV 载荷全部预检；
+      非空可挂起剧情续体先与实体图共用同一 remapTable 重映射 actor/targets/primaryTarget，
+      commit 依次提交第三面变量槽、宿主复位回调、投影身份复位、实体图替换、虚拟 NO、注册表，
+      再 adopt 已重映射分片与决策/任务态，最后提交 CSV；任一步校验失败不得进入半恢复提交序列。
+    commit_source: 'core-vm/src/main/kotlin/com/eratw/port/core/save/FileSystemOps.kt:733-776；core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:165-246；app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:2302-2369'
+    old_save_rule: 'v2 无声明档在同设备模式可读；跨设备产生非空 remapTable 时无声明即拒，禁止猜测变量槽语义'
+    old_save_source: core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:178-187
+    global_rule: 'LOADGLOBAL 只恢复 GLOBAL 声明槽与分片，使用恒等表，不执行跨设备短 ID 重分配；跨设备入口仅覆盖槽档'
+    global_source: core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:294-339
+  host_scope: '生产端口已支持显式跨设备恢复；导入界面与用户触发动作尚未接线，不得宣称存在完整跨设备导入 UX'
+  durable_context_surface:
+    rule: >-
+      槽档剧情续体保存完整 InteractionContext；跨设备恢复与实体图共用同一 EntityIdRemapTable，
+      只重映射 actor、targets、primaryTarget。空字符串是“无续体”的恒等哨兵，不得解码或改写；
+      仅存在非空续体被重映射时才重建存储容器。
+    empty_identity_rule: '空续体与恒等 remapTable 均原样保留；保留键非字符串或非空续体损坏时，在恢复与跨设备重映射路径失败关闭，实体、注册表与存储不得提交'
+    csharp_anchor: 'TODO(verify)：可挂起剧情续体及跨设备引用重映射是 RT2 自研 ABI，PC reference 无对应语义'
+    source: 'core-vm/src/main/kotlin/com/eratw/port/core/mod/DurableInteractionRuntime.kt:142-164；DurableInteractionWiring.kt:14-53；app/src/main/kotlin/com/eratw/port/android/ModRuntimeAssembly.kt:2338-2369'
+  evidence: core-vm/src/test/kotlin/com/eratw/port/core/save/EntityRefSaveProtocolTest.kt；core-vm/src/test/kotlin/com/eratw/port/core/mod/DurableInteractionRuntimeTest.kt；app/src/test/kotlin/com/eratw/port/android/ModSaveStateIntegrityE2ETest.kt
 
 # ---------------------------------------------------------------------------
 # 八、槽档 vs global 侧车的形态差（同一容器 ABI，两个抓取/恢复入口）
@@ -204,12 +286,13 @@ lifecycle:
 slot_vs_global:
   slot:
     capture: 'captureBundle：注册表快照 + 实体图 + 虚拟 NO 段 + 分片（SaveService.kt:89-99）'
-    restore: 'restoreBundle：绑定校验 → 虚拟 NO → 注册表 → 实体图（SaveService.kt:132-146）'
+    restore: 'prepareSlotRestore：绑定/形态/声明/导入计划/实体图/虚拟 NO/变量槽预检 → Ready.commit（SaveService.kt:165-233）'
   global:
     capture: 'captureGlobalBundle：实体图恒空、虚拟 NO 恒空，只带注册表快照与 Mod GLOBAL 分片；写触发 = SAVEGLOBAL（SaveService.kt:102-116）'
     restore: >-
       restoreGlobalBundle：只验绑定与 global 形状闸（实体图非空 = 槽档误喂，拒；虚拟 NO 非空 = 槽档误喂，拒），
-      然后分片原样交还宿主——不并注册表、不灌内核（SaveService.kt:180-191）
+      恢复 GLOBAL 声明引用槽（恒等 remap）并把分片原样交还宿主——不并注册表、不灌内核、不替换虚拟 NO。
+    source: core-vm/src/main/kotlin/com/eratw/port/core/save/SaveService.kt:296-339
     zero_payload_identity: '空内核经 EntityPayloadCodec.encode 也写版本头与名表（≥8 字节），故「零长实体载荷」唯一地标识 global 形（SaveService.kt:121-125）'
   state_segments:
     rule: '决策/任务态尾段在槽档与 global 两侧同口径同结构（不为任一侧另开段格式）；宿主缝未装配 = 两段都不写（旧档同形）'

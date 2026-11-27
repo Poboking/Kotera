@@ -10,28 +10,25 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 
 /**
- * QB-A1 回归锁（tripwire）：`_STK_*VAR*` 栈码族对「动态下标 + 稀疏背板」**不走补径、
- * 照旧严格抛**——钉住现状，防两头的静默漂移。
+ * QB-A1 回归锁：`_STK_*VAR*` 栈码族对运行期越界下标**接稀疏补径**（2026-11-27 落地）。
  *
- * ## 范围与口径（verify-notes 2026-11-17 稀疏条「待接线三条」之一）
+ * ## 裁决与理由（此前版本是「照旧严格抛」的 tripwire）
  *
- * 稀疏 1 维背板补径（`c45357a86` + `660e3ef61`）只接在**表达式通道**
- * （`VarRef` 五路 + `Unary` 两路，见 `core.expr`）；五个栈码
- * `_STK_PUSH_VAR_I` / `_STK_PUSH_VAR_S` / `_STK_PLUS_VAR_I` / `_STK_STORE_VAR_I` /
- * `_STK_STORE_VAR_S` 的实现（`Vm.kt:3107/:3127/:3145/:3172/:3201`）直呼
- * `readInt`/`readStr`/`plusInt`/`writeInt`/`writeStr`（及各自 H 口），catch 的又是
- * `ExprEvalException`——`CodeEE` 不是它的子类型，直接原样穿透 ⇒ 动态越界照抛。
- * 发射面只有 `.erbasm` 手写汇编（`Assembler.kt:441-467`），ERB 语料不可达。
+ * 稀疏 1 维背板补径（`c45357a86` + `660e3ef61`）在表达式通道由 `VarRef` 五路承接；
+ * 五个栈码 `_STK_PUSH_VAR_I` / `_STK_PUSH_VAR_S` / `_STK_PLUS_VAR_I` /
+ * `_STK_STORE_VAR_I` / `_STK_STORE_VAR_S` 原先直呼 `readInt`/`readStr`/`plusInt`/
+ * `writeInt`/`writeStr`（及各自 H 口），catch 的只有 `ExprEvalException`——`CodeEE`
+ * 不是其子类型，越界原样穿透。发射面只有 `.erbasm` 手写汇编（`Assembler.kt:441-467`），
+ * ERB 语料不可达。
  *
- * 「写明此族仅供 erbasm（KDoc）或补径」是**二选一的主代码裁决**，归组长（QB-A1 契约
- * 禁改主代码）；本文件先把**当前**口径钉住：
- * - 若组长裁决「补径」，这五条红 = 裁决落地的待办清单，逐条翻绿；
- * - 若裁决「仅供 erbasm」（维持现状），本文件就是那条裁决的回归面——任何人无意间
- *   改动栈码族的越界行为（无论变松还是变严）都会在此显式红。
+ * 裁决为**补径**而不是「写明仅供 erbasm」：栈面下标全部是运行期值（`.erbasm` 没有
+ * 运算符常量层，`_STK_PUSH_IMM -1` 与算出来的 -1 在 VM 眼里同形）⇒ 与 `VarRef` 的
+ * 「常量下标抛、运行期下标容忍」判据同档。容忍语义只在数据层（`SparseArray.cs:25-40`），
+ * 非 1 维变量的补径口仍回落严格通道、抛同一条 `CodeEE`（见下图二维对照）。
  *
- * **反向证明（相对 `c45357a86`）**：本族从未接过补径，撤掉主补径本文件仍绿——
- * 它锁的不是补径本身，而是「栈码族 = 严格」的现状口径；正向对照用例
- * （界内存取回环）保证红/绿判据来自越界语义而不是夹具坏了。
+ * **反向证明**：撤掉 `Vm.readVarInt` 等五个口的 `catch (CodeEE)` 段，五条越界用例立刻
+ * 回到 `数组变量"ITEM"的第1参数(-1)超出数组范围` 而红；正向对照（界内存取回环）保证
+ * 红/绿来自越界语义而不是夹具坏了。
  */
 class SparseArrayOorStackCodeTest {
 
@@ -94,12 +91,113 @@ class SparseArrayOorStackCodeTest {
     }
 
     // ------------------------------------------------------------------
-    // Tripwire：动态下标越界照抛（五口逐一）
+    // 补径：运行期下标越界按 1 维稀疏背板容忍（五口逐一）
     // ------------------------------------------------------------------
 
-    /** 读口（整数）。反向对照：表达式通道同形态返 0（SparseArrayOorTest 动态下标越界读返回默认值 0）。 */
+    /** 读口（整数）：越界读缺省 0（PC 实测 `ITEM:-1` 读 0）。 */
     @Test
-    fun `栈码 PUSH_VAR_I 动态越界照抛`() {
+    fun `栈码 PUSH_VAR_I 动态越界读返 0`() {
+        val store = newStore()
+        val ret = runOn(
+            store,
+            """
+            .func main slots=4
+              _STK_PUSH_IMM -1
+              _STK_PUSH_VAR_I "ITEM", 1
+              _STK_POP_SLOT_I R0
+              _RET R0
+            """,
+        )
+        assertEquals(0L, ret)
+        assertEquals(0L, store.readSparseIntOor("ITEM", longArrayOf(-1)), "越界读不落层，只返默认值")
+    }
+
+    /** 读口（字符串）：越界读空串（回填进 RESULTS:0 读回，`run()` 只返回 Long）。 */
+    @Test
+    fun `栈码 PUSH_VAR_S 动态越界读返空串`() {
+        val store = newStore()
+        runOn(
+            store,
+            """
+            .func main slots=4
+              _STK_PUSH_IMM -1
+              _STK_PUSH_VAR_S "STR", 1
+              _STK_PUSH_IMM 0
+              _STK_STORE_VAR_S "RESULTS", 1
+              _RET R0
+            """,
+        )
+        assertEquals("", store.readStr("RESULTS", longArrayOf(0)))
+    }
+
+    /** 读改写一体口（`+=`）：缺省 0 + 1 = 1，并落覆盖层（第二次读到 1）。 */
+    @Test
+    fun `栈码 PLUS_VAR_I 动态越界按缺省 0 累加`() {
+        val store = newStore()
+        val ret = runOn(
+            store,
+            """
+            .func main slots=4
+              _STK_PUSH_IMM -1
+              _STK_PLUS_VAR_I "ITEM", 1, 1
+              _STK_POP_SLOT_I R0
+              _RET R0
+            """,
+        )
+        assertEquals(1L, ret)
+        assertEquals(1L, store.readSparseIntOor("ITEM", longArrayOf(-1)), "`+=` 结果落覆盖层")
+    }
+
+    /** 写口（整数）：写 7 落覆盖层，随后同槽读回 7。 */
+    @Test
+    fun `栈码 STORE_VAR_I 动态越界写可读回`() {
+        val store = newStore()
+        val ret = runOn(
+            store,
+            """
+            .func main slots=4
+              _STK_PUSH_IMM -1
+              _STK_PUSH_IMM 7
+              _STK_STORE_VAR_I "ITEM", 1
+              _STK_PUSH_IMM -1
+              _STK_PUSH_VAR_I "ITEM", 1
+              _STK_POP_SLOT_I R0
+              _RET R0
+            """,
+        )
+        assertEquals(7L, ret)
+        assertEquals(7L, store.readSparseIntOor("ITEM", longArrayOf(-1)), "落点 = 覆盖层，可按同下标读回")
+    }
+
+    /** 写口（字符串）：写 "x" 落覆盖层，随后同槽读回 "x"（回填 RESULTS:0）。 */
+    @Test
+    fun `栈码 STORE_VAR_S 动态越界写可读回`() {
+        val store = newStore()
+        runOn(
+            store,
+            """
+            .func main slots=4
+              _STK_PUSH_IMM -1
+              _STK_PUSH_STR "x"
+              _STK_STORE_VAR_S "STR", 1
+              _STK_PUSH_IMM -1
+              _STK_PUSH_VAR_S "STR", 1
+              _STK_PUSH_IMM 0
+              _STK_STORE_VAR_S "RESULTS", 1
+              _RET R0
+            """,
+        )
+        assertEquals("x", store.readStr("RESULTS", longArrayOf(0)), "落点 = 覆盖层，可按同下标读回")
+        assertEquals("x", store.readSparseStrOor("STR", longArrayOf(-1)), "落点 = 覆盖层")
+    }
+
+    // ------------------------------------------------------------------
+    // 补径边界：非 1 维变量仍严格抛（补径不得放宽到稠密背板）
+    // ------------------------------------------------------------------
+
+    /** 二维内置数组没有 SparseArray 背板：动态越界照旧抛，且文案是玩家上报同款。 */
+    @Test
+    fun `栈码 PUSH_VAR_I 二维越界仍抛`() {
         val store = newStore()
         val e = assertFailsWith<CodeEE> {
             runOn(
@@ -107,88 +205,13 @@ class SparseArrayOorStackCodeTest {
                 """
                 .func main slots=4
                   _STK_PUSH_IMM -1
-                  _STK_PUSH_VAR_I "ITEM", 1
+                  _STK_PUSH_IMM 0
+                  _STK_PUSH_VAR_I "DITEMTYPE", 2
                   _STK_POP_SLOT_I R0
                   _RET R0
                 """,
             )
         }
-        assertEquals("数组变量\"ITEM\"的第1参数(-1)超出数组范围", e.message, "与玩家上报文案逐字同款")
-    }
-
-    /** 读口（字符串）。 */
-    @Test
-    fun `栈码 PUSH_VAR_S 动态越界照抛`() {
-        val store = newStore()
-        val e = assertFailsWith<CodeEE> {
-            runOn(
-                store,
-                """
-                .func main slots=4
-                  _STK_PUSH_IMM -1
-                  _STK_PUSH_VAR_S "STR", 1
-                  _STK_POP_SLOT_S R0
-                  _RETS R0
-                """,
-            )
-        }
-        assertEquals("数组变量\"STR\"的第1参数(-1)超出数组范围", e.message)
-    }
-
-    /** 读改写一体口（`+=`）。 */
-    @Test
-    fun `栈码 PLUS_VAR_I 动态越界照抛`() {
-        val store = newStore()
-        val e = assertFailsWith<CodeEE> {
-            runOn(
-                store,
-                """
-                .func main slots=4
-                  _STK_PUSH_IMM -1
-                  _STK_PLUS_VAR_I "ITEM", 1, 1
-                  _STK_POP_SLOT_I R0
-                  _RET R0
-                """,
-            )
-        }
-        assertEquals("数组变量\"ITEM\"的第1参数(-1)超出数组范围", e.message)
-    }
-
-    /** 写口（整数；值在栈顶、下标在下的弹出次序见 Vm.storeVarInt KDoc）。 */
-    @Test
-    fun `栈码 STORE_VAR_I 动态越界照抛`() {
-        val store = newStore()
-        val e = assertFailsWith<CodeEE> {
-            runOn(
-                store,
-                """
-                .func main slots=4
-                  _STK_PUSH_IMM -1
-                  _STK_PUSH_IMM 7
-                  _STK_STORE_VAR_I "ITEM", 1
-                  _RET R0
-                """,
-            )
-        }
-        assertEquals("数组变量\"ITEM\"的第1参数(-1)超出数组范围", e.message)
-    }
-
-    /** 写口（字符串）。 */
-    @Test
-    fun `栈码 STORE_VAR_S 动态越界照抛`() {
-        val store = newStore()
-        val e = assertFailsWith<CodeEE> {
-            runOn(
-                store,
-                """
-                .func main slots=4
-                  _STK_PUSH_IMM -1
-                  _STK_PUSH_STR "x"
-                  _STK_STORE_VAR_S "STR", 1
-                  _RET R0
-                """,
-            )
-        }
-        assertEquals("数组变量\"STR\"的第1参数(-1)超出数组范围", e.message)
+        assertEquals("数组变量\"DITEMTYPE\"的第1参数(-1)超出数组范围", e.message)
     }
 }

@@ -24,6 +24,28 @@ import java.io.DataOutputStream
  */
 class PackageShortIdRegistry {
 
+    /** 只读合并面；值容器均是不可变副本，不暴露内部 Map。 */
+    data class Snapshot(
+        val entries: Map<String, Int>,
+        val nextId: Int,
+        val lockedIds: Set<Int>,
+    )
+
+    /** 当前注册表的只读快照（导入计划不修改活注册表的唯一入口）。 */
+    fun snapshot(): Snapshot = Snapshot(byName.toMap(), nextId, lockedIds.toSet())
+
+    /** 用已完整解码/校验的快照替换本注册表；解码失败发生在任何字段改写之前。 */
+    fun replaceSnapshot(bytes: ByteArray) {
+        val other = decode(bytes)
+        byName.clear()
+        byId.clear()
+        byName.putAll(other.byName)
+        byId.putAll(other.byId)
+        lockedIds.clear()
+        lockedIds.addAll(other.lockedIds)
+        nextId = other.nextId
+    }
+
     /** packageId → shortId。插入序 = 分配序（确定性重放）。 */
     private val byName = LinkedHashMap<String, Int>()
 

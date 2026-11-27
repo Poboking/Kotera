@@ -169,6 +169,41 @@ class VirtualCharaNoRegistry(
         merge(decode(bytes, isNativeCsvNo))
     }
 
+    /** 用当前宿主原生 CSV 判定校验一个快照，返回待提交副本。 */
+    fun prepareSnapshot(snapshot: Snapshot): VirtualCharaNoRegistry = restore(snapshot, isNativeCsvNo)
+
+    /** 用当前宿主原生 CSV 判定校验并编码一个重映射后的快照。 */
+    fun encodeSnapshot(snapshot: Snapshot): ByteArray = restore(snapshot, isNativeCsvNo).encode()
+
+    /** prepare：两遍校验并构造合并结果，活注册表零写入。 */
+    fun prepareMergeSnapshot(bytes: ByteArray): VirtualCharaNoRegistry {
+        val other = decode(bytes, isNativeCsvNo)
+        for ((no, entityId) in other.virtualNoToEntity) {
+            val mine = virtualNoToEntity[no]
+            require(mine == null || mine == entityId) { "虚拟 NO $no 分裂：本地 $mine vs 快照 $entityId" }
+            val myNo = entityToVirtualNo[entityId]
+            require(myNo == null || myNo == no) { "实体 $entityId 分裂：本地 $myNo vs 快照 $no" }
+        }
+        val entries = LinkedHashMap<Int, Long>(virtualNoToEntity)
+        entries.putAll(other.virtualNoToEntity)
+        return restore(
+            Snapshot(entries, maxOf(nextCandidate, other.nextCandidate)),
+            isNativeCsvNo,
+        )
+    }
+
+    /** 槽档身份替换：空段清登记并保留续发游标，已发号不因旧槽无该段而复用。 */
+    fun prepareEmptySnapshot(): VirtualCharaNoRegistry = restore(Snapshot(emptyMap(), nextCandidate), isNativeCsvNo)
+
+    /** commit：只接收本实例 prepare 出的已验证槽档身份。 */
+    internal fun adoptSnapshot(prepared: VirtualCharaNoRegistry) {
+        entityToVirtualNo.clear()
+        virtualNoToEntity.clear()
+        entityToVirtualNo.putAll(prepared.entityToVirtualNo)
+        virtualNoToEntity.putAll(prepared.virtualNoToEntity)
+        nextCandidate = prepared.nextCandidate
+    }
+
     companion object {
         /**
          * 虚拟 NO 起点。取 10000：远高于语料硬墙 `人物数量上限 = 200`（DIM.ERH:209）

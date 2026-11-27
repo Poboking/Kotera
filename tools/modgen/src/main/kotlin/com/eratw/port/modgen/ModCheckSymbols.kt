@@ -4,6 +4,10 @@ package com.eratw.port.modgen
  * 类型化键符号表：生成物里的 `ComponentKey("...")`/`ArchetypeKey("...")` 字面量，加上声明文件里的
  * 别名（`val FACT: ArchetypeKey = MemoryKeys.archetype`）。实参解析先精确匹配 `Object.prop`，
  * 再退回唯一的简单名 —— 与 Kotlin 的作用域直觉一致，但不需要真编译。
+ *
+ * 别名链经 [resolve] 递归解析；破损源码里的自指/互指别名环（编不过的模块正是 check-mod 的
+ * 目标输入）按「当次不可解析」返回 null —— 只往漏报方向偏，不允许把整个 check-mod 进程
+ * 带进 StackOverflowError。
  */
 internal class Symbols(
     private val literals: Map<String, String>,

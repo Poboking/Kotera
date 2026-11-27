@@ -1339,7 +1339,9 @@ class VariableStore(
         val key = sparseKeyOf(def, indices)
         if (value == 0L) {
             sparseIntOverflow.remove(key)
-        } else if (sparseIntOverflow.size < SPARSE_OVERFLOW_LIMIT) {
+        } else if (sparseIntOverflow.containsKey(key) || sparseIntOverflow.size < SPARSE_OVERFLOW_LIMIT) {
+            // 满层时只挡**新增键**：改写已有键不增加堆占用，冻结它会让跑飞后已落层的格子
+            // 静默停在旧值（KDoc 的「丢弃新写入」不包含这种情况）。
             sparseIntOverflow[key] = value
         }
     }
@@ -1355,7 +1357,8 @@ class VariableStore(
         val key = sparseKeyOf(def, indices)
         if (value.isEmpty()) {
             sparseStrOverflow.remove(key)
-        } else if (sparseStrOverflow.size < SPARSE_OVERFLOW_LIMIT) {
+        } else if (sparseStrOverflow.containsKey(key) || sparseStrOverflow.size < SPARSE_OVERFLOW_LIMIT) {
+            // 同整数侧：满层只挡新增键，改进已有键照常落层。
             sparseStrOverflow[key] = value
         }
     }
@@ -1579,6 +1582,15 @@ class VariableStore(
      * 越界与哨兵一律 [CodeEE]：句柄是本层分配的，坏句柄只可能来自「跨 store 复用」
      * 或调用方自己算错。裸 `IndexOutOfBoundsException` 没有变量名也没有行号，
      * 与「字节码不完整必须 CodeEE」的全局口径冲突。
+     *
+     * **本层只做严格存取，不接稀疏补径**（QB-A1 遗留缺口，2026-11-27 写明）：`readIntH` /
+     * `readStrH` / `plusIntH` / `writeIntH` / `writeStrH` 一族对 1 维内置数组的越界下标
+     * 照旧抛 `CodeEE`；「运行期下标越界 ⇒ 读默认值 / 写进 sparse 覆盖层」的判据（常量下标
+     * 仍抛、运行期下标才容忍）只有调用方持有，所以补径统一在外层做：表达式通道由
+     * `VarRef.getIntValue` 等五路在 catch 后调 `readSparseIntOor` 一族，栈码由
+     * `Vm.readVarInt` 等五个口在 catch 后调同一族（C# 侧判据见
+     * `Runtime/Script/SparseArray.cs:25-40`，越界容忍发生在数据层，句柄口是其最内层落点）。
+     * 把补径下推到本层会让「常量下标越界」也静默通过，与装载期拒绝的口径分叉。
      */
     private fun entryOf(handle: Int): Any {
         if (handle <= VariableHandles.NONE || handle >= handleEntries.size) {

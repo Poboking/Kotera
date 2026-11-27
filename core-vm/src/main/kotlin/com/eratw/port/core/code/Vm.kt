@@ -3269,7 +3269,30 @@ class VirtualMachine(
         }
     }
 
-    /** `_STK_PUSH_VAR_I`：读整型变量（下标已由 [popIndices] 弹出）。 */
+    /**
+     * 栈码变量的「严格口越界 ⇒ 转稀疏补径」出口（[readVarInt] 等五口共用）。
+     *
+     * 语义：严格口抛出的 [signal] 只是「该走补径」的判据（1 维内置数组的运行期越界），
+     * 补径成功时它没有语义可保留；补径自身失败（非 1 维 / 非稀疏背板 / 常量变量）时，
+     * 把判据挂成 suppressed 再抛，取证能看到「先判越界、再判不可补径」两段，
+     * 而不是把第一段静默吞掉。
+     */
+    private inline fun <T> sparseOnOorFallback(signal: CodeEE, fallback: () -> T): T =
+        try {
+            fallback()
+        } catch (secondary: CodeEE) {
+            throw secondary.apply { addSuppressed(signal) }
+        }
+
+    /**
+     * `_STK_PUSH_VAR_I`：读整型变量（下标已由 [popIndices] 弹出）。
+     *
+     * **越界口径与表达式通道一致（QB-A1 遗留缺口，2026-11-27 接线）**：栈面上的下标全部
+     * 是运行期值（`.erbasm` 没有运算符常量层，`_STK_PUSH_IMM -1` 与「算出来的 -1」在 VM
+     * 眼里同形），所以越界一律当「动态下标」处理 —— 先走严格口，`CodeEE` 抛出即改走
+     * `SparseOorVariableReader`，让 1 维内置数组按 4.981 的 SparseArray 背板读默认值 0。
+     * 非 1 维 / 非稀疏变量在补径口内仍会抛同一条 `CodeEE`（缺省实现回落严格通道）。
+     */
     private fun readVarInt(strIdx: Int, dim: Int, pc: Int): Long {
         // 变量名是字符串池下标（裸操作数）：先判池再动栈面，失败时不留半截栈
         // （与 [checkVarDim] 的「校验收在第一次弹出之前」同一条纪律，见 [storeVarInt]）。
@@ -3284,12 +3307,14 @@ class VirtualMachine(
             } else {
                 vars.readInt(name, indices)
             }
+        } catch (e: CodeEE) {
+            sparseOnOorFallback(e) { vars.readSparseIntOor(name, indices) }
         } catch (e: ExprEvalException) {
             throw errorAt(e, pc)
         }
     }
 
-    /** `_STK_PUSH_VAR_S`：读字符串变量。 */
+    /** `_STK_PUSH_VAR_S`：读字符串变量（越界补径口径同 [readVarInt]，越界读返空串）。 */
     private fun readVarStr(strIdx: Int, dim: Int, pc: Int): String {
         checkPoolIndex(strIdx, program.stringCount, "字符串池", pc)
         val indices = popIndices(dim, pc)
@@ -3302,12 +3327,14 @@ class VirtualMachine(
             } else {
                 vars.readStr(name, indices)
             }
+        } catch (e: CodeEE) {
+            sparseOnOorFallback(e) { vars.readSparseStrOor(name, indices) }
         } catch (e: ExprEvalException) {
             throw errorAt(e, pc)
         }
     }
 
-    /** `_STK_PLUS_VAR_I`：读改写一体（= `plusInt`，下标只求值一次）。 */
+    /** `_STK_PLUS_VAR_I`：读改写一体（= `plusInt`，下标只求值一次）；越界补径口径同 [readVarInt]。 */
     private fun plusVarInt(strIdx: Int, dim: Int, delta: Int, pc: Int): Long {
         checkPoolIndex(strIdx, program.stringCount, "字符串池", pc)
         val indices = popIndices(dim, pc)
@@ -3321,6 +3348,8 @@ class VirtualMachine(
             } else {
                 vars.plusInt(name, indices, delta.toLong())
             }
+        } catch (e: CodeEE) {
+            sparseOnOorFallback(e) { vars.plusSparseIntOor(name, indices, delta.toLong()) }
         } catch (e: ExprEvalException) {
             throw errorAt(e, pc)
         }
@@ -3352,6 +3381,9 @@ class VirtualMachine(
                 }
             }
             writer.writeInt(name, indices, value)
+        } catch (e: CodeEE) {
+            // 越界补径口径同 [readVarInt]：栈面下标全是运行期值 ⇒ 落 1 维稀疏覆盖层。
+            sparseOnOorFallback(e) { writer.writeSparseIntOor(name, indices, value) }
         } catch (e: ExprEvalException) {
             throw errorAt(e, pc)
         }
@@ -3381,6 +3413,9 @@ class VirtualMachine(
                 }
             }
             writer.writeStr(name, indices, value)
+        } catch (e: CodeEE) {
+            // 越界补径口径同 [readVarInt]：字符串侧落覆盖层，随后能按同下标读回。
+            sparseOnOorFallback(e) { writer.writeSparseStrOor(name, indices, value) }
         } catch (e: ExprEvalException) {
             throw errorAt(e, pc)
         }

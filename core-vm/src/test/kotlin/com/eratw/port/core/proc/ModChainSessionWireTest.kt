@@ -1,20 +1,24 @@
 package com.eratw.port.core.proc
 
 import com.eratw.port.core.code.CodeBuilder
+import com.eratw.port.core.code.EventRegistry
 import com.eratw.port.core.code.Opcode
 import com.eratw.port.core.code.Program
 import com.eratw.port.core.code.ResolverPolicy
 import com.eratw.port.core.loader.BootMetadata
+import com.eratw.port.core.mod.AssembledChain
 import com.eratw.port.core.mod.ModChainRuntimePlan
 import com.eratw.port.core.patch.LinkInputs
 import com.eratw.port.core.patch.LinkableModule
 import com.eratw.port.core.patch.ModuleDescriptor
 import com.eratw.port.core.patch.ModuleLinker
+import com.eratw.port.core.vars.DimSpec
 import java.nio.file.Path
 import java.util.Locale
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -138,6 +142,47 @@ class ModChainSessionWireTest {
         )
         assertTrue(s.runtime.functionDispatch!!.indices.any { s.runtime.functionDispatch!![it] != it })
         assertEquals(plan.program.functions.size, plan.functionTable.all().size)
+    }
+
+    /** KI-GLOBAL-DIM：构造带 descriptor.globalDims 的 plan（走 of(chain) 重建路）。 */
+    private fun planWithGlobalDims(): ModChainRuntimePlan {
+        val module = TestModule(
+            descriptor = ModuleDescriptor(
+                packageId = "mod.kojo",
+                globalDims = listOf(
+                    DimSpec(
+                        "K53_CHILD_PERSONALITY",
+                        isStr = true, dims = intArrayOf(4), isGlobal = true, isSavedata = true,
+                    ),
+                    DimSpec("K53C_TEST", isStr = false, dims = intArrayOf(), isConst = true),
+                ),
+            ),
+            program = moduleProgram("ANEW"),
+            functions = listOf(FuncMeta(index = 0, key = "ANEW")),
+        )
+        val linked = ModuleLinker.link(
+            LinkInputs(baseProgram(), baseMetas, listOf(module), ResolverPolicy.MODERN, baseSignature),
+        )
+        val chain = AssembledChain(
+            program = linked.program,
+            descriptors = listOf(module.descriptor),
+            snapshot = null,
+            linked = linked,
+            eventRegistry = EventRegistry.of(linked.catalog),
+            hasOverrides = false,
+            byPassed = false,
+        )
+        return requireNotNull(ModChainRuntimePlan.of(chain))
+    }
+
+    @Test
+    fun `KI-GLOBAL-DIM—mod链全局DIM在运行期declare进VariableStore_CONST跳过`(@TempDir dir: Path) {
+        val s = session(dir, planWithGlobalDims())
+        assertEquals(1, s.modGlobalDimDeclared, "SAVEDATA 全局 #DIM 必须 declare（CONST 跳过）")
+        assertTrue(s.modGlobalDimFailures.isEmpty(), "无重名冲突时不应有失败：${s.modGlobalDimFailures}")
+        val v = s.store.userVar("K53_CHILD_PERSONALITY")
+        assertNotNull(v, "因幡帝包的角色口上变量必须真进 VariableStore")
+        assertEquals(4, v!!.spec.dims[0])
     }
 
     @Test

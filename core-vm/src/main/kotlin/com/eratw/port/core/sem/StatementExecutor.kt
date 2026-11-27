@@ -2119,19 +2119,20 @@ class StatementExecutor {
             FunctionCode.CLEARBIT -> 0
             else -> 2
         }
-        val name = dest.name
-        val idx = resolveIndices(dest, ctx)
+        // 读改写一律经 VarRef（4.981 的 C# 侧同样用 `varTerm.GetIntValue/SetValue`，
+        // `Instraction.Child.cs:778-807`）：直呼 `ctx.variables.readInt/writeInt` 会绕过
+        // 「运行期下标越界 ⇒ 1 维稀疏背板容忍」的补径，动态越界照抛（QB-A1 遗留缺口）。
         for (t in terms) {
             val bit = t.getIntValue(ctx.eval)
             if (bit < 0 || bit > 63) throw CodeEE("第2参数($bit)超出范围(0-63)")
-            var v = ctx.variables.readInt(name, idx)
+            var v = dest.getIntValue(ctx.eval)
             val mask = 1L shl bit.toInt()
             v = when (op) {
                 1 -> v or mask
                 0 -> v and mask.inv()
                 else -> v xor mask
             }
-            ctx.variables.writeInt(name, idx, v)
+            dest.setIntValue(ctx.eval, v)
         }
     }
 
@@ -2140,19 +2141,17 @@ class StatementExecutor {
         openTag(a, code, ErbcFormat.ArgTag.SP_SWAP_VAR)
         val var1 = a.varRefNN()
         val var2 = a.varRefNN()
-        val n1 = var1.name
-        val i1 = resolveIndices(var1, ctx)
-        val n2 = var2.name
-        val i2 = resolveIndices(var2, ctx)
         if (var1.operandType != var2.operandType) throw CodeEE("需要替换的变量的类型不相同")
+        // 存取一律经 VarRef（C# 侧 Process.cs:1371-1395 也是 VariableTerm）：直呼
+        // `ctx.variables` 会绕过 1 维稀疏背板的运行期越界补径（QB-A1 遗留缺口）。
         if (var1.operandType == OperandType.INT) {
-            val v = ctx.variables.readInt(n1, i1)
-            ctx.variables.writeInt(n1, i1, ctx.variables.readInt(n2, i2))
-            ctx.variables.writeInt(n2, i2, v)
+            val v = var1.getIntValue(ctx.eval)
+            var1.setIntValue(ctx.eval, var2.getIntValue(ctx.eval))
+            var2.setIntValue(ctx.eval, v)
         } else {
-            val v = ctx.variables.readStr(n1, i1)
-            ctx.variables.writeStr(n1, i1, ctx.variables.readStr(n2, i2))
-            ctx.variables.writeStr(n2, i2, v)
+            val v = var1.getStrValue(ctx.eval)
+            var1.setStrValue(ctx.eval, var2.getStrValue(ctx.eval))
+            var2.setStrValue(ctx.eval, v)
         }
     }
 
@@ -2336,10 +2335,8 @@ class StatementExecutor {
         openTag(a, code, ErbcFormat.ArgTag.SP_TIMES)
         val dest = a.varRefNN()
         val doubleValue = a.f64()
-        val name = dest.name
-        val idx = resolveIndices(dest, ctx)
-        val cur = ctx.variables.readInt(name, idx)
-        execTimesInt(name, idx, cur, doubleValue, ctx)
+        val cur = dest.getIntValue(ctx.eval)
+        execTimesInt(dest, cur, doubleValue, ctx)
         return ExecResult.Normal
     }
 
@@ -2367,14 +2364,14 @@ class StatementExecutor {
      * 在 `position == null` 时转 `PrintError`（`EmueraConsole.Print.cs:352-380`），
      * 这里走 `ctx.console.printError`；同时落 `ClampWarnings` 的 overflow 桶供报告取证。
      */
-    private fun execTimesInt(name: String, idx: LongArray, cur: Long, multiplier: Double, ctx: ExecContext) {
+    private fun execTimesInt(dest: VarRef, cur: Long, multiplier: Double, ctx: ExecContext) {
         if (ctx.config.timesNotRigorousCalculation) {
             val d = cur.toDouble() * multiplier
             if (d.isNaN() || d >= LONG_RANGE_EDGE || d < -LONG_RANGE_EDGE) {
                 warnTimesOverflow(formatDoubleG(d, '.'), ctx)
-                ctx.variables.writeInt(name, idx, if (d > 0.0) Long.MAX_VALUE else Long.MIN_VALUE)
+                dest.setIntValue(ctx.eval, if (d > 0.0) Long.MAX_VALUE else Long.MIN_VALUE)
             } else {
-                ctx.variables.writeInt(name, idx, d.toLong())
+                dest.setIntValue(ctx.eval, d.toLong())
             }
             return
         }
@@ -2389,12 +2386,12 @@ class StatementExecutor {
         if (product <= java.math.BigDecimal(java.lang.Long.MAX_VALUE) &&
             product >= java.math.BigDecimal(java.lang.Long.MIN_VALUE)
         ) {
-            ctx.variables.writeInt(name, idx, product.setScale(0, java.math.RoundingMode.DOWN).longValueExact())
+            dest.setIntValue(ctx.eval, product.setScale(0, java.math.RoundingMode.DOWN).longValueExact())
         } else {
             // 4.981 :1457-1459：`PrintWarning($"TIMES整数溢出: {d}")` + 按 d 的符号饱和。
             warnTimesOverflow(product.toPlainString(), ctx)
-            ctx.variables.writeInt(
-                name, idx,
+            dest.setIntValue(
+                ctx.eval,
                 if (product.signum() > 0) Long.MAX_VALUE else Long.MIN_VALUE,
             )
         }
@@ -2427,6 +2424,13 @@ class StatementExecutor {
     }
 
     /** SPLIT 直读 —— [execSplit] 逐字复刻。spec: Process.cs:1561-1576 */
+    /**
+     * SPLIT 直读 —— [execSplit] 逐字复刻。
+     *
+     * QB-A1 复核（2026-11-27）：本命令**没有**动态越界补径缺口 —— 写入下标只有末维
+     * `0..min(parts.size, getLength(name))-1`（`:2445` 的 `n` 已按容量截断），前导维恒 0，
+     * 因此不可能产出越界下标；`numTerm` 走 [writeVarRef] 本就经 `VarRef`。
+     */
     private fun execSplitFlat(a: FlatArgs, code: FunctionCode, ctx: ExecContext) {
         openTag(a, code, ErbcFormat.ArgTag.SP_SPLIT)
         val targetTerm = a.expr()
@@ -3441,10 +3445,8 @@ class StatementExecutor {
             val arg = stmt.args as SpTimesArgument
             // 语义（双路径 + 溢出饱和 + 告警）统一在 [execTimesInt]；树通道与扁平通道
             // 只差实参来源，不许再各写一份（ADR-001：同脚本换产物结果必须一致）。
-            val name = arg.dest.name
-            val idx = resolveIndices(arg.dest, ctx)
-            val cur = ctx.variables.readInt(name, idx)
-            execTimesInt(name, idx, cur, arg.doubleValue, ctx)
+            val cur = arg.dest.getIntValue(ctx.eval)
+            execTimesInt(arg.dest, cur, arg.doubleValue, ctx)
             ExecResult.Normal
         }
         FunctionCode.ENCODETOUNI -> {
@@ -4407,19 +4409,19 @@ class StatementExecutor {
             FunctionCode.CLEARBIT -> 0
             else -> 2
         }
-        val name = arg.dest.name
-        val idx = resolveIndices(arg.dest, ctx)
+        // 同 [execBitFlat]：经 VarRef 存取，运行期越界下标才走 1 维稀疏补径。
+        val dest = arg.dest
         for (t in arg.terms) {
             val bit = t.getIntValue(ctx.eval)
             if (bit < 0 || bit > 63) throw CodeEE("第2参数($bit)超出范围(0-63)")
-            var v = ctx.variables.readInt(name, idx)
+            var v = dest.getIntValue(ctx.eval)
             val mask = 1L shl bit.toInt()
             v = when (op) {
                 1 -> v or mask
                 0 -> v and mask.inv()
                 else -> v xor mask
             }
-            ctx.variables.writeInt(name, idx, v)
+            dest.setIntValue(ctx.eval, v)
         }
     }
 
@@ -4430,19 +4432,18 @@ class StatementExecutor {
      */
     private fun execSwap(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpSwapVarArgument
-        val n1 = arg.var1.name
-        val i1 = resolveIndices(arg.var1, ctx)
-        val n2 = arg.var2.name
-        val i2 = resolveIndices(arg.var2, ctx)
-        if (arg.var1.operandType != arg.var2.operandType) throw CodeEE("需要替换的变量的类型不相同")
-        if (arg.var1.operandType == OperandType.INT) {
-            val a = ctx.variables.readInt(n1, i1)
-            ctx.variables.writeInt(n1, i1, ctx.variables.readInt(n2, i2))
-            ctx.variables.writeInt(n2, i2, a)
+        val var1 = arg.var1
+        val var2 = arg.var2
+        if (var1.operandType != var2.operandType) throw CodeEE("需要替换的变量的类型不相同")
+        // 同 [execSwapFlat]：经 VarRef 存取，接 1 维稀疏背板的运行期越界补径。
+        if (var1.operandType == OperandType.INT) {
+            val a = var1.getIntValue(ctx.eval)
+            var1.setIntValue(ctx.eval, var2.getIntValue(ctx.eval))
+            var2.setIntValue(ctx.eval, a)
         } else {
-            val a = ctx.variables.readStr(n1, i1)
-            ctx.variables.writeStr(n1, i1, ctx.variables.readStr(n2, i2))
-            ctx.variables.writeStr(n2, i2, a)
+            val a = var1.getStrValue(ctx.eval)
+            var1.setStrValue(ctx.eval, var2.getStrValue(ctx.eval))
+            var2.setStrValue(ctx.eval, a)
         }
     }
 
@@ -4641,6 +4642,8 @@ class StatementExecutor {
      * SPLIT。spec: Process.cs:1561-1576
      *
      * 对象树通道（Android 生产默认；通道判据见 `execute(stmt, ctx)` 的 KDoc）——扁平对偶见 [execSplitFlat]。
+     *
+     * QB-A1 复核同 [execSplitFlat]：写入下标已按容量截断（`:4657` 的 `n`），不会越界。
      */
     private fun execSplit(stmt: Statement, ctx: ExecContext) {
         val arg = stmt.args as SpSplitArgument

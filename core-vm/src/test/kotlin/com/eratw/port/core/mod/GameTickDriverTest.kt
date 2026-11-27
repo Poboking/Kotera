@@ -153,6 +153,25 @@ class GameTickDriverTest {
     }
 
     @Test
+    fun `相位专用边界不推进共享任务态`() {
+        val (tick, registry, scheduler) = driver(
+            phases = listOf(phase("pkgA", "DAY_START")),
+            jobs = listOf(job("pkgA", "j1", firstDay = 1L)),
+        )
+        var phaseRuns = 0
+        var jobRuns = 0
+        registry.subscribe("DAY_START", "pkgA") { phaseRuns++ }
+        scheduler.bind("pkgA", "j1") { jobRuns++ }
+
+        val report = tick.tickTurn(1L, listOf("DAY_START"), runJobs = false)
+
+        assertEquals(1, phaseRuns)
+        assertEquals(0, jobRuns)
+        assertEquals(0, report.firedJobs)
+        assertEquals(1L, scheduler.nextFireDay("pkgA", "j1"))
+    }
+
+    @Test
     fun `回合边界日变同时派发日终与日始`() {
         val (tick, registry, scheduler) = driver(
             phases = listOf(phase("pkgA", "EVENING")),

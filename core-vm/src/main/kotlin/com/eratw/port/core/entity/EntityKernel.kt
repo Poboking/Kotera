@@ -507,47 +507,32 @@ class EntityKernel(
      * 内核保持灌入前的空态（预校验先于任何写入，半灌状态不可达）。
      */
     fun restore(snapshot: EntitySnapshot) {
-        require(
-            liveCount == 0 && liveCapacityHighWater == 0 &&
-                intColumns.isEmpty() && strColumns.isEmpty() && outEdges.isEmpty() && inEdges.isEmpty(),
-        ) { "restore 只允许灌入空内核——当前已有实体/列/边（混档恢复拒绝）" }
-        // 预校验（全部通过才开始写入）。
-        for (name in snapshot.archetypes) {
-            require(name in archetypeKeys) { "快照原型未注册: $name" }
-        }
-        for (kind in snapshot.relationKinds) {
-            require(kind in relationSchemas) { "快照关系类型未注册: $kind" }
-        }
-        for (f in snapshot.fields) {
-            val key = f.name.uppercase(Locale.ROOT)
-            val spec = fieldTypes[key]
-            require(spec != null) { "快照字段未注册: ${f.name}" }
-            require(spec.type == f.type) { "快照字段 ${f.name} 类型不符: 快照 ${f.type} 声明 ${spec.type}" }
-            if (f.isEntityRef) {
-                for (p in f.intValues) {
-                    require(EntityIdCodec.isWellFormed(p.value)) {
-                        "快照 entity-ref 字段 ${f.name} 的值非良构: ${p.value.toString(16)}"
-                    }
-                }
-            }
-        }
-        val seenSlots = HashSet<Int>()
+        requireEmptyForRestore()
+        validateRestore(snapshot)
+        load(snapshot)
+    }
+
+    /** 已验证快照替换当前槽；预检失败时旧实体、列与边保持原样。 */
+    fun replaceRestore(snapshot: EntitySnapshot) {
+        validateRestore(snapshot)
+        generations.fill(0)
+        states.fill(0)
+        archetypeBySlot.fill(null)
+        pkgBySlot.fill(0)
+        intColumns.clear()
+        strColumns.clear()
+        outEdges.clear()
+        inEdges.clear()
+        freeSlots.clear()
+        retiredSlots.clear()
+        liveCount = 0
+        liveCapacityHighWater = 0
+        load(snapshot)
+    }
+
+    private fun load(snapshot: EntitySnapshot) {
         var maxSlot = -1
-        for (s in snapshot.slots) {
-            require(s.slot >= 0) { "快照槽号为负: ${s.slot}" }
-            require(seenSlots.add(s.slot)) { "快照槽 ${s.slot} 重复" }
-            maxSlot = maxOf(maxSlot, s.slot)
-        }
-        val entityIds = HashSet<Long>(snapshot.slots.size * 2)
-        for (s in snapshot.slots) {
-            if (s.state != 0) entityIds += EntityIdCodec.encode(s.pkgShortId, s.generation, s.slot)
-        }
-        for (e in snapshot.edges) {
-            require(e.from in entityIds && e.to in entityIds) {
-                "快照边端点不在实体集里（悬空边拒绝）：${e.from.toString(16)} → ${e.to.toString(16)}"
-            }
-        }
-        // 灌入（校验已全过）。
+        for (s in snapshot.slots) maxSlot = maxOf(maxSlot, s.slot)
         ensureCapacityFor(maxSlot + 1)
         for (s in snapshot.slots) {
             states[s.slot] = s.state
@@ -582,6 +567,72 @@ class EntityKernel(
         for (e in snapshot.edges) {
             writeEdge(e.from, snapshot.relationKinds[e.kindIdx], e.to, dedupe = false, value = e.value)
         }
+    }
+
+    /** SaveService prepare 专用：完整校验但不写任何内核字段。 */
+    fun validateRestore(snapshot: EntitySnapshot) {
+        for (name in snapshot.archetypes) {
+            require(name in archetypeKeys) { "快照原型未注册: $name" }
+        }
+        for (kind in snapshot.relationKinds) {
+            require(kind in relationSchemas) { "快照关系类型未注册: $kind" }
+        }
+        for (f in snapshot.fields) {
+            val key = f.name.uppercase(Locale.ROOT)
+            val spec = fieldTypes[key]
+            require(spec != null) { "快照字段未注册: ${f.name}" }
+            require(spec.type == f.type) { "快照字段 ${f.name} 类型不符: 快照 ${f.type} 声明 ${spec.type}" }
+            require(spec.isEntityRef == f.isEntityRef) {
+                "快照字段 ${f.name} 的 entity-ref 旗标不符: 快照 ${f.isEntityRef} 声明 ${spec.isEntityRef}"
+            }
+            require(!f.isEntityRef || f.type == ComponentFieldType.INT) {
+                "快照 entity-ref 字段 ${f.name} 必须是 INT"
+            }
+            if (f.isEntityRef) {
+                for (p in f.intValues) {
+                    require(EntityIdCodec.isWellFormed(p.value)) {
+                        "快照 entity-ref 字段 ${f.name} 的值非良构: ${p.value.toString(16)}"
+                    }
+                }
+            }
+        }
+        val seenSlots = HashSet<Int>()
+        var maxSlot = -1
+        for (s in snapshot.slots) {
+            require(s.slot >= 0) { "快照槽号为负: ${s.slot}" }
+            require(seenSlots.add(s.slot)) { "快照槽 ${s.slot} 重复" }
+            require(s.state == 0 || EntityLifecycle.isValid(s.state)) { "快照生命周期状态非法: ${s.state}" }
+            require(s.pkgShortId in 1..EntityIdCodec.MAX_PKG_SHORT_ID) { "快照包短 ID 越域: ${s.pkgShortId}" }
+            if (s.state != 0) {
+                require(s.archetypeIdx in snapshot.archetypes.indices) { "快照原型下标越界: ${s.archetypeIdx}" }
+            }
+            maxSlot = maxOf(maxSlot, s.slot)
+        }
+        require(maxSlot < MAX_CAPACITY) { "快照槽容量越界: ${maxSlot + 1}" }
+        val entityIds = HashSet<Long>(snapshot.slots.size * 2)
+        for (s in snapshot.slots) {
+            if (s.state != 0) {
+                val id = EntityIdCodec.encode(s.pkgShortId, s.generation, s.slot)
+                require(entityIds.add(id)) { "快照活 EntityId 重复: ${id.toString(16)}" }
+            }
+        }
+        for (f in snapshot.fields) {
+            for (p in f.intValues) require(p.slot in seenSlots) { "快照整型字段槽越界: ${f.name}[${p.slot}]" }
+            for (p in f.strValues) require(p.slot in seenSlots) { "快照字符串字段槽越界: ${f.name}[${p.slot}]" }
+        }
+        for (e in snapshot.edges) {
+            require(e.kindIdx in snapshot.relationKinds.indices) { "快照关系类型下标越界: ${e.kindIdx}" }
+            require(e.from in entityIds && e.to in entityIds) {
+                "快照边端点不在实体集里（悬空边拒绝）：${e.from.toString(16)} → ${e.to.toString(16)}"
+            }
+        }
+    }
+
+    private fun requireEmptyForRestore() {
+        require(
+            liveCount == 0 && liveCapacityHighWater == 0 &&
+                intColumns.isEmpty() && strColumns.isEmpty() && outEdges.isEmpty() && inEdges.isEmpty(),
+        ) { "restore 只允许灌入空内核——当前已有实体/列/边（混档恢复拒绝）" }
     }
 
     /** 扩容到至少 [minCapacity]（restore 专用；槽数组与已建列同步）。 */

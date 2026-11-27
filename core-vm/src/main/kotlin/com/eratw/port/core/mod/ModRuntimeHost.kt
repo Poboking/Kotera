@@ -170,6 +170,22 @@ class ModRuntimeHost(
     val interactionPipeline: InteractionPipeline get() = sharedInteractionPipeline
 
     /**
+     * **全链共享**的任务调度器（ABI-10）：静态槽与动态模板都只有一份任务态。
+     *
+     * 每个 context 装载时经 [ModContextImpl.adoptJobScheduler] 换成这一份；宿主页边界在全部
+     * 相位派发后只调用一次 [JobScheduler.runDue]，避免逐包推进别人的槽位或重复消费实例。
+     */
+    private val sharedJobScheduler: JobScheduler by lazy {
+        JobScheduler.of(
+            snapshot.jobDeclarations,
+            templates = snapshot.jobTemplateDeclarations,
+        )
+    }
+
+    /** 本会话的全链任务调度器（生产节拍与存档任务态共用）。 */
+    val jobScheduler: JobScheduler get() = sharedJobScheduler
+
+    /**
      * 已装载 mod 的 context 只读快照（UI 贡献项枚举面；按装序）。
      *
      * 返回新 List，但元素是活对象：**只许 VM 线程读**（装载/卸载与各 context 的注册都在
@@ -212,6 +228,9 @@ class ModRuntimeHost(
      * 与既有派发逐位不变。**不进构造签名**：与 [timing] 同口径，改装配不改构造。
      */
     var handlerBudget: ModHandlerBudget? = null
+
+    /** 可挂起剧情的引擎等待边界；null = 未接线，作者调用 runDurable 当场 fail-closed。 */
+    var durableInteractionHost: DurableInteractionHost? = null
 
     /**
      * 逐包设置快照（RT2 per-mod 配置；键 = packageId，缺省空表 = 不注入）。
@@ -370,9 +389,17 @@ class ModRuntimeHost(
                     storageStore = storage,
                     projector = projector,
                 )
+                context.durableInteractionHost = durableInteractionHost
                 entry = Entry(mod, context, registrations)
                 entries[packageId] = entry
-                adoptSharedFaces(context, sharedHookPipeline, sharedInteractionPipeline, eventHandlers, services)
+                adoptSharedFaces(
+                    context,
+                    sharedHookPipeline,
+                    sharedInteractionPipeline,
+                    eventHandlers,
+                    services,
+                )
+                context.adoptJobScheduler(sharedJobScheduler)
                 // onLoad 之前的逐 context 供给就位（随机种子 / 账本 / 预算 / 设置快照 / 受控写面）：
                 // 作者在初始化里就可能消费，任何一项缺席 = 漏记或拒接；先于 onLoad 即可。
                 val randomSeed = randomSeedOverride ?: decisionPipeline?.currentDecisionSeed ?: 0L
@@ -393,26 +420,48 @@ class ModRuntimeHost(
                 report += ModRuntimeState(packageId, active = false, failure = t)
                 continue
             }
-            try {
-                // 迁移窗口的前半：先让 mod 读声明/拿 context。数据版本在 onLoad 之前取一次，
-                // 保证整个窗口内判断一致（onLoad 里作者不得改版本，这是装配口径）。
-                val storedDataVersion = storage.dataVersionsByPackage[packageId]
-                runMeasured(timing, packageId, "lifecycle.onLoad") { mod.onLoad(entry.context) }
-                // 迁移窗口：onLoad 之后、onEnable 之前。无记录 ⇒ 落 declared 不迁移；
-                // 落后 ⇒ 迁移成功后落 declared；降级已在进生命周期之前拒过，这里不会出现。
-                migrateForInstall(entry, storedDataVersion, mod.dataVersion, storage, timing)?.let { throw it }
-                runMeasured(timing, packageId, "lifecycle.onEnable") { mod.onEnable() }
-                entry.enabled = true
-            } catch (t: Throwable) {
-                entry.failure = t
-                entry.context.logger.error("onLoad 或 onEnable 失败，仅回滚本 mod 已注册项", t)
-                revokeFailedInstall(entry, storageWasActive)
-            }
+            runLoadEnable(entry, mod, packageId, storageWasActive)
             report += ModRuntimeState(packageId, entry.enabled, entry.failure)
         }
         // 规划期就判死的（缺依赖 / 成环 / 依赖被拒的传递闭包）：按载体声明序并进报告，不进装载循环。
         report += plan.rejected
         return report
+    }
+
+    /**
+     * 生命周期两段（onLoad → 数据版本迁移 → onEnable）与失败回滚的单一落点。
+     *
+     * 抽成成员函数只为把 install 留在 detekt LongMethod 阈值内，行为逐位不变：失败仍只回滚本 mod
+     * （先还任务态 → 原因入条目 → 撤销注册项 → 存储段对称 deactivate）。
+     */
+    private fun runLoadEnable(entry: Entry, mod: EraMod, packageId: String, storageWasActive: Boolean) {
+        // 迁移窗口的前半：数据版本在 onLoad 之前取一次，保证整个窗口内判断一致
+        // （onLoad 里作者不得改版本，这是装配口径）。
+        val storedDataVersion = storage.dataVersionsByPackage[packageId]
+        var jobStateBeforeLoad: JobSchedulerSnapshot? = null
+        try {
+            jobStateBeforeLoad = packageJobState(packageId)
+            runMeasured(timing, packageId, "lifecycle.onLoad") { mod.onLoad(entry.context) }
+            // 迁移窗口：onLoad 之后、onEnable 之前。无记录 ⇒ 落 declared 不迁移；
+            // 落后 ⇒ 迁移成功后落 declared；降级已在进生命周期之前拒过，这里不会出现。
+            migrateForInstall(entry, storedDataVersion, mod.dataVersion, storage, timing)?.let { throw it }
+            runMeasured(timing, packageId, "lifecycle.onEnable") { mod.onEnable() }
+            entry.enabled = true
+        } catch (t: Throwable) {
+            jobStateBeforeLoad?.let { sharedJobScheduler.restorePackageState(packageId, it) }
+            entry.failure = t
+            entry.context.logger.error("onLoad 或 onEnable 失败，仅回滚本 mod 已注册项", t)
+            revokeFailedInstall(entry, storageWasActive)
+        }
+    }
+
+    /** 装载前捕获本包动态任务态，失败时原样还回共享调度器。 */
+    private fun packageJobState(packageId: String): JobSchedulerSnapshot {
+        val snapshot = sharedJobScheduler.snapshot()
+        return JobSchedulerSnapshot(
+            instances = snapshot.instances.filter { it.packageId == packageId },
+            nextSeqByTemplate = snapshot.nextSeqByTemplate.filterKeys { it.startsWith("$packageId::") },
+        )
     }
 
     /**
@@ -539,6 +588,18 @@ class ModRuntimeHost(
      */
     fun notifySaveLoaded() {
         notifyEntries(entries.values, "onSaveLoaded", timing) { it.onSaveLoaded() }
+    }
+
+    /** 读档迁移完成后恢复各包续体；无记录零动作，单包失败只隔离并留日志。 */
+    fun resumeDurableInteractions() {
+        for (entry in entries.values) {
+            if (!entry.enabled || entry.shutDown) continue
+            try {
+                entry.context.resumeDurableInteraction(entry.mod.dataVersion)
+            } catch (t: Throwable) {
+                logSink("mod.durable resume pkg=${entry.context.packageId} 失败已隔离：${t.javaClass.simpleName}: ${t.message}")
+            }
+        }
     }
 
     /**

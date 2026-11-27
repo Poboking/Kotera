@@ -520,7 +520,11 @@ internal object ModCheckWriteGrants {
         }
     }
 
-    /** 抽取本模块的 writeGrant 声明（类型位只用于未来扩展；抽不到实参的条目丢弃）。 */
+    /**
+     * 抽取本模块的 writeGrant 声明。组 2（同行的其余实参原文）当前零消费，留给未来扩展；
+     * 丢弃条件只有「键字面量为空」一条 —— 键里带 `$` 或反斜杠时正则整条抽不到（等同未声明），
+     * 而跨行实参只是组 2 为空，条目仍保留。
+     */
     private fun grantUses(sources: List<SourceFile>): List<KeyUse> = sources.flatMap { source ->
         val text = source.code.joinToString("\n") { line -> line.text }
         WRITE_GRANT.findAll(text).mapNotNull { match ->

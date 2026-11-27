@@ -391,14 +391,20 @@ class ErbProgramCompiler(
      *   与 A14 诊断 §3)，并对"表达式位调用普通 @label"复刻原版 UsedNonMethodFunc
      *   （spec: IdentifierDictionary.cs:566-569）。接线方（erbcc 桥/组长）据符号表
      *   `LabelDef.isMethod`/`#FUNCTION`、`#FUNCTIONS` 构造本表。
+     * @param failedFunctions 装载期已作废（label 在、函数体解析失败）的函数名（大写键）。
+     *   与 [knownFunctions] 互斥：被毒函数不在 known 里。静态 CALL/JUMP 命中它时按原版的
+     *   **行级**降级 —— CALL 行标 IsError + `CalledFailedFunc`（spec:
+     *   FunctionIdentifier.cs:3545-3551 / Process.cs:1017-1019），而不是当「函数不存在」。
      */
     fun compileFunction(
         sig: FuncSig,
         statements: List<Statement>,
         knownFunctions: Set<String> = emptySet(),
         exprCalls: ExprCallTable? = null,
-    ): FunctionBytecode =
-        compileFunctionImpl(sig, statements, knownFunctions, exprCalls, capture = false).first
+        failedFunctions: Set<String> = emptySet(),
+    ): FunctionBytecode = compileFunctionImpl(
+        sig, statements, CallTargets(knownFunctions, failedFunctions), exprCalls, capture = false,
+    ).first
 
     /**
      * 与 [compileFunction] 逐条同序地真编译一次，并把本函数对共享 [CodeBuilder] 的
@@ -410,8 +416,10 @@ class ErbProgramCompiler(
         statements: List<Statement>,
         knownFunctions: Set<String> = emptySet(),
         exprCalls: ExprCallTable? = null,
+        failedFunctions: Set<String> = emptySet(),
     ): FunctionSlice = try {
-        checkNotNull(compileFunctionImpl(sig, statements, knownFunctions, exprCalls, capture = true).second)
+        val targets = CallTargets(knownFunctions, failedFunctions)
+        checkNotNull(compileFunctionImpl(sig, statements, targets, exprCalls, capture = true).second)
     } catch (t: Throwable) {
         // 失败路径不留录制中的切片：否则下次 beginSliceCapture 的 check 会连锁失败，
         // 且失败桩重试（capture=false）会把后续池追加记进一段永不被收尾的孤立日志。
@@ -460,7 +468,7 @@ class ErbProgramCompiler(
     private fun compileFunctionImpl(
         sig: FuncSig,
         statements: List<Statement>,
-        knownFunctions: Set<String>,
+        targets: CallTargets,
         exprCalls: ExprCallTable?,
         capture: Boolean,
     ): Pair<FunctionBytecode, FunctionSlice?> {
@@ -478,15 +486,15 @@ class ErbProgramCompiler(
             )
         }
         // pass 1：探测 maxArgc（暂存区大小）
-        val probe = FunctionPass(sig, statements, knownFunctions, tempBase = 0, out = CodeBuilder(), exprCalls = exprCalls)
+        val probe = FunctionPass(sig, statements, targets, tempBase = 0, out = CodeBuilder(), exprCalls = exprCalls)
         probe.run()
         // pass 2：正式发射（先发射、成功后才登记 —— CMP-26）
         val entryPc = b.here()
         if (capture) b.beginSliceCapture()
-        // 局部布局不再参与发射（契约 C1：具名变量只在 VariableStore）；临时槽基址 = 暂存区之上。
-        // 标签只在 pass 内记账，函数表条目建立后再由 `pass.labels` 统一升格导出
-        // （CMP-26：失败不得留下半个函数/半张标签表）。
-        val pass = FunctionPass(sig, statements, knownFunctions, tempBase = probe.maxArgc, out = b, exprCalls = exprCalls, entryPc = entryPc)
+        // 局部布局不参与发射（契约 C1：具名变量只在 VariableStore）；临时槽基址 = 暂存区之上。
+        // 标签只在 pass 内记账，函数表条目建立后再由 `pass.labels` 升格导出（CMP-26：失败不留半个函数）。
+        val pass = FunctionPass(sig, statements, targets, tempBase = probe.maxArgc, out = b, exprCalls = exprCalls)
+        pass.entryPc = entryPc
         pass.run()
         // 到这里才登记：pass2 之前的任何抛出都不会留下占位名或半截函数条目。
         val index = b.declareFunction(sig.name, entryPc, sig.arity, sig.arity, sig.paramNames)
@@ -879,21 +887,46 @@ class ErbProgramCompiler(
         val stepStmt: Statement?,
     )
 
+    /**
+     * 静态调用的目标全集 —— 编译器给**每一个** `CALL`/`JUMP`/`CALLF` 判「这行编什么」用的两张名表。
+     *
+     * 两张表互斥：[known] 是装载期真的能取到函数体的名字；[failed] 是 **label 在、函数体解析
+     * 失败**（poison / 全量废弃）的名字。原版对前者正常链接，对后者把**调用行**标 IsError +
+     * `CalledFailedFunc`（spec: FunctionIdentifier.cs:3545-3551，判在 TRY 之前），执行到才抛
+     * CodeEE（Process.cs:1017-1019）—— 与「名字根本不存在」（NotDefinedFunc）是两种处置，
+     * 故不能合成一张表：合成后 `failed` 会被当成 `known`，`build()` 回填时整包致命
+     * （KI-POISON-CASCADE，2026-11-27 因幡帝海外版 V8 实测）。
+     */
+    private class CallTargets(
+        val known: Set<String> = emptySet(),
+        val failed: Set<String> = emptySet(),
+    )
+
     private inner class FunctionPass(
         val sig: FuncSig,
         val statements: List<Statement>,
-        val known: Set<String>,
+        /**
+         * 静态调用的目标全集（可加载 + 装载期作废两张名表）。合成一个参数是 detekt
+         * `LongParameterList` 的要求（本类原本 7 参，再加一张名表就 8 参）；
+         * 两张表语义互斥（见 [CallTargets]），拆开传只会让调用点多一行。
+         */
+        val targets: CallTargets,
         val tempBase: Int,
         val out: CodeBuilder,
         /** 表达式位调用降级表（null = 旧行为，不降级不校验；见 [compileFunction]）。 */
         val exprCalls: ExprCallTable? = null,
+    ) {
         /**
          * 本函数在共享 CodeBuilder 里的入口 pc —— RESTART 的同帧回跳目标
          * （契约 R10/API 4：**同帧跳回函数头、变量保留**，spec: FunctionIdentifier.cs:3288-3298）。
-         * 探测遍（probe）不发射真指令，用默认 0。
+         * 探测遍（probe）不发射真指令，保持 0；正式遍在 [run] 之前由 [compileFunctionImpl] 赋值。
+         * 放类体而非构造参数：构造器参数已达 detekt 阈值（6），再塞一个就整类被点名。
          */
-        val entryPc: Int = 0,
-    ) {
+        var entryPc: Int = 0
+        /** 可加载的函数名（大写键）。 */
+        private val known: Set<String> = targets.known
+        /** 装载期已作废的函数名（大写键）：静态 CALL/JUMP 命中时按原版 IsError 行降级。 */
+        private val failedFunctions: Set<String> = targets.failed
         private var nextTemp = tempBase
         private var maxTempSeen = tempBase - 1
         private val freeTemps = ArrayDeque<Int>()
@@ -3284,7 +3317,16 @@ class ErbProgramCompiler(
                     // 「skia 魔改内建」这个前提不成立。语料缺失该名时由 [emitStaticTargetNotFound]
                     // 复刻原版行级 NotDefinedFunc（oracle 注见该方法）。
                     if (!isTryc) {
-                        if (!isTry) {
+                        if (target in failedFunctions) {
+                            // **目标 label 在、装载期解析失败**（补丁 poison / 全量废弃函数）：
+                            // 原版 SetJumpTo 拿到 CalledFunction 后发现 TopLabel.IsError ⇒
+                            // **CALL 行本身**标 `IsError = true` + `ErrMes = CalledFailedFunc`
+                            //（spec: FunctionIdentifier.cs:3545-3551），判在 TRY 分支之前 ⇒
+                            // TRY 位拦不住；执行到该行才抛 CodeEE（spec: Process.cs:1017-1019），
+                            // 文案照官方 zhs（lang.emuera-zhs.xml:567）。调用方与整包照常装载。
+                            // TRYC 不在此列：它按 miss 跳 catch 体 = 同一 CodeEE 被捕获的等价形态。
+                            emitStaticTargetNotFound("调用了一个加载时解析失败的函数\"@$label\"", line, code)
+                        } else if (!isTry) {
                             // **非 TRY 的常量函数名缺失**：原版行级 NotDefinedFunc
                             // （spec: FunctionIdentifier.cs:3532-3535 + ErbLoader.cs:1615-1625），
                             // 执行到该行才抛 CodeEE —— 编哨兵（见 [emitStaticTargetNotFound]）。
@@ -3444,6 +3486,12 @@ class ErbProgramCompiler(
                 // spec: isa.yaml CALLF —— 求值但不跳转、结果不写入 RESULT
                 val key = name.uppercase()
                 when {
+                    // 目标 label 在、装载期解析失败（poison）：CALLF 的 SetJumpTo 同样在
+                    // FuncTerm 取不到时 Warn(isError = true) 标行级错误
+                    // （spec: FunctionIdentifier.cs:1131-1146），执行到该行抛 CodeEE
+                    // （Process.cs:1017-1019），文案取 CalledFailedFunc（lang.emuera-zhs.xml:567）。
+                    key in failedFunctions ->
+                        emitStaticTargetNotFound("调用了一个加载时解析失败的函数\"@$name\"", s.line, s.code)
                     // TRYCALLF/TRYCALLFORMF 常量名缺失：原版 `TRYCALLF_Instruction.SetJumpTo`
                     // 解析失败即 return、运行期 `FuncTerm == null` 又 null-safe 跳过
                     // （spec: FunctionIdentifier.cs:1252-1269、:1285）⇒ 静默跳过本行。

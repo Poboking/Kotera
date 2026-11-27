@@ -38,6 +38,99 @@ class FunctionHookWiringCallTest {
     }
 
     @Test
+    fun `Override无hook旁路只执行最终胜者`() {
+        val h = HookHarness(overrideWinner = true)
+        val catalog = requireNotNull(h.runtime.symbolCatalog)
+        val winner = catalog.winnerIndexOf(HookHarness.FUNCTION_KEY)
+        assertTrue(winner >= 0, "两实现必须解析出唯一 Override 胜者")
+        assertEquals(winner, catalog.entryIndexOf(HookHarness.FUNCTION_KEY), "胜者执行入口不得再漂移")
+        assertTrue(catalog.superChain[winner] >= 0, "Override 必须保留前实现链")
+        assertEquals(HookHarness.ARG_VALUE + 100L, h.callF())
+        assertEquals("override\n", h.output, "未装 hook 时只跑 Mod 胜者，base 不许执行")
+    }
+
+    @Test
+    fun `Override胜者位于Continue钩子外层且每次仅触发一次逻辑键不变`() {
+        val h = HookHarness(overrideWinner = true)
+        val order = ArrayList<String>()
+        val hookKeys = ArrayList<String>()
+        var prefixCalls = 0
+        var postfixCalls = 0
+        val pipeline = h.pipeline(
+            HookDecls.prefix("mod.prefix"),
+            HookDecls.postfix("mod.postfix"),
+        )
+        pipeline.bind(HookHarness.FUNCTION_KEY, ModHookPhase.PREFIX, "mod.prefix") { context ->
+            prefixCalls++
+            order += "prefix"
+            hookKeys += context.targetKey
+            HookResult.Continue
+        }
+        pipeline.bind(HookHarness.FUNCTION_KEY, ModHookPhase.POSTFIX, "mod.postfix") { context ->
+            postfixCalls++
+            order += "postfix"
+            hookKeys += context.targetKey
+            HookResult.Continue
+        }
+        h.attach(pipeline)
+
+        assertEquals(HookHarness.ARG_VALUE + 100L, h.callF())
+        assertEquals("override\n", h.output, "Prefix → Override winner → Postfix，base 永不执行")
+        assertEquals(listOf("prefix", "postfix"), order)
+        assertEquals(1, prefixCalls, "每次调用 Prefix 只触发一次")
+        assertEquals(1, postfixCalls, "每次调用 Postfix 只触发一次")
+        assertEquals(listOf("F", "F"), hookKeys, "hook 见到的是逻辑键，不是物理实现名")
+    }
+
+    @Test
+    fun `Override下SkipOriginal与Replace按次隔离不污染后续Continue`() {
+        val h = HookHarness(overrideWinner = true)
+        val order = ArrayList<String>()
+        var nextPrefix = "skip"
+        var prefixCalls = 0
+        var postfixCalls = 0
+        val pipeline = h.pipeline(
+            HookDecls.prefix("mod.prefix"),
+            HookDecls.postfix("mod.postfix", mayMutateReturn = true),
+        )
+        pipeline.bind(HookHarness.FUNCTION_KEY, ModHookPhase.PREFIX, "mod.prefix") {
+            prefixCalls++
+            order += "prefix:$nextPrefix"
+            when (nextPrefix) {
+                "skip" -> HookResult.SkipOriginal
+                "replace" -> HookResult.Replace(ModValue.IntValue(777L))
+                else -> HookResult.Continue
+            }
+        }
+        pipeline.bind(HookHarness.FUNCTION_KEY, ModHookPhase.POSTFIX, "mod.postfix") { context ->
+            postfixCalls++
+            order += "postfix"
+            if (context.returnValue == null) context.returnValue = ModValue.IntValue(999L)
+            HookResult.Continue
+        }
+        h.attach(pipeline)
+
+        assertEquals(999L, h.callF(), "SkipOriginal 跳过 Override/base，Postfix 仍可改空返回值")
+        assertEquals("", h.output)
+        assertEquals(1, postfixCalls)
+
+        nextPrefix = "replace"
+        assertEquals(777L, h.callF(), "Replace 必须跳过 Override/base 与余下 Postfix")
+        assertEquals("", h.output)
+        assertEquals(1, postfixCalls, "上一轮 SkipOriginal 不得把 Postfix 触发状态带给 Replace")
+
+        nextPrefix = "continue"
+        assertEquals(HookHarness.ARG_VALUE + 100L, h.callF(), "后续 Continue 必须重新执行 Override 胜者")
+        assertEquals("override\n", h.output)
+        assertEquals(3, prefixCalls)
+        assertEquals(2, postfixCalls, "三次调用中 Postfix 只在非 Replace 轮各触发一次")
+        assertEquals(
+            listOf("prefix:skip", "postfix", "prefix:replace", "prefix:continue", "postfix"),
+            order,
+        )
+    }
+
+    @Test
     fun `前缀Replace_短路原函数与其余hook`() {
         val h = HookHarness()
         val pipeline = h.pipeline(HookDecls.prefix("mod.a"))

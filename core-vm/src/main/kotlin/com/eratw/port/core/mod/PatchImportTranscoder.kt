@@ -216,6 +216,11 @@ object PatchImportTranscoder {
                 externalCalls = acc.imports.keys.toList(),
                 overrideFunctions = overrides.keys,
                 privateDims = result.privateDims.groupBy({ it.functionKey }, { it.spec }),
+                // KI-GLOBAL-DIM 波（2026-11-26）：补丁函数外全局 `#DIM` 声明带进 manifest，
+                // 运行期由 GameSession 消费 descriptor.globalDims declare 进 VariableStore。
+                // 原样透传 PatchCompiler 解析好的 DimSpec（含 CONST/SAVEDATA/CHARADATA 位），
+                // ManifestCodec 已支持 global-dims 段完整编解码，零格式改动。
+                globalDims = result.globalDims,
             ),
             imports = acc.imports.keys.toList(),
             droppedEventEntries = entry.dropped,

@@ -1018,7 +1018,23 @@ object DimParser {
      */
     private const val SYMS = "+-*/%(),=<>|&^~"
 
-    private fun isWordBreak(c: Char): Boolean = c.isWhitespace() || c in SYMS || c == '"'
+    /**
+     * `#DIM` 行内词元的切分界：空白、运算符、字符串定界符与**行内注释起手 `;`**。
+     *
+     * `;` 必须在列（2026-11-27 因幡帝海外版 V8 真包实测）：`#DIM  CLIENT_ID;伝聞者ID…`
+     * 这种「注释紧贴标识符、中间不写空格」的写法在社区口上包里常见，漏了 `;` 就会把整段
+     * 注释吃进声明名（`CLIENT_ID;伝聞者ID…`）⇒ 形参 `@F(…, CLIENT_ID)` 判定「未定义的
+     * 标识符」⇒ 该文件按整文件作废（原版 `;` 是行尾注释起手，标识符不可能含它，
+     * spec: LexicalAnalyzer.cs:917-930；标识符终止符全集见
+     * [com.eratw.port.core.lexer.IDENT_TERMINATORS]）。
+     *
+     * 注意：这里**只补 `;`**，不整表换成 [com.eratw.port.core.lexer.IDENT_TERMINATORS] ——
+     * 主循环只为空白、`;`、`,`、`=`、`<`、`>`、四则与位运算符、`"`、数字准备了消费分支，
+     * 把 `#`/`?`/`.`/`'`/`:`/`[` 等一并算作断词会让 `else` 分支读到零长词且游标不前进
+     * （死循环）。新增终止符必须同时在主循环里给它一个消费分支。
+     */
+    private fun isWordBreak(c: Char): Boolean =
+        c.isWhitespace() || c in SYMS || c == '"' || c == ';'
 
     /**
      * 一条声明共用的词法器持有者（mem6 2026-10-28）。

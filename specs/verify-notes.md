@@ -1460,12 +1460,17 @@ ADR-005 **偏离登记**口径改口径，不得再写成「按现状钉＝官�
 14. **VARSET 负 END + 缺 START = no-op**（StatementExecutor）：交换仅当 Start!=null
     （FunctionIdentifier.cs:1642-1656）。
 15. **MesSkip 跨连续无值等待存活**（WAIT / WAITANYKEY / PRINT W 位 / TWAIT 吞掉时不清标志；
-    清标志只发生在取值等待阻塞前与 FORCEWAIT）：EmueraConsole.cs:1451-1456（蛇版 4.981
-    :1502-1515）——`MesSkip = false` 在输入循环 while **之后**，一次跳过提交连续跑过所有
-    NeedValue=false 的等待直到撞取值等待 / StopMesskip。
+    清标志只发生在取值等待阻塞前、FORCEWAIT stopMesSkip 支，以及系统 NeedValue 等待入口
+    `ConsoleBeginHost.waitSystemInteger`（标题/指令/ABLUP/商店））：EmueraConsole.cs:1451-1456
+    （蛇版 4.981 :1502-1515）——`MesSkip = false` 在输入循环 while **之后**，一次跳过提交
+    连续跑过所有 NeedValue=false 的等待直到撞取值等待 / StopMesskip。
     **11-17 更正并真修**：旧判据「吞掉后无条件清标志」把 :1456 误读进循环内（2026-10-26
     fixcore 审查 C4 同源误读），导致长按跳过一次只推进一页、快进中 INPUT(canSkip) 快路径
     （FunctionIdentifier.cs:853）读不到跳过态——与原版不一致，引擎侧直修（docs/UPSTREAM-BUG-PR.md B 类）。
+    **11-26 补口**：BEGIN 四类系统等待不走 sem 层，旧实现只在脚本 `waitInput` 清零 ⇒ 双击快进
+    后跳过态跨指令菜单活到下一回合（玩家侧「指令后停顿失效、持续跳过」）。系统等待入口按同一
+    NeedValue 边界清零，返回后按本次提交 keySkip 续上（宏 `\e`）；指令收尾 `ReadAnyKey`
+    （NeedValue=false，`Process.cs:2450-2453`）在跳过态下不阻塞。`SystemWaitSkipBoundaryTest` 4 例钉死。
 16. **立绘死条目不画**（ScreenComposer.drawSprite isCreated 守卫）：EmueraConsole.cs:1844。
 17. **GOTO 动态标签缺失文案对齐 zhs**（Vm.kt + ProcessRuntime.resolveLabel）：emuera-zhs.xml:540。
     **11-05 更正并真修**（lane labeldollar `e956db74`）：这一条当时只对齐了 `{0}` = 求值名**原文**，
@@ -3350,9 +3355,17 @@ mutable 保护撤销：`DEFAULT_MUTABLE_DATA_SOURCES` 改为空集，qol_data.db
 **读数**：`SparseArrayOorTest` 13 → 20 例，定向 20/0；反向证明撤掉两处改动 ⇒ 4 红
 （前置自增/前置自减/后置自增/后置自减），报错文案与玩家真机逐字一致。
 
-**入口覆盖矩阵（待接线三条）**：`Vm.kt:2981-3095` 五个 `_STK_*VAR*` 栈码无稀疏补径
-（发射面仅 `Assembler.kt:457-467`，语料不可达 ⇒ 需写明「此族仅供 .erbasm」或补径，二选一）；
-`VariableStore.kt:1549-1559` 句柄快径口需 KDoc 明示口径；`variables.yaml` 已补 `++`/`--` 条（本波）。
+**入口覆盖矩阵（2026-11-27 已接线，原「待接线三条」销账）**：五个 `_STK_*VAR*` 栈码
+（`_STK_PUSH_VAR_I`/`_STK_PUSH_VAR_S`/`_STK_PLUS_VAR_I`/`_STK_STORE_VAR_I`/`_STK_STORE_VAR_S`）
+此前直呼严格口、`CodeEE` 原样穿透；按「补径」裁决接线（`Vm.sparseOnOorFallback`）：栈面下标
+全是运行期值 ⇒ 与表达式通道同档走 1 维稀疏补径，非 1 维仍抛（回归锁
+`SparseArrayOorStackCodeTest` 7 例，含二维越界兜底）。`VariableStore` 句柄快径口 KDoc 已写明
+「本层只做严格存取、补径只在外层」——常量下标仍抛，容忍判据只在 `VarRef`/栈码层。
+语句族同样改走 `VarRef`：`SETBIT/CLEARBIT/INVERTBIT`（`Instraction.Child.cs:778-807`）、
+`SWAP`（`Process.cs:1371-1395`）、`TIMES`（`Instraction.Child.cs:1435-1460`）；
+`SPLIT` 经复核写入下标按容量截断，无越界面。`SPARSE_OVERFLOW_LIMIT` 满层只挡新增键
+（既有键仍可改写，`SparseArrayOorTest` 补锁）。双通道（对象树 / 扁平）同口径，回归面
+`SparseArrayOorStatementTest` 11 例 + `DualPathParityTest` 41 例。
 
 ## 2026-11-18 台账锚补登：GameHost 关闭协议外部审计复核结论（stab-c C2 调研 §6-⑥）
 

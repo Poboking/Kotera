@@ -28,6 +28,22 @@ import java.util.Locale
 data class StmtWarning(val line: Int, val message: String)
 
 /**
+ * 分派面观测值（[LineParser.probeCodeLine] 的产物）—— 构建期夹具的跨语言对拍面。
+ *
+ * @property className 语句类名（取自 `buildInstruction` 的语句码 → 类名映射）
+ * @property code 语句码（`__NULL__` = 标签/`#` 行不适用）
+ * @property argText 参数原文（指令行为 `splitArgs` 结果；`VARI`/`VARS` 为名之后的全部字符；
+ *   自增减行与赋值行按原版「运算符之后剩余」）
+ * @property extra 分派层可见的特化字段（`op=` / `print=` / `label=` / `-`）
+ */
+data class DispatchProbe(
+    val className: String,
+    val code: FunctionCode,
+    val argText: String,
+    val extra: String,
+)
+
+/**
  * 按「标签定义」寻址的私有变量作用域回调。
  *
  * 原版的私有变量表是 **每个 `FunctionLabelLine` 一份**：
@@ -546,6 +562,152 @@ class LineParser(
         is ExpressionArgument -> arg.term?.constStr() ?: ""
         else -> ""
     }
+
+    // -----------------------------------------------------------------------
+    // 分派面探针（构建期夹具用；不建参数对象）
+    // -----------------------------------------------------------------------
+
+    /**
+     * 走到 [ArgBuilders] **之前**为止的分派观测面（CONTRACT-RUSTFULL §6.10 P2-2a）。
+     *
+     * 为什么不直接 dump [parseCodeLine] 的产物：参数构建失败（表达式层的未知名/形态错）
+     * 会把整行折成异常，结构面就被参数面的噪声淹没；而 Rust 侧 P2-2a 只实现分派，
+     * 没有可比的对象。探针把四步分派的判定结果（类名 / 语句码 / 参数原文 / 分派特化）
+     * 单独导出，判据为「结构面一致」；参数树由 P2-2b 另立对拍面。
+     *
+     * 与 [parseCodeLine] 共享同一批私有助手（`splitArgs` / `readSingleIdentifier` /
+     * `readAssignmentOperator` / `PrintSpec.parse`），不另写一套判定顺序 —— 夹具侧还会
+     * 在整行解析成功时逐行交叉核对探针与真实构造的类名/语句码（不一致即夹具报错）。
+     */
+    fun probeCodeLine(text: String, lineNo: Int): DispatchProbe {
+        val content = text.trimStart(' ', '\t')
+        if (content.isEmpty()) throw StmtParseException(lineNo, 0, "", "空行")
+        if (content[0] == '+' || content[0] == '-') {
+            val st = CharStream(content)
+            val tokens = try {
+                lexer.analyse(st, LexEndWith.EoL, LexAnalyzeFlag.NONE, lineNo)
+            } catch (e: LexError) {
+                throw StmtParseException(lineNo, e.column, "", e.message ?: "词法错误")
+            }
+            val op = (tokens.firstOrNull() as? Token.Operator)?.code
+            if (op != LexOperatorCode.Increment && op != LexOperatorCode.Decrement) {
+                throw StmtParseException(
+                    lineNo, 0, "",
+                    if (content[0] == '+') "行首为'+'但不是自增" else "行首为'-'但不是自减",
+                )
+            }
+            val exprOp = op.toExprOperator()
+            return DispatchProbe("AssignStmt", FunctionCode.SET, "", "op=" + exprOp.name)
+        }
+        val first = try {
+            lexer.readSingleIdentifier(CharStream(content))
+        } catch (e: LexError) {
+            throw StmtParseException(lineNo, 0, "", e.message ?: "行首字符非法")
+        }
+        if (first.isEmpty()) {
+            throw StmtParseException(lineNo, 0, "", "不正な文字で行が始まっています")
+        }
+        val nameEnd = first.length
+        val upper = first.uppercase(Locale.ROOT)
+        val code = FunctionCode.BY_NAME[upper]
+        if (code != null) {
+            if (!stmtConfig.useScopedVariableInstruction &&
+                (code == FunctionCode.VARI || code == FunctionCode.VARS)
+            ) {
+                throw StmtParseException(
+                    lineNo, 0, first, "命令在当前设置下不可使用（UseScopedVariableInstruction 已禁用）",
+                )
+            }
+            // VARI/VARS 的原文是「名之后全部字符」（不经分隔符切分，见 parseVarDecl）。
+            if (code == FunctionCode.VARI || code == FunctionCode.VARS) {
+                return DispatchProbe(classOf(code), code, content.substring(nameEnd), "-")
+            }
+            val argText = splitArgs(content, nameEnd, lineNo, first)
+            if (code.argType == ArgType.PRINT) {
+                val spec = PrintSpec.parse(code)
+                    ?: throw StmtParseException(lineNo, 0, first, LangKey.AbnormalPrint.render())
+                return DispatchProbe(classOf(code), code, argText, "print=" + describePrint(spec))
+            }
+            return DispatchProbe(classOf(code), code, argText, "-")
+        }
+        if (upper in BuiltinSymbols.methods || resolver.isUserMethod(first)) {
+            val argText = splitArgs(content, nameEnd, lineNo, first)
+            return DispatchProbe("MethodStmt", FunctionCode.METHOD, argText, "label=" + first)
+        }
+        val st = CharStream(content)
+        try {
+            lexer.analyse(st, LexEndWith.Operator, LexAnalyzeFlag.NONE, lineNo)
+        } catch (e: LexError) {
+            throw StmtParseException(lineNo, e.column, "", e.message ?: "词法错误")
+        }
+        var op = try {
+            lexer.readAssignmentOperator(st, lineNo)
+        } catch (e: LexError) {
+            throw StmtParseException(lineNo, e.column, "", "无法解释为赋值语句：${e.message}")
+        }
+        if (op == LexOperatorCode.Equal) op = LexOperatorCode.Assignment
+        val exprOp = try {
+            op.toExprOperator()
+        } catch (e: Exception) {
+            throw StmtParseException(lineNo, st.currentPosition, "", "不支持的赋值运算符 $op")
+        }
+        return DispatchProbe(
+            "AssignStmt", FunctionCode.SET, content.substring(st.currentPosition.coerceAtMost(content.length)),
+            "op=" + exprOp.name,
+        )
+    }
+
+    /** `buildInstruction` + `parseInstructionLine` 的类名映射（只依赖语句码，不依赖参数对象）。 */
+    private fun classOf(code: FunctionCode): String = when {
+        code.argType == ArgType.PRINT -> "PrintStmt"
+        code == FunctionCode.VARI || code == FunctionCode.VARS -> "VarDeclStmt"
+        else -> when (code) {
+        FunctionCode.IF, FunctionCode.SIF -> "IfStmt"
+        FunctionCode.ELSEIF -> "ElseIfStmt"
+        FunctionCode.ELSE -> "ElseStmt"
+        FunctionCode.ENDIF -> "EndIfStmt"
+        FunctionCode.SELECTCASE -> "SelectCaseStmt"
+        FunctionCode.CASE -> "CaseStmt"
+        FunctionCode.CASEELSE -> "CaseElseStmt"
+        FunctionCode.ENDSELECT -> "EndSelectStmt"
+        FunctionCode.FOR, FunctionCode.REPEAT -> "ForStmt"
+        FunctionCode.NEXT, FunctionCode.REND -> "NextStmt"
+        FunctionCode.WHILE -> "WhileStmt"
+        FunctionCode.WEND -> "WendStmt"
+        FunctionCode.DO -> "DoStmt"
+        FunctionCode.LOOP -> "LoopStmt"
+        FunctionCode.CATCH -> "CatchStmt"
+        FunctionCode.ENDCATCH -> "EndCatchStmt"
+        FunctionCode.DATALIST, FunctionCode.ENDLIST -> "DataListStmt"
+        FunctionCode.ENDDATA, FunctionCode.ENDNOSKIP, FunctionCode.ENDFUNC -> "EndBlockStmt"
+        FunctionCode.DATA, FunctionCode.DATAFORM, FunctionCode.STRDATA -> "DataStmt"
+        in PRINT_DATA_CODES -> "PrintDataStmt"
+        in JUMP_CODES -> "JumpStmt"
+        in CALL_CODES -> "CallStmt"
+        FunctionCode.CALLF, FunctionCode.TRYCALLF, FunctionCode.CALLFORMF, FunctionCode.TRYCALLFORMF ->
+            "CallFStmt"
+        FunctionCode.CALLSHARP -> "CallSharpStmt"
+        FunctionCode.RETURN -> "ReturnStmt"
+        FunctionCode.RETURNF, FunctionCode.RETURNFORM -> "ReturnFStmt"
+        in FLOW_ONLY_CODES -> "FlowStmt"
+        else -> "InstructionStmt"
+        }
+    }
+
+    private fun describePrint(spec: PrintSpec): String = listOf(
+        spec.argType.name,
+        if (spec.isLineEnd) "LF" else "NO-LF",
+        if (spec.isSingleLine) "SINGLE" else "-",
+        if (spec.isPrintV) "V" else "-",
+        if (spec.isS) "S" else "-",
+        if (spec.isForms) "FORMS" else "-",
+        if (spec.isC) "C" else "-",
+        if (spec.isLC) "LC" else "-",
+        if (spec.isK) "K" else "-",
+        if (spec.isD) "D" else "-",
+        if (spec.isN) "N" else "-",
+        spec.flag.toString(),
+    ).joinToString(":")
 
     // -----------------------------------------------------------------------
     // 标签行 / # 行

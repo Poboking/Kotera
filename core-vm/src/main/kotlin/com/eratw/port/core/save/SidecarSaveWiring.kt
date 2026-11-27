@@ -30,6 +30,8 @@ class SidecarChunkGroups(
 class SidecarRestoreResult(
     val applied: Boolean,
     val csv: ModCsvValueBag = ModCsvValueBag.EMPTY,
+    /** true = 端口已在同一 prepare/commit 内应用 CSV；FileSystemOps 不再二次写入。 */
+    val csvApplied: Boolean = false,
 )
 
 /**
@@ -78,6 +80,11 @@ interface SidecarStoragePort {
      * 生产实现 = 日志面（取证面，非玩家可见文案）。
      */
     fun warn(message: String)
+}
+
+/** 显式跨设备恢复能力；同设备恢复仍只走 [SidecarStoragePort] 的严格冲突路径。 */
+interface CrossDeviceSidecarStoragePort : SidecarStoragePort {
+    fun restoreRt2(bytes: ByteArray, binding: SidecarBinding, crossDevice: Boolean): SidecarRestoreResult
 }
 
 /**
