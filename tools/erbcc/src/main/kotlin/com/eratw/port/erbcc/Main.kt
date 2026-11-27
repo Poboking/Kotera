@@ -75,6 +75,8 @@ private val USAGE_TEXT: String = """erbcc - EraBasic 编译器 (eratw-android)
   erbcc dump-tokens <语料根> [--limit N] [--out <tsv>]  # 词法面夹具：逻辑行 + 逐行 token（P2-1 对拍面）
   erbcc dump-funcodes [--out <tsv>]      # FunctionCode 全枚举 + BY_NAME（语句名→语句码真源）
   erbcc dump-stmt <语料根> [--limit N] [--out <tsv>]  # 语句分派夹具：类名/语句码/参数形态（P2-2a 对拍面）
+  erbcc dump-expr <语料根> [--limit N] [--out <tsv>]  # 表达式层夹具：参数原文→表达式列表（P2-2b/c 对拍面）
+  erbcc dump-args <语料根> [--limit N] [--out <tsv>]  # 参数层夹具 B1：单表达式/常量族的形态与常量身份
   erbcc --help
   erbcc --version
 
@@ -170,6 +172,8 @@ private val COMMANDS: Map<String, (List<String>) -> Int> = mapOf(
     "dump-tokens" to DumpTokens::run,
     "dump-funcodes" to DumpFuncodes::run,
     "dump-stmt" to DumpStmt::run,
+    "dump-expr" to DumpExpr::run,
+    "dump-args" to DumpArgs::run,
 )
 
 fun main(args: Array<String>) {

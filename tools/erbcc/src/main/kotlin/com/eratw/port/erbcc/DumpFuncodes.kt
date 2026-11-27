@@ -73,6 +73,14 @@ internal object DumpFuncodes {
                 .append(if (spec.isCharacterData) 1 else 0).append(' ')
                 .append(if (spec.isConst) 1 else 0).append('\n')
         }
+        // 表达式层（P2-2c）还要一张内建函数返回类型表：`resolveFunction` 的静态类型决定
+        // `FuncCall.operandType`，进而决定二元/一元归约的类型闸与产物里的乘客类型。缺了这张表，
+        // Rust 只能把一切未知函数当 INT，`GETMETH_STR(...) + "x"` 这类会在解析期就被判错。
+        // `canretfloat` 列 = `BuiltinSymbols.canReturnFloat`（4.981 fork 的 `CanReturnFloat`）。
+        for ((key, type) in BuiltinSymbols.functions.entries.sortedBy { it.key }) {
+            sb.append("func ").append(key).append(' ').append(type.name).append(' ')
+                .append(if (BuiltinSymbols.canReturnFloat(key)) 1 else 0).append('\n')
+        }
 
         val f = outPath?.let(::File)
         if (f == null) {

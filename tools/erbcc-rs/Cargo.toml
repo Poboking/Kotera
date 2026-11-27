@@ -40,3 +40,12 @@ path = "src/cmd/tokendump.rs"
 [[bin]]
 name = "stmt-dump"
 path = "src/cmd/stmtdump.rs"
+
+# 表达式层对拍（P2-2b/c 前置面）：与 Kotlin `erbcc dump-expr` 同格式。
+[[bin]]
+name = "expr-dump"
+path = "src/cmd/exprdump.rs"
+# 参数层对拍（P2-2b / B1）：与 Kotlin `erbcc dump-args` 同格式。
+[[bin]]
+name = "arg-dump"
+path = "src/cmd/argdump.rs"

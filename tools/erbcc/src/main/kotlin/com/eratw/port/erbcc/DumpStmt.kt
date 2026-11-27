@@ -111,29 +111,6 @@ internal object DumpStmt {
         else -> Step(0, "不认识的参数: $a")
     }
 
-    /**
-     * 宽松符号器（方案 2）：内建表优先；**未知函数名按 `(...)` 调用形态放行、返回 INT**，
-     * 未知变量折成 1 维 INT。方案 2 的判据是「分派结构一致」，不是「语义可解析」——
-     * 未知名报「未声明」属方案 1（全语料符号预扫）的语义面，不得在本档混用。
-     */
-    private class LooseResolver : StmtResolver {
-        override fun resolveVariable(name: String, subKey: String?): VarInfo =
-            BuiltinSymbols.variable(name)?.let {
-                VarInfo(it.name, it.type, it.dimension, it.isCharacterData, it.isConst)
-            } ?: VarInfo(name, OperandType.INT, 1, false, false)
-
-        override fun resolveFunction(name: String): OperandType =
-            BuiltinSymbols.function(name) ?: OperandType.INT
-
-        override fun canReturnFloat(name: String): Boolean =
-            BuiltinSymbols.function(name) == null && BuiltinSymbols.canReturnFloat(name)
-
-        override fun canBeReferencedBare(name: String): Boolean =
-            BuiltinSymbols.function(name) != null || !BuiltinSymbols.isBuiltinMethod(name)
-
-        override fun isUserMethod(name: String): Boolean = false
-    }
-
     private fun dump(opts: Options): Int {
         val files = opts.dir.walkTopDown()
             .filter { it.isFile && (it.extension.equals("erb", true) || it.extension.equals("erh", true)) }

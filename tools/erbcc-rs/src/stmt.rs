@@ -43,6 +43,8 @@ pub struct FunctionTables {
     by_name: BTreeMap<String, usize>,
     methods: BTreeSet<String>,
     vars: BTreeMap<String, VarRow>,
+    /// 内建函数返回类型表（`func NAME TYPE CANRETFLOAT`），P2-2c 表达式层用。
+    funcs: BTreeMap<String, (String, bool)>,
 }
 
 impl FunctionTables {
@@ -93,6 +95,10 @@ impl FunctionTables {
                     );
                 }
                 "var" => return Err(bad(" 列数 ")),
+                "func" if cols.len() == 4 => {
+                    t.funcs.insert(cols[1].to_string(), (cols[2].to_string(), cols[3] == "1"));
+                }
+                "func" => return Err(bad(" 列数 ")),
                 other => return Err(format!("funcodes 第 {} 行未知段: {}", lineno + 1, other)),
             }
         }
@@ -113,6 +119,21 @@ impl FunctionTables {
 
     pub fn var_of(&self, key: &str) -> Option<&VarRow> {
         self.vars.get(key)
+    }
+
+    /// 内建变量全表（键为大写名）。
+    pub fn var_rows(&self) -> &BTreeMap<String, VarRow> {
+        &self.vars
+    }
+
+    /// 内建函数全表（键为大写名；值 = (返回类型, canReturnFloat)）。
+    pub fn func_rows(&self) -> &BTreeMap<String, (String, bool)> {
+        &self.funcs
+    }
+
+    /// 内建方法名全集。
+    pub fn method_names(&self) -> &BTreeSet<String> {
+        &self.methods
     }
 }
 
