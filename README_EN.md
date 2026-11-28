@@ -11,14 +11,16 @@
 ![Platform](https://img.shields.io/badge/platform-JVM-6a737d?style=flat-square)
 ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)
 
-**A pure-JVM ERA engine, implemented in Kotlin.**
+**An ERA game engine written in Kotlin for the Java Virtual Machine.**
 
-Kotera started from a plain wish: to play EraTW natively on Android instead of
-wrapping an emulator. [eratw-pocket](https://github.com/Poboking/eratw-pocket) is
-the answer to that wish — the first native-Android EraTW client built on this
-engine (upstream: the EraTW fork 画蛇添足版 4.981), and it runs more smoothly than
-the emulator on some low-end devices. The engine itself ships no game data and
-builds and runs standalone on desktop, server, and CI.
+Kotera runs ERB game scripts, manages characters and variables, handles saves, and
+hands rendering to an Android or desktop frontend. Think of it as the game's
+**rules layer**: it determines how scripts behave, not what the interface looks like.
+
+To play EraTW on Android, use
+[eratw-pocket](https://github.com/Poboking/eratw-pocket). To build or port an era
+game and connect your own frontend, start with this repository. Kotera ships no
+game data and builds and tests independently of Android.
 
 </div>
 
@@ -28,9 +30,13 @@ builds and runs standalone on desktop, server, and CI.
 
 - **A semantics layer, not a frontend.** Kotera owns the game rules: ERB
   bytecode execution, the variable and character systems, saves, built-in
-  functions. Rendering is emitted as a display list for frontends to present.
-- **Emuera is the behavioral baseline.** Every conclusion must land in the
-  differential specs under `specs/`, citing the Emuera source (`file:line`).
+  functions. Rendering is emitted as a display list—a drawing plan for text,
+  buttons, and images—for frontends to present.
+- **Emuera is the behavioral baseline.** The engine compares actual behavior by
+  running the same input through both implementations—often called a differential
+  test. For edge cases the documentation does not explain, Emuera source is also
+  consulted and cited by version and `file:line`. See [NOTICE.md](NOTICE.md) for
+  the boundary between source reference and translated adaptation.
 - **Modern ERA runtime capabilities.** Beyond the base VM, the engine includes
   linkable patches / Mods, entities and virtual characters, SQL sessions,
   signed update manifests, sidecar saves with crash recovery, and memory tiers.
@@ -43,6 +49,53 @@ builds and runs standalone on desktop, server, and CI.
 `specs/` is the semantic authority of this project, covering the ISA, built-ins,
 variables, loading, save format, RNG, patch container, and error texts. See
 [specs/README.md](specs/README.md) for how the files fit together.
+
+## Minimal Quickstart
+
+You only need JDK 17+—no Android SDK and no game data. Run these commands from the
+repository root (on Windows, use `.\gradlew.bat` instead of `./gradlew`). If Gradle
+cannot find Java, set `JAVA_HOME` to your JDK 17+ installation directory:
+
+```bash
+git clone https://github.com/Poboking/Kotera.git
+cd Kotera
+
+./gradlew :core-vm:test :render:test
+./gradlew :tools:uipreview:test --tests '*CliSmokeTest'
+```
+
+The first command builds and runs the self-contained engine and renderer tests.
+The second creates a temporary mini ERB script, compiles it, starts the desktop
+preview service, simulates clicks and text input, and exits. It verifies the full
+script → engine → preview path. Real-corpus cases only run when their environment
+variables are set; see "Build & Test" below.
+
+## Performance: Evidence and Gaps
+
+Kotera precompiles bytecode and memory-maps it at load time to reduce startup parsing
+work. That does not establish that it beats an emulator on every device. **There is
+no public same-version, same-scenario comparison of Kotera / eratw-pocket against an
+emulator, so this README no longer claims that it runs more smoothly on low-end
+devices.**
+
+The available device record is an Android AOT-profile experiment, not an emulator
+comparison:
+
+| Item | Experimental condition |
+|---|---|
+| Date / device | 2026-10-27; vivo V2199A; Android 14 / API 34 / arm64-v8a |
+| Comparison | The same 13.1 MB release APK with only AOT state changed—not Emuera or an Android emulator |
+| Scenario | `am start` → title page with clickable options; 3 runs |
+| Result | No device profile: 15.98 s; with 882 device-collected profile entries: 12.74 s |
+| Cold-start `TotalTime` | Median of 5 runs: 336 ms → 293 ms |
+| Limits | Reused 749 MB of already-unpacked device data (`--skipAssets`); SoC, physical RAM, and APK version were not recorded; title-page path only |
+
+See the original [eratw-android T2-63 record](https://github.com/Poboking/eratw-android-port/blob/main/docs/agent/archive-20261128/CONTRACT-T2.md#L520-L535).
+It demonstrates a gain for that build on that device's title-page startup path. It
+does **not** demonstrate a win over an emulator or establish that the device is
+low-end. Future performance claims should publish the device/SoC/RAM, OS and both
+versions, identical game data, cold/warm-start conditions, scenario, sample count,
+and raw frame-time or load-time records.
 
 ## Repository Layout
 
@@ -92,17 +145,18 @@ The CI-equivalent command runs all fifteen modules:
 ```
 
 A few tests depend on a real corpus, real artifacts, real saves, or the Android
-compile surface. They are gated by environment variables; when a variable is
-unset the case is **skipped** via a JUnit assumption, while everything else stays
-self-contained. That is exactly the tier public CI runs.
+compile surface. Environment variables decide whether they run. When a variable is
+unset, some cases are **skipped** via a JUnit assumption and some dynamic cases are
+not generated at all; everything else stays self-contained. That is exactly the tier
+public CI runs, so a green test suite does not mean every real-corpus path is covered.
 
 CI also checks out the sibling repo
-[eratw-pocket](https://github.com/Poboking/eratw-pocket) (reading its `main`):
-the pack-side gates in `tools/modgen` read the shell's real sources, and the
-shell's packaged assets must match the engine's declaration truth byte for byte
-— both cross-repo guards only actually run under that cross-check. The
-cross-repo contract (which repo owns which source guard, the merge order, what
-a frozen fixture compares, and which corpus root is authoritative) lives in
+[eratw-pocket](https://github.com/Poboking/eratw-pocket) alongside this one (reading
+its `main`): the packaging checks in `tools/modgen` read the shell's actual sources,
+and the shell's packaged assets must match the engine's declarations byte for byte.
+Both cross-repo checks run only as part of this integration check. The cross-repo
+contract (which repo owns each source check, the merge order, what a frozen fixture
+compares, and which corpus root is authoritative) lives in
 [specs/cross-repo-contract.md](specs/cross-repo-contract.md).
 
 | Environment variable / property | Purpose |
@@ -157,20 +211,32 @@ a phone.
 
 ## Architecture & Design Decisions
 
-**Spec-first differential development.** The specs under `specs/` were written
-before the implementation, each conclusion backed by `file:line` citations from
-the decompiled Emuera sources. Differential reading catches what documentation
-alone cannot — for instance, the engine's default RNG is not `System.Random` but
-a hand-rolled SFMT19937 (period 2^19937−1), reproduced as-is. One simple rule
-governs the project: when the specs and the implementation disagree, the specs
-win; and if the implementation proves a spec wrong, fix the spec first and the
-implementation second — never the other way around.
+**Behavioral differential testing + source-assisted archaeology.** A differential
+test runs the same script or input through both implementations and compares
+output, variables, saves, errors, and event traces; it answers “does the behavior
+match?” Consulting Emuera source answers “why does it match, and where did this
+edge case come from?” The two are complementary. Some Kotera algorithms, data
+structures, and control flows are line-by-line or sentence-by-sentence translations
+and adaptations, with their provenance recorded in source comments. The project
+does not claim clean-room isolation. References include 1824+v24, the EM+EE lineage,
+and the 4.981 Skia fork; they are not all “stock 1.824.”
+
+**Spec-first differential development.** Specs under `specs/` are written before
+implementation. Behavioral conclusions are grounded in differential evidence and,
+where applicable, cite the referenced Emuera version and `file:line`. Differential
+testing catches details that documentation alone misses—for instance, the default
+RNG is not `System.Random` but a hand-rolled SFMT19937 (period 2^19937−1), reproduced
+as-is. One simple rule governs the project: when the specs and the implementation
+disagree, the specs win; and if the implementation proves a spec wrong, fix the spec
+first and the implementation second—never the other way around.
 
 **AOT bytecode + mmap zero-parse loading.** ERB/ERH sources are compiled at
 build time by erbcc into `.erbc` containers (little-endian, i64 values, string
 interning, fixed 4×u32 instructions, section table). At runtime they are
-memory-mapped and executed with no parsing at all — the direct source of fast
-cold loads on Android. The loading layer also has a `FlatPoolBudget` heap
+memory-mapped and executed with no parsing at all. This is intended to reduce
+cold-start parsing work on Android; actual gains depend on the device, game, and
+frontend and should be established by controlled measurement. The loading layer
+also has a `FlatPoolBudget` heap
 preflight, an instruction-page cache, and fused hot-path instructions, each with
 dedicated tests and negative controls in `core-vm`.
 
@@ -205,6 +271,51 @@ run. It never touches a line of engine code: internal layout refactors leave
 the metric untouched, while semantic changes land faithfully in the chain
 values.
 
+## Compatibility Matrix & Game Validation
+
+As of 2026-11-28. This is a capability map, not a compatibility percentage:
+**Implemented** means a production path and self-contained tests exist; **Partial**
+means the core capability exists but has a known gap or depends on a front end;
+**Unimplemented** means no usable production path was found. Real corpora, real saves,
+and device runs are a separate layer of evidence that unit tests cannot replace.
+
+| Emuera capability | Status | Current scope and known gaps | Evidence |
+|---|---|---|---|
+| ERB/ERH compilation and loading | Implemented | AOT `.erbc`, ordinary reads, and mmap have consistency tests; real corpora require separate setup | [Compile tests](core-vm/src/test/kotlin/com/eratw/port/core/compile/GoldenCompileTest.kt), [mmap tests](core-vm/src/test/kotlin/com/eratw/port/core/loader/MmapLoaderTest.kt) |
+| Expressions, control flow, user functions, and ISA | Implemented (audit ongoing) | Main paths are in place; the semantic audit is unfinished and a few fork additions remain unregistered | [ISA](specs/isa.yaml), [Built-ins](specs/builtin-functions.yaml), [Verification notes](specs/verify-notes.md) |
+| Variables, characters, and CSV | Implemented | Multidimensional variables, defaults, arrays, character templates, and name tables have production code and fixtures | [Variable tests](core-vm/src/test/kotlin/com/eratw/port/core/vars/VariablePoolTest.kt), [Character CSV tests](core-vm/src/test/kotlin/com/eratw/port/core/data/csv/CharaCsvLoaderTest.kt) |
+| Saves | Partial | Format, upgrades, and synthetic-save round trips are implemented; byte-exact round trips of real 4.980 saves are recorded. Real 4.981 save writing and PC read-back remain unverified | [Save format](specs/save-format.md), [Upgrade tests](core-vm/src/test/kotlin/com/eratw/port/core/save/SaveUpgradeSemanticsTest.kt), [Real-save probe](core-vm/src/test/kotlin/com/eratw/port/core/save/RealSaveSamplesProbeTest.kt) |
+| Random numbers | Partial | Default SFMT19937 has PC golden vectors; the .NET 8 `xoshiro256**` path used by `UseNewRandom=true` is not implemented | [RNG spec](specs/rng.md), [SFMT tests](core-vm/src/test/kotlin/com/eratw/port/core/rand/Sfmt19937Test.kt) |
+| Images and sprites | Partial | PNG decoding and the graphics model are implemented; the pure-JVM WebP decoder handles only part of the lossless corpus, lossy WebP is explicitly unsupported, and JPEG/GIF decoding is left to hosts | [PNG tests](core-vm/src/test/kotlin/com/eratw/port/core/image/PngDecoderTest.kt), [WebP gaps](core-vm/src/main/kotlin/com/eratw/port/core/image/WebpDecoder.kt) |
+| Audio | Partial | Channel, looping, volume, and query models are tested; the default is a no-op and real decoding/playback must be injected by the host | [Audio adapters](core-vm/src/main/kotlin/com/eratw/port/core/audio/AudioAdapters.kt), [Audio tests](core-vm/src/test/kotlin/com/eratw/port/core/audio/AudioAdaptersTest.kt) |
+| Video | Unimplemented | No video-playback implementation was found in the spec catalog or production code | [ISA catalog](specs/isa.yaml), [Built-in catalog](specs/builtin-functions.yaml) |
+| UI, input, and native hosts | Partial (front-end owned) | Text grids, button hit regions, WAIT/INPUT, and input queues are implemented; Kotera does not reproduce Emuera's Windows/Skia window itself and leaves presentation to front ends | [Input-session tests](render/src/test/kotlin/com/eratw/port/render/input/InputSessionTest.kt), [Input-statement tests](core-vm/src/test/kotlin/com/eratw/port/core/sem/InputStatementsTest.kt) |
+| SQL | Partial | Core ports, fake-based tests, and real-SQLite JVM tests exist; Android API 21 device execution is not established | [SQL method tests](core-vm/src/test/kotlin/com/eratw/port/core/sql/SqlMethodsTest.kt), [Real-driver tests](sqlite-adapter/src/test/kotlin/com/eratw/port/sqlite/AndroidXSqliteDriverTest.kt) |
+| Networking and UPDATECHECK | Partial (host owned) | URL ordering, permissions, result codes, and prompt text are tested; real HTTP requests belong to the app host | [Update-check tests](core-vm/src/test/kotlin/com/eratw/port/core/update/UpdateCheckStatementTest.kt), [Telemetry boundary](core-vm/src/main/kotlin/com/eratw/port/core/update/UpdateTelemetry.kt) |
+| Linkable patches | Implemented | On-disk loading, rejection of corrupt patches, and rollback have mini end-to-end tests | [Patch-loader tests](core-vm/src/test/kotlin/com/eratw/port/core/loader/ModPatchLoaderTest.kt), [Patch format](specs/patch-format.yaml) |
+| RT2 Mod runtime (Kotera extension, not part of the Emuera baseline) | Partial | Containers, API, lifecycle, and failure isolation are tested; the production scheduler and full device path still require host wiring | [Mod host](core-vm/src/main/kotlin/com/eratw/port/core/mod/ModRuntimeHost.kt) |
+
+### Which era Games Have Actually Been Validated?
+
+Evidence strength is stated explicitly below. **Finding a defect while running a real corpus
+is not the same as declaring the game fully compatible.**
+
+| Game / version | Existing evidence | Current conclusion |
+|---|---|---|
+| eraTW 4.980 | Real-corpus, L3 golden-chain, and byte-exact real 4.980 save round-trip records exist; the public repo does not carry those external inputs by default | Historical regression baseline, not coverage of every gameplay path |
+| eraTW 4.981 (current fork target; 261111 corpus) | Real corpus and selected E2E/L3 golden records; the Android project also has device-run records | Primary development target; real 4.981 save writing and PC read-back remain open |
+| eratohoReverse (version not recorded) | Real compilation exposed a line-head pre-recognition defect; device runs later exposed sparse ARG bounds and a `COSPLAY` call-stack overflow, all now covered by synthetic regressions | Real-corpus/device defect validation; **no documented complete playthrough** |
+| eratohoYMAEM (version not recorded) | `#LOCALSIZE 3000000` in the real corpus once crashed compilation; a large-size synthetic regression now exists | Real-corpus defect validation; **no documented complete playthrough** |
+| eraFL (version not recorded) | Real configuration/corpus exposed `#DIM` dimension and VARI/VARS visibility defects; synthetic regressions now exist | Real-corpus defect validation; **no documented complete playthrough** |
+
+See the [line-head pre-recognition tests](tools/erbcc/src/test/kotlin/com/eratw/port/erbcc/EngineProfileMiniCorpusTest.kt),
+[sparse ARG tests](core-vm/src/test/kotlin/com/eratw/port/core/proc/SparseArgLengthTest.kt),
+[keyword-precedence tests](core-vm/src/test/kotlin/com/eratw/port/core/expr/IndexKeywordBeatsBareFuncTest.kt),
+[LOCALSIZE tests](tools/erbcc/src/test/kotlin/com/eratw/port/erbcc/compile/LocalSizeWideRangeTest.kt), and
+[VARI/VARS tests](tools/erbcc/src/test/kotlin/com/eratw/port/erbcc/compile/VariWholeFunctionTest.kt).
+**As of this document's date, no era game other than EraTW has a confirmed record of
+booting and completing its main flow.**
+
 ## Corpus & Copyright
 
 This repository distributes **no** era game data (scripts, images, audio, saves,
@@ -220,9 +331,12 @@ Emuera.
 Development is ongoing and the differential audit against Emuera is not yet
 complete; known issues live in the issue tracker. Issues and PRs of all kinds are
 welcome. Semantic changes carry one prerequisite: write down the evidence in
-`specs/` first (with `file:line` citations), then touch the implementation. If
-you merely suspect a behavior difference and are not sure, just open an issue —
-no need to draft a spec first.
+`specs/` first. Behavioral conclusions should include reproducible differential
+inputs and results; source-based explanations should also cite the Emuera version
+and `file:line`. If you merely suspect a behavior difference and are not sure, just
+open an issue—no need to draft a spec first. Translations or adaptations of upstream
+code must also identify their source in the code and [NOTICE.md](NOTICE.md); MIT does
+not override upstream terms.
 
 ## Acknowledgments
 
@@ -241,5 +355,8 @@ files that accompany it.
 
 ## License
 
-[MIT](LICENSE). Bundled fonts carry their own open-source licenses — see the
-font table in [NOTICE.md](NOTICE.md).
+Original Kotera contributions that their rightsholders are entitled to license are
+released under [MIT](LICENSE). MIT does not relicense Emuera source, translations,
+extracted tables, or related fork materials, and does not replace their upstream
+terms. See [NOTICE.md](NOTICE.md) for reference methods, modification notes, and the
+complete Emuera license text. Bundled fonts carry their own open-source licenses.

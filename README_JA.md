@@ -11,14 +11,17 @@
 ![Platform](https://img.shields.io/badge/platform-JVM-6a737d?style=flat-square)
 ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)
 
-**Kotlin で実装した、純 JVM の ERA エンジン。**
+**Kotlin で実装した、Java 仮想マシンで動く ERA ゲームエンジン。**
 
-Kotera は、ごくありふれた願いから始まりました：エミュレータを介さず、Android で
-EraTW をネイティブに遊びたい。[eratw-pocket](https://github.com/Poboking/eratw-pocket)
-はその答えで、本エンジンを使って作った最初の Android ネイティブ版 EraTW
-（上流：画蛇添足版 4.981）です。一部のローエンド端末ではエミュレータより快適に
-動きます。エンジン自体はゲームデータを一切含まず、デスクトップ・サーバー・CI の
-いずれでも独立してビルド・実行できます。
+Kotera は ERB ゲームスクリプトを実行し、キャラクターと変数を管理し、セーブを
+扱い、描画は Android またはデスクトップのフロントエンドに任せます。ゲームの
+「ルール層」と考えると分かりやすく、画面の見た目をつくる部分ではありません。
+
+Android で EraTW を遊びたいだけなら
+[eratw-pocket](https://github.com/Poboking/eratw-pocket) を使ってください。era
+ゲームを作ったり移植したりして、独自のフロントエンドを接続したい場合はこの
+リポジトリから始められます。Kotera はゲームデータを一切含まず、Android 環境が
+なくても独立してビルドとテストができます。
 
 </div>
 
@@ -28,11 +31,12 @@ EraTW をネイティブに遊びたい。[eratw-pocket](https://github.com/Pobo
 
 - **セマンティクス層であり、フロントエンドではありません。** Kotera が持つのは
   ゲームのルールそのもの：ERB バイトコード実行、変数・キャラクターシステム、
-  セーブ、組み込み関数です。描画はディスプレイリストとして出力し、見た目は各
-  フロントエンドに任せます。
-- **互換性の基準は Emuera。** エンジンの挙動の基準は Emuera の実際の動作で、
-  すべての結論は `specs/` の差分検証仕様として文章化し、Emuera ソースの
-  `ファイル:行号` を添える必要があります。
+  セーブ、組み込み関数です。描画はディスプレイリスト（文字・ボタン・画像を描く
+  手順書）として出力し、見た目は各フロントエンドに任せます。
+- **互換性の基準は Emuera。** 同じ入力を Emuera と Kotera の両方で実行し、結果を
+  比べる「差分検証」を基準にしています。文書だけでは説明できない境界動作については
+  Emuera のソースも調べ、版と `ファイル:行番号` を根拠として記録します。ソース参照と
+  翻訳・適応の境界は [NOTICE.md](NOTICE.md) を参照してください。
 - **現代的な ERA ランタイム機能。** 基本 VM に加え、リンク可能なパッチ / Mod、
   エンティティと仮想キャラクター、SQL セッション、更新マニフェスト署名、
   サイドカーセーブとクラッシュ復旧、メモリ階層などを備えます。
@@ -43,6 +47,53 @@ EraTW をネイティブに遊びたい。[eratw-pocket](https://github.com/Pobo
 `specs/` は本プロジェクトの意味論的な権威で、ISA・組み込み関数・変数・ロード・
 セーブ形式・RNG・パッチコンテナ・エラーメッセージを扱います。各ファイルの関係は
 [specs/README.md](specs/README.md) を参照してください。
+
+## 最小クイックスタート
+
+必要なのは JDK 17 以上だけです。Android SDK もゲームデータも不要です。コマンドは
+リポジトリのルートで実行します（Windows では `./gradlew` を `.\gradlew.bat` に
+置き換えてください）。Gradle が Java を見つけられない場合は、`JAVA_HOME` を
+JDK 17 以上のインストール先に設定してください：
+
+```bash
+git clone https://github.com/Poboking/Kotera.git
+cd Kotera
+
+./gradlew :core-vm:test :render:test
+./gradlew :tools:uipreview:test --tests '*CliSmokeTest'
+```
+
+最初のコマンドはエンジンと描画層の自己完結テストをビルドして実行します。2 番目は
+一時的な mini ERB スクリプトを作ってコンパイルし、デスクトッププレビューサービスを
+起動してクリックと文字入力を模擬し、最後に終了します。「スクリプト → エンジン →
+プレビュー」の経路が動くことを確認するための例です。実ゲームのコーパスに依存する
+用例は環境変数を設定した場合だけ実行されます。詳細は下の「ビルドとテスト」を
+参照してください。
+
+## 性能：根拠と不足点
+
+Kotera はバイトコードを事前コンパイルし、ロード時にメモリマップして起動時の解析作業を
+減らす設計です。それがすべての端末でエミュレータより速いことを意味するわけではありません。
+**現時点では「Kotera / eratw-pocket 対エミュレータ」の同一版・同一シナリオ比較は
+公開されておらず、この README は「一部のローエンド端末ではより快適」という主張を
+取り下げます。**
+
+利用できる実機記録は Android の AOT profile 実験であり、エミュレータ比較ではありません。
+
+| 項目 | 実験条件 |
+|---|---|
+| 日付 / 端末 | 2026-10-27；vivo V2199A；Android 14 / API 34 / arm64-v8a |
+| 比較対象 | 同じ 13.1 MB の release APK で AOT 状態だけを変更。Emuera や Android エミュレータではない |
+| シナリオ | `am start` → タイトルページに選択可能な項目が表示されるまで；3 回 |
+| 結果 | 実機 profile なし：15.98 s；実機で収集した 882 条の profile あり：12.74 s |
+| 冷起動の `TotalTime` | 5 回の中央値：336 ms → 293 ms |
+| 制限 | 端末上で展開済みの 749 MB のデータを再利用（`--skipAssets`）；SoC、物理 RAM、APK 版は未記録；タイトルページ経路のみ |
+
+原記録は [eratw-android T2-63](https://github.com/Poboking/eratw-android-port/blob/main/docs/agent/archive-20261128/CONTRACT-T2.md#L520-L535) を参照してください。
+これはそのビルドがその端末のタイトルページ起動経路で改善したことを示しますが、
+**エミュレータに勝った証拠にはならず、その端末をローエンドと断定することもできません。**
+今後の性能主張には、端末/SoC/RAM、OS と両者の版、同じゲームデータ、冷/温起動の条件、
+シナリオ、サンプル数、フレーム時間またはロード時間の原記録を掲載してください。
 
 ## リポジトリ構成
 
@@ -91,17 +142,19 @@ CI と同等のコマンド（15 モジュールをまとめて実行）：
   :tools:vmdbg:test :tools:uipreview:test
 ```
 
-一部のテストは実コーパス・実産物・実セーブ・Android コンパイル面に依存し、
-環境変数でゲートされています。変数が未設定の場合は JUnit assumption により
-**スキップ**され、それ以外は自己完結しています。公開 CI が回すのはこの範囲です。
+一部のテストは実コーパス・実産物・実セーブ・Android コンパイル面に依存し、実行するか
+どうかを環境変数が決めます。変数が未設定の場合は JUnit assumption により
+**スキップ**される用例もあれば、動的用例として生成されないものもあります。それ以外は
+自己完結しています。公開 CI が回すのはこの範囲であり、「テストが全緑」=「実コーパスの
+経路をすべて検証済み」ではありません。
 
-CI は姉妹倉 [eratw-pocket](https://github.com/Poboking/eratw-pocket) も同级に
-チェックアウトします（相手の `main` を読む）：`tools/modgen` の pack 側ゲートは
-壳層の真源を読み、壳層の随包資産はエンジンの宣言真源とバイト単位で一致している
-必要があります — この 2 つの跨倉ガードはこの相互検査作用下でこそ本当に走ります。
-跨倉契約（どの倉がどの源码ゲートを持つか、merge の順序、凍結夾具は何と比べるか、
-権威ある語料根はどれか）は [specs/cross-repo-contract.md](specs/cross-repo-contract.md)
-にあります。
+CI は姉妹リポジトリ [eratw-pocket](https://github.com/Poboking/eratw-pocket) も
+同じ階層にチェックアウトします（相手の `main` を読みます）。`tools/modgen` の
+パッケージング検査はシェルの実ソースを読み、シェルの同梱アセットはエンジンの宣言と
+バイト単位で一致している必要があります。この 2 つの倉をまたぐ検査は、相互検査が
+有効な場合にだけ実行されます。どのリポジトリがどのソース検査を担当するか、マージ順、
+固定フィクスチャの比較対象、権威ある語料根は
+[specs/cross-repo-contract.md](specs/cross-repo-contract.md) にあります。
 
 | 環境変数 / プロパティ | 役割 |
 |---|---|
@@ -154,8 +207,17 @@ eratw-pocket がゲームの意味論を一切知らないのは、意図的な�
 
 ## アーキテクチャと設計判断
 
-**仕様先行の差分検証開発。** `specs/` の仕様はいずれも実装に先立って執筆され、
-全結論に Emuera 逆コンパイルソースの `ファイル:行号` を根拠として付けます。
+**挙動の差分検証 + ソースによる考古調査。** 差分検証とは、同じスクリプトや入力を
+二つの実装で実行し、出力・変数・セーブ・エラー・イベント軌跡を比べることです。
+「挙動が一致するか」に答え、Emuera のソース調査は「なぜ一致するか、境界条件が
+どこから来たか」に答えるため、両者は矛盾しません。Kotera の一部のアルゴリズム、
+データ構造、制御フローは行単位または文単位で翻訳・適応されており、出所はソース
+コメントに記録しています。クリーンルーム方式を採用したとは主張しません。参照版は
+1824+v24、EM+EE 系譜、4.981 Skia fork であり、すべてを「原版 1.824」と呼ぶことは
+できません。
+
+**仕様先行の差分検証開発。** `specs/` の仕様は実装に先立って執筆され、挙動の結論は
+差分検証の根拠に基づき、可能な限り参照した Emuera の版と `ファイル:行番号` を添えます。
 ドキュメントだけでは見落とす細部を差分検証で拾えます。たとえばデフォルトの RNG は
 `System.Random` ではなく自前実装の SFMT19937（周期 2^19937−1）であり、これを
 そのまま再現しています。プロジェクト内のルールは単純です：仕様と実装が食い違ったら
@@ -165,8 +227,9 @@ eratw-pocket がゲームの意味論を一切知らないのは、意図的な�
 **AOT バイトコード + mmap ゼロ解析ロード。** ERB/ERH はビルド時に erbcc が
 `.erbc` コンテナ（リトルエンディアン、i64 値、文字列インターニング、命令固定長
 4×u32、セクションテーブル）へコンパイルし、実行時は mmap で直接参照して解析なしで
-実行します。Android での高速ロードの直接の源です。ロード層には
-`FlatPoolBudget` によるヒープ予算の事前検査、命令ページキャッシュ、ホットパスの
+実行します。これは Android の冷起動時に解析作業を減らすための設計であり、実際の
+効果は端末・ゲーム・フロントエンドに依存するため、対照測定で確かめる必要があります。
+ロード層には `FlatPoolBudget` によるヒープ予算の事前検査、命令ページキャッシュ、ホットパスの
 融合命令もあり、それぞれ `core-vm` 内に専用テストと反証があります。
 
 **リンク可能なパッチと Mod。** パッチコンテナは完全で正当な `.erbc` を内包し、
@@ -197,6 +260,50 @@ eratw-pocket がゲームの意味論を一切知らないのは、意図的な�
 バイト単位で比較します。エンジンコードには一切手を入れません：内部レイアウトの
 リファクタは指標に影響せず、意味論の変化はチェーン値にそのまま反映されます。
 
+## 互換性マトリクスとゲーム検証
+
+2026-11-28 時点。これは能力の地図であり、互換率のパーセントではありません。
+**実装済み**は本番経路と自己完結テストがあること、**部分**は中核能力はあるが明確な
+不足またはフロントエンド依存があること、**未実装**は利用できる本番経路が見つからない
+ことを意味します。実コーパス・実セーブ・実機実行は別の証拠層であり、単体テストでは
+代替できません。
+
+| Emuera の能力 | 状態 | 現在の範囲と既知の不足 | 根拠 |
+|---|---|---|---|
+| ERB/ERH のコンパイルとロード | 実装済み | AOT `.erbc`、通常読み込み、mmap の一致性テストがある。実コーパスは別途設定が必要 | [コンパイルテスト](core-vm/src/test/kotlin/com/eratw/port/core/compile/GoldenCompileTest.kt)、[mmap テスト](core-vm/src/test/kotlin/com/eratw/port/core/loader/MmapLoaderTest.kt) |
+| 式・制御フロー・ユーザー関数・ISA | 実装済み（監査中） | 主経路は実装済み。意味論の差分監査は未完で、一部の fork 追加も未登録 | [ISA](specs/isa.yaml)、[組み込み関数](specs/builtin-functions.yaml)、[検証記録](specs/verify-notes.md) |
+| 変数・キャラクター・CSV | 実装済み | 多次元変数、既定値、配列、キャラクターテンプレート、名前表に本番実装とフィクスチャがある | [変数テスト](core-vm/src/test/kotlin/com/eratw/port/core/vars/VariablePoolTest.kt)、[キャラクター CSV テスト](core-vm/src/test/kotlin/com/eratw/port/core/data/csv/CharaCsvLoaderTest.kt) |
+| セーブ | 部分 | 形式、昇格、合成セーブの往復は実装済み。実 4.980 セーブのバイト単位往復記録もある。実 4.981 セーブの書き出しと PC 読み戻しは未検証 | [セーブ形式](specs/save-format.md)、[昇格テスト](core-vm/src/test/kotlin/com/eratw/port/core/save/SaveUpgradeSemanticsTest.kt)、[実セーブ探針](core-vm/src/test/kotlin/com/eratw/port/core/save/RealSaveSamplesProbeTest.kt) |
+| 乱数 | 部分 | 既定の SFMT19937 は PC ゴールデンベクトルあり。`UseNewRandom=true` で使う .NET 8 の `xoshiro256**` 経路は未実装 | [RNG 仕様](specs/rng.md)、[SFMT テスト](core-vm/src/test/kotlin/com/eratw/port/core/rand/Sfmt19937Test.kt) |
+| 画像とスプライト | 部分 | PNG デコードとグラフィックスモデルは実装済み。純 JVM WebP は無損コーパスの一部だけ、有損 WebP は非対応、JPEG/GIF 等はホスト側デコード | [PNG テスト](core-vm/src/test/kotlin/com/eratw/port/core/image/PngDecoderTest.kt)、[WebP の不足](core-vm/src/main/kotlin/com/eratw/port/core/image/WebpDecoder.kt) |
+| 音声 | 部分 | チャンネル、ループ、音量、照会モデルのテストはある。既定は空実装で、実デコードと再生はホストが注入する必要がある | [音声アダプタ](core-vm/src/main/kotlin/com/eratw/port/core/audio/AudioAdapters.kt)、[音声テスト](core-vm/src/test/kotlin/com/eratw/port/core/audio/AudioAdaptersTest.kt) |
+| 動画 | 未実装 | 仕様目録と本番コードの双方に動画再生の実装は見つからない | [ISA 目録](specs/isa.yaml)、[組み込み関数目録](specs/builtin-functions.yaml) |
+| UI・入力・ネイティブホスト | 部分（フロントエンド担当） | テキストグリッド、ボタン当たり判定、WAIT/INPUT、入力キューは実装済み。Emuera の Windows/Skia ウィンドウ自体は複製せず、描画はフロントエンドに任せる | [入力セッションテスト](render/src/test/kotlin/com/eratw/port/render/input/InputSessionTest.kt)、[入力文テスト](core-vm/src/test/kotlin/com/eratw/port/core/sem/InputStatementsTest.kt) |
+| SQL | 部分 | core ポート、fake テスト、実 SQLite の JVM テストがある。Android API 21 の実機実行は未証明 | [SQL メソッドテスト](core-vm/src/test/kotlin/com/eratw/port/core/sql/SqlMethodsTest.kt)、[実ドライバテスト](sqlite-adapter/src/test/kotlin/com/eratw/port/sqlite/AndroidXSqliteDriverTest.kt) |
+| ネットワークと UPDATECHECK | 部分（ホスト担当） | URL の判定順、権限、結果コード、文言はテスト済み。実 HTTP 要求は app ホストが担う | [更新確認テスト](core-vm/src/test/kotlin/com/eratw/port/core/update/UpdateCheckStatementTest.kt)、[テレメトリ境界](core-vm/src/main/kotlin/com/eratw/port/core/update/UpdateTelemetry.kt) |
+| リンク可能なパッチ | 実装済み | ディスク上のバイト読み込み、破損パッチの拒否、ロールバックに mini E2E テストがある | [パッチロードテスト](core-vm/src/test/kotlin/com/eratw/port/core/loader/ModPatchLoaderTest.kt)、[パッチ形式](specs/patch-format.yaml) |
+| RT2 Mod ランタイム（Kotera 拡張、Emuera 基準外） | 部分 | コンテナ、API、ライフサイクル、失敗隔離はテスト済み。本番スケジューラと実機の全経路はホストとの接続が必要 | [Mod ホスト](core-vm/src/main/kotlin/com/eratw/port/core/mod/ModRuntimeHost.kt) |
+
+### 実際に検証した era ゲーム
+
+証拠の強さを分けて記載します。**実コーパスを実行して不具合を見つけたことと、
+ゲーム全体の互換性を確認したことは同義ではありません。**
+
+| ゲーム / 版 | ある証拠 | 現在の結論 |
+|---|---|---|
+| eraTW 4.980 | 実コーパス、L3 ゴールデンチェーン、実 4.980 セーブのバイト単位往復の記録あり。公開倉はこれらの外部入力を既定で同梱しない | 過去の回帰基準であり、全プレイ経路の網羅を意味しない |
+| eraTW 4.981（現在の fork 目標、261111 コーパス） | 実コーパスと選抜した E2E/L3 ゴールデン記録。Android プロジェクトには実機実行記録もある | 主な開発対象。実 4.981 セーブの書き出しと PC 読み戻しは未解決 |
+| eratohoReverse（版は未記録） | 実コンパイルで行頭事前識別の不具合を発見。実機では疎な ARG の範囲外と `COSPLAY` の呼び出しスタック超過も発見し、合成回帰あり | 実コーパス・実機の不具合検証は実施。**完全プレイの成功記録はない** |
+| eratohoYMAEM（版は未記録） | 実コーパスの `#LOCALSIZE 3000000` がコンパイルを落とした事例があり、大サイズの合成回帰あり | 実コーパスの不具合検証は実施。**完全プレイの成功記録はない** |
+| eraFL（版は未記録） | 実設定・コーパスで `#DIM` の次元と VARI/VARS の可視性の不具合を発見し、合成回帰あり | 実コーパスの不具合検証は実施。**完全プレイの成功記録はない** |
+
+他のゲームの根拠は [行頭事前識別テスト](tools/erbcc/src/test/kotlin/com/eratw/port/erbcc/EngineProfileMiniCorpusTest.kt)、
+[疎な ARG テスト](core-vm/src/test/kotlin/com/eratw/port/core/proc/SparseArgLengthTest.kt)、
+[キーワード優先順テスト](core-vm/src/test/kotlin/com/eratw/port/core/expr/IndexKeywordBeatsBareFuncTest.kt)、
+[LOCALSIZE テスト](tools/erbcc/src/test/kotlin/com/eratw/port/erbcc/compile/LocalSizeWideRangeTest.kt)、
+[VARI/VARS テスト](tools/erbcc/src/test/kotlin/com/eratw/port/erbcc/compile/VariWholeFunctionTest.kt) を参照してください。
+**本文の日付時点で、EraTW 以外に起動から主要経路の完走まで確認された era ゲームはありません。**
+
 ## コーパスと著作権
 
 本リポジトリは era ゲームのデータ（スクリプト・画像・音声・セーブ・設定）を一切
@@ -210,9 +317,11 @@ Emuera に関する帰属表示と改変の明示は [NOTICE.md](NOTICE.md) を�
 
 開発は進行中で、Emuera との差分検証は未完了です。既知の問題は issue トラッカーに
 あります。issue と PR はどちらも歓迎します。意味論に関する変更には一つだけ前提が
-あります：先に `specs/` に根拠（`ファイル:行号` 付き）を書き、それから実装に手を
-入れること。挙動の差分を疑っているだけで確信が持てないなら、仕様を書く前に
-issue を立てて相談するだけで十分です。
+あります：先に `specs/` に根拠を書くことです。挙動の結論には再現可能な差分検証の
+入力と結果を付け、ソースに基づく説明には参照した Emuera の版と
+`ファイル:行番号` も添えてください。挙動の差分を疑っているだけで確信が持てないなら、
+仕様を書く前に issue を立てて相談するだけで十分です。上流コードの翻訳・適応は、
+ソースと [NOTICE.md](NOTICE.md) に出所を明記し、MIT で上流の条件を上書きしないでください。
 
 ## 謝辞
 
@@ -230,5 +339,8 @@ issue を立てて相談するだけで十分です。
 
 ## ライセンス
 
-[MIT](LICENSE)。同梱フォントはそれぞれオープンソースライセンスに従います。
-フォント一覧は [NOTICE.md](NOTICE.md) をご覧ください。
+Kotera の原创で、権利者がライセンス付与できる貢献は [MIT](LICENSE) で公開しています。
+この許可は Emuera のソース、翻訳、抽出表、関連 fork の材料を MIT に再ライセンスする
+ものではなく、上流の条件にも代わりません。参照方法、改変説明、Emuera の完全な
+ライセンス原文は [NOTICE.md](NOTICE.md) を参照してください。同梱フォントにはそれぞれ
+別のオープンソースライセンスがあります。
